@@ -77,7 +77,8 @@ class GPTransformer(nn.Module):
         self.n_embed = self.hf_model.config.hidden_size
 
         # create MLP block
-        self.mlp_layers = nn.ModuleList([MLP(self.n_embed, self.dropout) for _ in range(self.n_mlp)])
+        if n_mlp > 0:
+            self.mlp_layers = nn.ModuleList([MLP(self.n_embed, self.dropout) for _ in range(self.n_mlp)])
 
         # create output layer
         self.out = nn.Linear(self.n_embed, self.n_out)
@@ -89,8 +90,9 @@ class GPTransformer(nn.Module):
         x = self.hf_model(input_ids=input_ids, attention_mask=attention_mask)[1][:, 0, :] # only taken first hidden state output ([CLS token])
 
         # pass through MLP blocks
-        for mlp in self.mlp_layers:
-            x = x + mlp(x)
+        if self.n_mlp > 0:
+            for mlp in self.mlp_layers:
+                x = x + mlp(x)
 
         # pass through output layer
         x = self.out(x)
