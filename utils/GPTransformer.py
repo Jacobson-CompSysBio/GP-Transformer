@@ -3,7 +3,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+from transformers import (
+    AutoModel, 
+    AutoModelForSequenceClassification, 
+    AutoModelForMaskedLM, 
+    AutoTokenizer
+    )
+from transformers.models.bert.configuration_bert import BertConfig
 
 class MLP(nn.Module):
     """
@@ -62,10 +68,13 @@ class GPTransformer(nn.Module):
         self.model_type = model_type
 
         # init hf model
-        self.hf_model = AutoModelForMaskedLM.from_pretrained(f'{model_path}', trust_remote_code=True)
+        config = BertConfig.from_pretrained(f"{model_path}")
+        self.hf_model = AutoModelForSequenceClassification.from_pretrained(f'{model_path}', 
+                                                                           trust_remote_code=True,
+                                                                           config=config)
 
         # get embedding size from model
-        self.n_embed = self.model.config.hidden_size
+        self.n_embed = self.hf_model.config.hidden_size
 
         # create MLP block
         self.mlp_layers = nn.ModuleList([MLP(self.n_embed, self.dropout) for _ in range(self.n_mlp)])
@@ -76,7 +85,8 @@ class GPTransformer(nn.Module):
     def forward(self, input_ids, attention_mask):
 
         # pass through pre-trained BERT model
-        x = self.hf_model(input_ids=input_ids, attention_mask=attention_mask)[1] # only take the pooled output
+        # THIS LINE IS MODEL-DEPENDENT - NEEDS TO BE CHANGED FOR OTHER MODELS
+        x = self.hf_model(input_ids=input_ids, attention_mask=attention_mask)[1][:, 0, :] # only taken first hidden state output ([CLS token])
 
         # pass through MLP blocks
         for mlp in self.mlp_layers:
