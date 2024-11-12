@@ -11,6 +11,9 @@ from transformers import (
     )
 from transformers.models.bert.configuration_bert import BertConfig
 
+# ----------------------------------------------------------------
+# build the model
+
 class MLP(nn.Module):
     """
     MLP Block for GPTransformer
@@ -99,8 +102,7 @@ class GPTransformer(nn.Module):
 
         return x
 
-        
-
+# ----------------------------------------------------------------
 
 
 
