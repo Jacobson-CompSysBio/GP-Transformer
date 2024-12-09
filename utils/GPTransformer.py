@@ -40,6 +40,7 @@ class MLP(nn.Module):
         return x
 
 class GPTransformer(nn.Module):
+    
     """
     Transformer model for multi-task genomic prediction. Inherits from DNA-BERT 2 (https://github.com/MAGICS-LAB/DNABERT_2)
     """
