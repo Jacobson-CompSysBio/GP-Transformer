@@ -5,13 +5,9 @@ import torch.nn.functional as F
 class G_Encoder(nn.Module):
 
     def __init__(self,
-                 tokenizer,
                  output_dim: int = 768,
                  ):
         super().__init__()
-
-        # init tokenizer
-        self.tokenizer = tokenizer
 
     # forward pass
     def forward(self, x):
