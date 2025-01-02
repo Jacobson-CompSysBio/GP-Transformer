@@ -2,6 +2,7 @@
 import time
 import torch
 import torch.nn.functional as F
+import pandas as pd
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -16,25 +17,33 @@ from transformers.models.bert.configuration_bert import BertConfig
 
 # ----------------------------------------------------------------
 
-class SNPDataset(Dataset):
+class GxEDataset(Dataset):
 
     def __init__(self, 
-                 data, 
+                 data_path, 
                  tokenizer):
         """
         Parameters:
-            data (): SNP dataset to use 
-            tokenizer (hf tokenizer): tokenizer to use
+            data_path (str): dataset to use 
+            tokenizer (hf tokenizer): tokenizer to use for markers
         """
 
         # NOTE: not sure what our input data will look like yet... 
         # probably want to make it a numpy array or tensor or something
-        self.data = data
+        self.data = pd.read_csv(data_path)
+
+        # first 2240 features are genotype data
+        self.g_data = self.data.iloc[:, :2240]
+
+        # last 2240 features are lat/long and EC data
+        self.e_data = self.data.iloc[:, 2240:] 
+
+        # get tokenizer ready
         self.tokenizer = tokenizer
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.dataset)
+        return len(self.data)
     
     def __getitem__(self, index):
         """
@@ -43,9 +52,15 @@ class SNPDataset(Dataset):
         Returns:
             tokens (torch.tensor): tokenized SNP sequence
             attention_mask (torch.tensor): attention mask for tokenized SNP sequence
+            env_data (torch.tensor): environmental data observation
         """
-        inputs = self.tokenizer(self.data[index], return_tensors="pt")
+
+        # get genotype data
+        inputs = self.tokenizer(self.g_data[index], return_tensors="pt")
         tokens = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
+
+        # get env data
+        env_data = torch.tensor(self.e_data[index].values, dtype=torch.float32)
         
-        return tokens, attention_mask
+        return tokens, attention_mask, env_data
