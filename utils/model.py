@@ -18,12 +18,45 @@ class G_Encoder(nn.Module):
 class E_Encoder(nn.Module):
 
     def __init__(self,
+                 input_dim: int = 374,
                  output_dim: int = 768,
+                 hidden_layer_sizes: list = [768, 768],
+                 activation: nn.Module = nn.GELU(),
+                 dropout: float = 0.1,
+                 batchnorm: bool = True,
                  ):
         super().__init__()
-    
+
+        # init hidden layers 
+        for i, hidden_layer_size in enumerate(hidden_layer_sizes):
+
+            # for first layer, go from GxE output to hidden layer size
+            if i == 0:
+                self.hidden_layers = [Block(input_dim, hidden_layer_size, activation, dropout, batchnorm)]    
+            
+            # for subsequent layers, go from previous hidden layer size to current hidden layer size
+            else:
+                self.hidden_layers.append(Block(hidden_layer_sizes[i-1], hidden_layer_size, activation, dropout, batchnorm))
+        
+        # add final layer
+        self.final_layer = nn.Linear(hidden_layer_sizes[-1], output_dim)
+        self.final_activation = activation
+
     # forward pass
     def forward(self, x):
+
+        # through hidden layers
+        for i, layer in enumerate(self.hidden_layers):
+
+            # can't use residual connection for first layer, since input since doesn't match hidden layer sizes
+            if i == 0:
+                x = layer(x)
+            else: 
+                x = x + layer(x)
+        
+        # through final layer
+        x = self.final_activation(self.final_layer(x))
+
         return x
 
 class Block(nn.Module):
