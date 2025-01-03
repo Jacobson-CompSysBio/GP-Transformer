@@ -55,16 +55,14 @@ class GxEDataset(Dataset):
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.data)
+        return len(self.y_data)
     
     def __getitem__(self, index):
         """
         Parameters
             index (int): index to return data from
         Returns:
-            tokens (torch.tensor): tokenized SNP sequence
-            attention_mask (torch.tensor): attention mask for tokenized SNP sequence
-            env_data (torch.tensor): environmental data observation
+            obs (dict): dict of 'tokens', 'attention_mask', 'ec_data' (all x values), and 'target' (y value)
         """
 
         # get genotype data
@@ -73,43 +71,59 @@ class GxEDataset(Dataset):
         attention_mask = inputs["attention_mask"]
 
         # get env data
-        env_data = torch.tensor(self.e_data.values, dtype=torch.float32)
+        env_data = torch.tensor(self.e_data[index].values, dtype=torch.float32)
 
-        inp = {'tokens': tokens, 'attention_mask': attention_mask, 'env_data': env_data}
-        target = {'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
+        obs = {'tokens': tokens, 
+               'attention_mask': attention_mask, 
+               'ec_data': env_data,
+               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
         
-        return inp, target 
+        return obs 
 
 # only genotype data
 class GDataset(Dataset):
 
-    def __init__(self, 
-                 data_path, 
-                 tokenizer):
+    def __init__(self,
+                 tokenizer, 
+                 split='train'
+                 ):
         """
         Parameters:
-            data_path (str): dataset to use 
+            split (str): train, val, or test
             tokenizer (hf tokenizer): tokenizer to use for markers
         """
 
-        # NOTE: not sure what our input data will look like yet... 
-        # probably want to make it a numpy array or tensor or something
-        self.g_data = pd.read_csv(data_path).iloc[:, :2240]
+        # load data depending on split
+        if split == 'train':
+            x_path = '../data/position_ec_raw_genotype/X_train.csv'
+            y_path = '../data/position_ec_raw_genotype/y_train.csv'
+        elif split == 'val':
+            x_path = '../data/position_ec_raw_genotype/X_val.csv'
+            y_path = '../data/position_ec_raw_genotype/y_val.csv'
+        else:
+            x_path = '../data/position_ec_raw_genotype/X_test.csv'
+            y_path = '../data/position_ec_raw_genotype/y_test.csv'
+
+        # load data
+        self.x_data = pd.read_csv(x_path, index_col=0).reset_index() # reset index col
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index()
+
+        # first 2240 features are genotype data
+        self.g_data = self.x_data.iloc[:, :2240]
 
         # get tokenizer ready
         self.tokenizer = tokenizer
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.g_data)
+        return len(self.y_data)
     
     def __getitem__(self, index):
         """
         Parameters
             index (int): index to return data from
         Returns:
-            tokens (torch.tensor): tokenized SNP sequence
-            attention_mask (torch.tensor): attention mask for tokenized SNP sequence
+            obs (dict): dict of 'tokens', 'attention_mask' (both x values), and 'target' (y value)
         """
 
         # get genotype data
@@ -117,36 +131,59 @@ class GDataset(Dataset):
         tokens = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
 
-        return tokens, attention_mask
-    
-# only environmental data
+
+        obs = {'tokens': tokens,
+               'attention_mask': attention_mask, 
+               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
+        
+        return obs 
+
+# only env data
 class EDataset(Dataset):
 
-    def __init__(self, 
-                 data_path, 
-                 tokenizer):
+    def __init__(self,
+                 split='train'
+                 ):
         """
         Parameters:
-            data_path (str): dataset to use 
+            split (str): train, val, or test
             tokenizer (hf tokenizer): tokenizer to use for markers
         """
 
-        # NOTE: not sure what our input data will look like yet... 
-        # probably want to make it a numpy array or tensor or something
-        self.e_data = pd.read_csv(data_path).iloc[:, 2240:] 
+        # load data depending on split
+        if split == 'train':
+            x_path = '../data/position_ec_raw_genotype/X_train.csv'
+            y_path = '../data/position_ec_raw_genotype/y_train.csv'
+        elif split == 'val':
+            x_path = '../data/position_ec_raw_genotype/X_val.csv'
+            y_path = '../data/position_ec_raw_genotype/y_val.csv'
+        else:
+            x_path = '../data/position_ec_raw_genotype/X_test.csv'
+            y_path = '../data/position_ec_raw_genotype/y_test.csv'
+
+        # load data
+        self.x_data = pd.read_csv(x_path, index_col=0).reset_index() # reset index col
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index()
+
+        # last 2240 features are lat/long and EC data
+        self.e_data = self.x_data.iloc[:, 2240:] 
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.e_data)
+        return len(self.y_data)
     
     def __getitem__(self, index):
         """
         Parameters
             index (int): index to return data from
         Returns:
-            env_data (torch.tensor): environmental data observation
+            obs (dict): dict of 'ec_data' (x values), and 'target' (y value)
         """
+
         # get env data
         env_data = torch.tensor(self.e_data[index].values, dtype=torch.float32)
+
+        obs = {'ec_data': env_data,
+               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
         
-        return env_data
+        return obs 
