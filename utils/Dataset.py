@@ -41,8 +41,8 @@ class GxEDataset(Dataset):
             y_path = '../data/position_ec_raw_genotype/y_test.csv'
 
         # load data
-        self.x_data = pd.read_csv(x_path, index_col=0).reset_index() # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index()
+        self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :2240] # don't need first column
@@ -57,7 +57,7 @@ class GxEDataset(Dataset):
         # return length (number of rows) in dataset
         return len(self.y_data)
     
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         """
         Parameters
             index (int): index to return data from
@@ -66,17 +66,17 @@ class GxEDataset(Dataset):
         """
 
         # get genotype data
-        inputs = self.tokenizer(self.g_data[index], return_tensors="pt")
+        inputs = self.tokenizer(self.g_data.iloc[index, :].values, return_tensors="pt")
         tokens = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
 
         # get env data
-        env_data = torch.tensor(self.e_data[index].values, dtype=torch.float32)
+        env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
         obs = {'tokens': tokens, 
                'attention_mask': attention_mask, 
                'ec_data': env_data,
-               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
+               'target': torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)}
         
         return obs 
 
@@ -105,8 +105,8 @@ class GDataset(Dataset):
             y_path = '../data/position_ec_raw_genotype/y_test.csv'
 
         # load data
-        self.x_data = pd.read_csv(x_path, index_col=0).reset_index() # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index()
+        self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :2240]
@@ -118,7 +118,7 @@ class GDataset(Dataset):
         # return length (number of rows) in dataset
         return len(self.y_data)
     
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         """
         Parameters
             index (int): index to return data from
@@ -127,14 +127,14 @@ class GDataset(Dataset):
         """
 
         # get genotype data
-        inputs = self.tokenizer(self.g_data[index], return_tensors="pt")
+        inputs = self.tokenizer(self.g_data.iloc[index, :].values, return_tensors="pt")
         tokens = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
 
 
         obs = {'tokens': tokens,
                'attention_mask': attention_mask, 
-               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
+               'target': torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)}
         
         return obs 
 
@@ -162,8 +162,8 @@ class EDataset(Dataset):
             y_path = '../data/position_ec_raw_genotype/y_test.csv'
 
         # load data
-        self.x_data = pd.read_csv(x_path, index_col=0).reset_index() # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index()
+        self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # last 2240 features are lat/long and EC data
         self.e_data = self.x_data.iloc[:, 2240:] 
@@ -172,7 +172,7 @@ class EDataset(Dataset):
         # return length (number of rows) in dataset
         return len(self.y_data)
     
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         """
         Parameters
             index (int): index to return data from
@@ -181,9 +181,9 @@ class EDataset(Dataset):
         """
 
         # get env data
-        env_data = torch.tensor(self.e_data[index].values, dtype=torch.float32)
+        env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
         obs = {'ec_data': env_data,
-               'target': torch.tensor(self.y_data[index].values, dtype=torch.float32)}
+               'target': torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)}
         
         return obs 
