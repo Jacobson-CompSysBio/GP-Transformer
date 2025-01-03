@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# create transformer encoder for genotype data
 class G_Encoder(nn.Module):
 
     def __init__(self,
@@ -13,10 +14,12 @@ class G_Encoder(nn.Module):
     def forward(self, x):
         return x
 
+# create MLP encoder for environmental covariates
 class E_Encoder(nn.Module):
 
     def __init__(self,
-                 output_dim: int = 768,):
+                 output_dim: int = 768,
+                 ):
         super().__init__()
     
     # forward pass
@@ -63,15 +66,22 @@ class GPTransformer(nn.Module):
                  hidden_layer_sizes: list = [768, 768],
                  hidden_activation: nn.Module = nn.GELU(),
                  final_activation: nn.Module = nn.Identity(),
+                 g_enc: bool = True,
+                 e_enc: bool = True,
                  ):
         super().__init__()
 
         # init G, E encoders
-        self.g_encoder = G_Encoder()
-        self.e_encoder = E_Encoder()
+        if g_enc:
+            self.g_encoder = G_Encoder()
+        if e_enc:
+            self.e_encoder = E_Encoder()
 
         # get output dimensions of G, E encoders (should be the same)
-        self.gxe_output_dim = G_Encoder().output_dim
+        if g_enc:
+            self.gxe_output_dim = G_Encoder().output_dim
+        else:
+            self.gxe_output_dim = E_Encoder().output_dim
 
         # init fc layers
         for i, hidden_layer_size in enumerate(hidden_layer_sizes):
@@ -89,12 +99,22 @@ class GPTransformer(nn.Module):
         self.final_layer_activation = final_activation
 
     def forward(self, g, e):
-        # pass through G, E encoders
-        g_enc = self.g_encoder(x)
-        e_enc = self.e_encoder(x)
 
-        # concatenate encodings
-        x = torch.cat([g_enc, e_enc], dim=1)
+        # only pass through G, E encoders if they exist
+        if hasattr(self, 'g_encoder') and hasattr(self, 'e_encoder'):
+            # pass through G, E encoders
+            g_enc = self.g_encoder(x)
+            e_enc = self.e_encoder(x)
+            # concatenate encodings
+            x = torch.cat([g_enc, e_enc], dim=1)
+
+        elif hasattr(self, 'g_encoder'):
+            # pass through G encoder
+            x = self.g_encoder(x)
+
+        elif hasattr(self, 'e_encoder'):
+            # pass through E encoder
+            x = self.e_encoder(x)
 
         # pass through other layers
         for layer in self.hidden_layers:
@@ -103,6 +123,5 @@ class GPTransformer(nn.Module):
 
         # pass through final layer + activation
         x = self.final_layer_activation(self.final_layer(x))
-
 
         return x
