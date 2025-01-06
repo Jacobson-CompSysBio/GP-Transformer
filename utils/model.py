@@ -6,10 +6,22 @@ import torch.nn.functional as F
 class G_Encoder(nn.Module):
 
     def __init__(self,
+                 input_dim: int = 2240,
+                 hidden_dim: int = 768,
                  output_dim: int = 768,
                  ):
         super().__init__()
+
+        # attributes
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.output_dim = output_dim
+
+        # init embedding tables
+        self.token_embedding_table = nn.Embedding(3, hidden_dim)
+        self.position_embedding_table = nn.Embedding(input_dim, hidden_dim)
+
+        # init transformer blocks
 
     # forward pass
     def forward(self, x):
@@ -98,6 +110,46 @@ class Block(nn.Module):
         if hasattr(self, 'batchnorm'):
             x = self.batchnorm(x)
         return x
+    
+class Head(nn.Module):
+    """
+    Single Self-Attention Head (Bi-Directional, so no mask)
+    """
+
+    def __init__(self, 
+                 head_size,
+                 hidden_dim,
+                 dropout=0.1):
+        super().__init__()
+
+        # init k, q, v linear layers
+        self.key = nn.Linear(hidden_dim, head_size, bias=False)
+        self.query = nn.Linear(hidden_dim, head_size, bias=False)
+        self.value = nn.Linear(hidden_dim, head_size, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # for this project, B = batch size, T = 2024 (sequence length), and C = 768 (hidden_dim)
+        B, T, C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+
+        # get attention scores
+        wei = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
+
+        # get weighted aggregation of values
+        v = self.value(x)
+        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+
+        return out        
+
+class MultiHeadAttention(nn.Module):
+    pass
+    
+class TransformerBlock(nn.Module):
+    pass
 
 class GxE_Transformer(nn.Module):
 
