@@ -43,8 +43,8 @@ class TransformerConfig:
     block_size: int = 2240 # max sequence length
     vocab_size: int = 4 # 0, 1, 2, 3
     n_layer: int = 2 # number of transformer layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding size 
+    n_head: int = 4 # number of heads
+    n_embd: int = 128 # embedding size 
 
 # transformer
 class SelfAttention(nn.Module):
@@ -183,8 +183,8 @@ class E_Encoder(nn.Module):
 
     def __init__(self,
                  input_dim: int = 374,
-                 output_dim: int = 768,
-                 hidden_dim: int = 768,
+                 output_dim: int = 128,
+                 hidden_dim: int = 128,
                  n_hidden: int = 2,
                  activation: nn.Module = nn.GELU(),
                  dropout: float = 0.1,
@@ -235,8 +235,8 @@ class GxE_Transformer(nn.Module):
     
     def __init__(self,
                  dropout: float = 0.1,
-                 hidden_dim: int = 768,
-                 n_hidden: int =  2,
+                 hidden_dim: int = 128,
+                 n_hidden: int =  1,
                  hidden_activation: nn.Module = nn.GELU(),
                  final_activation: nn.Module = nn.Identity(),
                  g_enc: bool = True,
