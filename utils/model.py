@@ -140,7 +140,6 @@ class G_Encoder(nn.Module):
             h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # weight sharing + weight init
 
@@ -163,9 +162,11 @@ class G_Encoder(nn.Module):
 
         # forward through final layer norm + classifier
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
 
-        return logits # shape (B, T, vocab_size=3)
+        # concat x on last dimension to output of shape (B, n_embd)
+        x = x.mean(dim=-1)
+        
+        return x
     
 # ----------------------------------------------------------------
 # create MLP encoder for environmental covariates
@@ -237,6 +238,7 @@ class GxE_Transformer(nn.Module):
                  final_activation: nn.Module = nn.Identity(),
                  g_enc: bool = True,
                  e_enc: bool = True,
+                 config = None,
                  ):
         super().__init__()
 
@@ -250,7 +252,7 @@ class GxE_Transformer(nn.Module):
 
         # init G, E encoders
         if self.g_enc:
-            self.g_encoder = G_Encoder()
+            self.g_encoder = G_Encoder(config)
         if self.e_enc:
             self.e_encoder = E_Encoder()
 
