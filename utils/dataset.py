@@ -58,7 +58,7 @@ class GxE_Dataset(Dataset):
         Parameters
             index (int): index to return data from
         Returns:
-            obs (dict): dict of 'tokens', 'attention_mask', 'ec_data' (all x values), and 'target' (y value)
+            obs (dict): dict of 'g_data', 'e_data' (x values), and 'target' (y value)
         """
 
         # get genotype data
