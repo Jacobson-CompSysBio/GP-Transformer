@@ -19,14 +19,12 @@ from transformers.models.bert.configuration_bert import BertConfig
 
 class GxE_Dataset(Dataset):
 
-    def __init__(self,
-                 tokenizer, 
+    def __init__(self, 
                  split='train'
                  ):
         """
         Parameters:
             split (str): train, val, or test
-            tokenizer (hf tokenizer): tokenizer to use for markers
         """
 
         # load data depending on split
@@ -45,19 +43,17 @@ class GxE_Dataset(Dataset):
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
-        self.g_data = self.x_data.iloc[:, :2240] # don't need first column
+        self.g_data = self.x_data.iloc[:, :2240]
 
         # last 2240 features are lat/long and EC data
         self.e_data = self.x_data.iloc[:, 2240:] 
-
-        # get tokenizer ready
-        self.tokenizer = tokenizer
 
     def __len__(self):
         # return length (number of rows) in dataset
         return len(self.y_data)
     
     def __getitem__(self, index: int):
+
         """
         Parameters
             index (int): index to return data from
@@ -66,16 +62,13 @@ class GxE_Dataset(Dataset):
         """
 
         # get genotype data
-        inputs = self.tokenizer(self.g_data.iloc[index, :].values, return_tensors="pt")
-        tokens = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
 
         # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
-        x = {'tokens': tokens, 
-             'attn_mask': attention_mask, 
-             'ec_data': env_data}
+        x = {'g_data': tokens,  
+             'e_data': env_data}
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
         return x, y
@@ -90,7 +83,6 @@ class G_Dataset(Dataset):
         """
         Parameters:
             split (str): train, val, or test
-            tokenizer (hf tokenizer): tokenizer to use for markers
         """
 
         # load data depending on split
@@ -127,14 +119,8 @@ class G_Dataset(Dataset):
         """
 
         # get genotype data
-        inputs = self.tokenizer(self.g_data.iloc[index, :].values, return_tensors="pt")
-        tokens = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-
-
-        x = {'tokens': tokens,
-             'attn_mask': attention_mask
-             }
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
+        x = {'g_data': tokens}
         
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
@@ -185,7 +171,7 @@ class E_Dataset(Dataset):
         # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
-        x = {'ec_data': env_data}
+        x = {'e_data': env_data}
 
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         

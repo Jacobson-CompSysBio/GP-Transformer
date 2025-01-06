@@ -157,7 +157,7 @@ class GxE_Transformer(nn.Module):
         if hasattr(self, 'g_encoder') and hasattr(self, 'g_encoder'):
 
             # separate x vals
-            g = (x["tokens"], x["attn_mask"])
+            g = x["g_data"]
             e = x["ec_data"]
 
             # pass through G, E encoders
@@ -170,14 +170,14 @@ class GxE_Transformer(nn.Module):
         elif hasattr(self, 'g_encoder'):
 
             # separate x vals
-            g = (x["tokens"], x["attn_mask"])
+            g = x["g_data"]
 
             # pass through G encoder
             x = self.g_encoder(g)
 
         elif hasattr(self, 'e_encoder'):
             # separate x vals
-            e = x["ec_data"]
+            e = x["e_data"]
 
             # pass through E encoder
             x = self.e_encoder(e)
