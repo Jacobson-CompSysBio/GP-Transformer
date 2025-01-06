@@ -1,32 +1,173 @@
+import os, sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
+# ----------------------------------------------------------------
+# create MLP block for flat layers
+class Block(nn.Module):
+    """
+    Flat block with a single linear layer, batchnorm, dropout and activation
+    """
+
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int,
+                 activation: nn.Module = nn.GELU(),
+                 dropout: float = 0.1,
+                 batchnorm: bool = True,
+                 ):
+        super().__init__()
+
+        self.fc = nn.Linear(input_dim, output_dim)
+        self.activation = activation
+        self.dropout = nn.Dropout(dropout)
+        if batchnorm:
+            self.batchnorm = nn.BatchNorm1d(output_dim)
+    
+    # fwd pass
+    def forward(self, x):
+        x = self.fc(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        if hasattr(self, 'batchnorm'):
+            x = self.batchnorm(x)
+        return x
+
+# ----------------------------------------------------------------
+# config for transformer
+@dataclass
+class TransformerConfig:
+    block_size: int = 2024 # max sequence length
+    vocab_size: int = 3 # 0, 0.5, 1
+    n_layer: int = 2 # number of transformer layers
+    n_head: int = 12 # number of heads
+    n_embd: int = 768 # embedding size 
+
+# transformer
+class SelfAttention(nn.Module):
+    """
+    Bidirectional self attention with FlashAttention
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "hidden_dim must be divisible by head_size"
+
+        # init k, q, v linear layers (all in same layer)
+        self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3)
+
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+
+        # get attributes
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+
+    def forward(self, x):
+        # for this project, B = batch size, T = 2024 (sequence length), and C = 768 (hidden_dim)
+        B, T, C = x.size()
+
+        """
+        calculate query, key, and value for all heads in batch and move head forward to be batched
+        nh is "number of heads", hs is "head size", and C (# channels) = nh * hs
+        e.g. GPT2: nh = 12, hs = 64, so nh * hs = C = 768 channels
+        """
+
+        # get q, k, v
+        qkv = self.c_attn(x) # (B, T, C * 3)
+
+        # split and transpose for faster computation
+        # pytorch process B and num_heads dim as batches, processes in parallel
+        q, k, v = qkv.split(self.n_embd, dim=2) # split along T dimension
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, num_heads, T, head_size)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, num_heads, T, head_size)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, num_heads, T, head_size)
+
+        # flash attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # no mask, so is_causal=False
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # reassemble head outputs side-by-side
+
+        # output projection
+        return self.c_proj(y)
+
+class TransformerMLP(nn.Module):
+    """
+    MLP for transformer
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.n_embd = config.n_embd
+
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate='tanh')
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+    
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+class TransformerBlock(nn.Module):
+    
+    def __init__(self,config):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = SelfAttention(config.n_head, config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = TransformerMLP(config)
+    
+    def forward(self, x):
+        # resid connections
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
 
 # create transformer encoder for genotype data
 class G_Encoder(nn.Module):
 
-    def __init__(self,
-                 input_dim: int = 2240,
-                 hidden_dim: int = 768,
-                 output_dim: int = 768,
+    def __init__(self, config
                  ):
         super().__init__()
 
-        # attributes
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        # config
+        self.config = config
 
-        # init embedding tables
-        self.token_embedding_table = nn.Embedding(3, hidden_dim)
-        self.position_embedding_table = nn.Embedding(input_dim, hidden_dim)
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd)
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # init transformer blocks
+        # weight sharing + weight init
 
     # forward pass
-    def forward(self, x):
-        return x
+    def forward(self, idx):
 
+        # split idx into batch dim and sequence dim
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}; block size is {self.config.block_size}"
+
+        # embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape T
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb
+
+        # forward through blocks
+        for block in self.transformer.h:
+            x = block(x)
+
+        # forward through final layer norm + classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+
+        return logits # shape (B, T, vocab_size=3)
+    
+# ----------------------------------------------------------------
 # create MLP encoder for environmental covariates
 class E_Encoder(nn.Module):
 
@@ -81,75 +222,6 @@ class E_Encoder(nn.Module):
         x = self.final_activation(self.final_layer(x))
 
         return x
-
-class Block(nn.Module):
-    """
-    Flat block with a single linear layer, batchnorm, dropout and activation
-    """
-
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 activation: nn.Module = nn.GELU(),
-                 dropout: float = 0.1,
-                 batchnorm: bool = True,
-                 ):
-        super().__init__()
-
-        self.fc = nn.Linear(input_dim, output_dim)
-        self.activation = activation
-        self.dropout = nn.Dropout(dropout)
-        if batchnorm:
-            self.batchnorm = nn.BatchNorm1d(output_dim)
-    
-    # fwd pass
-    def forward(self, x):
-        x = self.fc(x)
-        x = self.activation(x)
-        x = self.dropout(x)
-        if hasattr(self, 'batchnorm'):
-            x = self.batchnorm(x)
-        return x
-    
-class Head(nn.Module):
-    """
-    Single Self-Attention Head (Bi-Directional, so no mask)
-    """
-
-    def __init__(self, 
-                 head_size,
-                 hidden_dim,
-                 dropout=0.1):
-        super().__init__()
-
-        # init k, q, v linear layers
-        self.key = nn.Linear(hidden_dim, head_size, bias=False)
-        self.query = nn.Linear(hidden_dim, head_size, bias=False)
-        self.value = nn.Linear(hidden_dim, head_size, bias=False)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        # for this project, B = batch size, T = 2024 (sequence length), and C = 768 (hidden_dim)
-        B, T, C = x.shape
-        k = self.key(x)
-        q = self.query(x)
-
-        # get attention scores
-        wei = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
-        wei = self.dropout(wei)
-
-        # get weighted aggregation of values
-        v = self.value(x)
-        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
-
-        return out        
-
-class MultiHeadAttention(nn.Module):
-    pass
-    
-class TransformerBlock(nn.Module):
-    pass
 
 class GxE_Transformer(nn.Module):
 
