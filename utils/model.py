@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+
+# look at Chinchilla for parameter recommendations
 # ----------------------------------------------------------------
 # create MLP block for flat layers
 class Block(nn.Module):
@@ -38,8 +40,8 @@ class Block(nn.Module):
 # config for transformer
 @dataclass
 class TransformerConfig:
-    block_size: int = 2024 # max sequence length
-    vocab_size: int = 3 # 0, 0.5, 1
+    block_size: int = 2240 # max sequence length
+    vocab_size: int = 4 # 0, 1, 2, 3
     n_layer: int = 2 # number of transformer layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding size 
@@ -114,7 +116,7 @@ class TransformerBlock(nn.Module):
     def __init__(self,config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = SelfAttention(config.n_head, config.n_embd)
+        self.attn = SelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = TransformerMLP(config)
     
@@ -140,6 +142,12 @@ class G_Encoder(nn.Module):
             h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
+        self.lm_head = nn.Linear(config.n_embd, 1, bias=False)
+
+        self.f_proj = nn.Linear(config.block_size, config.n_embd, bias=False)
+
+        # output dim
+        self.output_dim = config.n_embd
 
         # weight sharing + weight init
 
@@ -160,12 +168,13 @@ class G_Encoder(nn.Module):
         for block in self.transformer.h:
             x = block(x)
 
-        # forward through final layer norm + classifier
+        # forward through final layer norm
         x = self.transformer.ln_f(x)
 
-        # concat x on last dimension to output of shape (B, n_embd)
-        x = x.mean(dim=-1)
-        
+        # output
+        x = self.lm_head(x) # shape (B, T, 1)
+        x = self.f_proj(x.squeeze(-1)) # shape (B, n_embd=768)
+
         return x
     
 # ----------------------------------------------------------------
@@ -191,18 +200,10 @@ class E_Encoder(nn.Module):
         self.activation = activation
         self.dropout = dropout
         self.batchnorm = batchnorm
-
-        # init hidden layers 
-        for i in range(n_hidden):
-
-            # for first layer, go from GxE output to hidden layer size
-            if i == 0:
-                self.hidden_layers = [Block(input_dim, hidden_dim, activation, dropout, batchnorm)]    
-            
-            # for subsequent layers, go from previous hidden layer size to current hidden layer size
-            else:
-                self.hidden_layers.append(Block(hidden_dim, hidden_dim, activation, dropout, batchnorm))
         
+        # make hidden layers
+        self.hidden_layers = nn.ModuleList([Block(input_dim, hidden_dim, activation, dropout, batchnorm) if i == 0 else Block(hidden_dim, hidden_dim, activation, dropout, batchnorm) for i in range(n_hidden)])
+
         # add final layer
         self.final_layer = nn.Linear(hidden_dim, output_dim)
         self.final_activation = activation
@@ -224,6 +225,8 @@ class E_Encoder(nn.Module):
 
         return x
 
+# ----------------------------------------------------------------
+# create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
 
     """
@@ -238,7 +241,7 @@ class GxE_Transformer(nn.Module):
                  final_activation: nn.Module = nn.Identity(),
                  g_enc: bool = True,
                  e_enc: bool = True,
-                 config = None,
+                 config = None
                  ):
         super().__init__()
 
@@ -258,40 +261,32 @@ class GxE_Transformer(nn.Module):
 
         # get output dimensions of G, E encoders (should be the same)
         if g_enc:
-            self.gxe_output_dim = G_Encoder().output_dim
+            self.gxe_output_dim = self.g_encoder.output_dim
         else:
-            self.gxe_output_dim = E_Encoder().output_dim
+            self.gxe_output_dim = self.e_encoder.output_dim
 
-        # init fc layers
-        for i in range(n_hidden):
-
-            # for first layer, go from GxE output to hidden layer size
-            if i == 0:
-                self.hidden_layers = [Block(self.gxe_output_dim, hidden_dim, hidden_activation, dropout)]    
-            
-            # for subsequent layers, go from previous hidden layer size to current hidden layer size
-            else:
-                self.hidden_layers.append(Block(hidden_dim, hidden_dim, hidden_activation, dropout))
-
+        # make hidden layers
+        self.hidden_layers = nn.ModuleList([Block(self.gxe_output_dim, hidden_dim, hidden_activation, dropout) if i == 0 else Block(hidden_dim, hidden_dim, hidden_activation, dropout) for i in range(n_hidden)])
+        
         # init final layer (output of 1 for regression)
         self.final_layer = nn.Linear(hidden_dim, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
         self.final_layer_activation = final_activation
 
-    def forward(self, x: dict):
+    def forward(self, x):
 
         # only pass through G, E encoders if they exist
         if hasattr(self, 'g_encoder') and hasattr(self, 'g_encoder'):
 
             # separate x vals
             g = x["g_data"]
-            e = x["ec_data"]
+            e = x["e_data"]
 
             # pass through G, E encoders
             g_enc = self.g_encoder(g)
             e_enc = self.e_encoder(e)
 
             # concatenate encodings
-            x = torch.cat([g_enc, e_enc], dim=1)
+            x = g_enc + e_enc
 
         elif hasattr(self, 'g_encoder'):
 
@@ -310,7 +305,6 @@ class GxE_Transformer(nn.Module):
 
         # pass through other layers
         for layer in self.hidden_layers:
-            # residual connection
             x = x + layer(x)
 
         # pass through final layer + activation

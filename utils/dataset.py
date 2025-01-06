@@ -62,7 +62,7 @@ class GxE_Dataset(Dataset):
         """
 
         # get genotype data
-        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) + 2 # (add 2 to make everything positive)
 
         # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
@@ -115,11 +115,11 @@ class G_Dataset(Dataset):
         Parameters
             index (int): index to return data from
         Returns:
-            obs (dict): dict of 'tokens', 'attention_mask' (both x values), and 'target' (y value)
+            obs (dict): dict of 'g_data' (x value), and 'target' (y value)
         """
 
         # get genotype data
-        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) + 2 # (add 2 to make everything positive)
         x = {'g_data': tokens}
         
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
