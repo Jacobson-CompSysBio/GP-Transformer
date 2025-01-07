@@ -77,7 +77,6 @@ class GxE_Dataset(Dataset):
 class G_Dataset(Dataset):
 
     def __init__(self,
-                 tokenizer, 
                  split='train'
                  ):
         """
@@ -102,9 +101,6 @@ class G_Dataset(Dataset):
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :2240]
-
-        # get tokenizer ready
-        self.tokenizer = tokenizer
 
     def __len__(self):
         # return length (number of rows) in dataset
