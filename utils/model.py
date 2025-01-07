@@ -275,7 +275,7 @@ class GxE_Transformer(nn.Module):
     def forward(self, x):
 
         # only pass through G, E encoders if they exist
-        if hasattr(self, 'g_encoder') and hasattr(self, 'g_encoder'):
+        if hasattr(self, 'g_encoder') and hasattr(self, 'e_encoder'):
 
             # separate x vals
             g = x["g_data"]
