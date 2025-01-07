@@ -1,4 +1,5 @@
 import os, sys
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,6 +46,40 @@ class TransformerConfig:
     n_layer: int = 2 # number of transformer layers
     n_head: int = 4 # number of heads
     n_embd: int = 128 # embedding size 
+
+# positional encoding (sine/cosine)
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.dropout = nn.Dropout(0.1)
+
+        # matrix of shape (seq_len, d_model)
+        pe = torch.zeros(config.block_size, config.n_embd)
+
+        # vector of shape (seq_len)
+        position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1)
+
+        # vector of shape (d_model)
+        div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10_000.0) / config.n_embd))
+
+        # apply sin to even idxs, cos to odd
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        # add batch dimension to pos encoding (1, seq_len, d_model)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+    
+    def forward(self, x):
+        """
+        Parameters:
+            x (torch.tensor): shape (batch_size, seq_len, embedding_dim)
+        """
+        x = x + (self.pe[:, :x.shape[1], :]).requires_grad_(False) # (batch, seq_len, d_model)
+        return self.dropout(x)
+
 
 # transformer
 class SelfAttention(nn.Module):
@@ -138,7 +173,7 @@ class G_Encoder(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wpe = PositionalEncoding(config),
             h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
@@ -159,10 +194,12 @@ class G_Encoder(nn.Module):
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}; block size is {self.config.block_size}"
 
         # embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape T
-        pos_emb = self.transformer.wpe(pos)
-        tok_emb = self.transformer.wte(idx)
-        x = tok_emb + pos_emb
+        # pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape T
+        # pos_emb = self.transformer.wpe(pos)
+        # tok_emb = self.transformer.wte(idx)
+        # x = tok_emb + pos_emb
+
+        x = self.transformer.wpe(self.transformer.wte(idx)) # add pos emb to token embedding input since it's static
 
         # forward through blocks
         for block in self.transformer.h:
