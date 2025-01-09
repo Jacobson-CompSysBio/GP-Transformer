@@ -33,7 +33,7 @@ class GxE_Dataset(Dataset):
         # load data depending on split
         if split == 'train':
             x_path = data_path + 'X_train.csv'
-            y_path = data_path +'y_train.csv'
+            y_path = data_path + 'y_train.csv'
         elif split == 'val':
             x_path = data_path + 'X_val.csv'
             y_path = data_path + 'y_val.csv'
@@ -169,7 +169,7 @@ class E_Dataset(Dataset):
         Parameters
             index (int): index to return data from
         Returns:
-            obs (dict): dict of 'ec_data' (x values), and 'target' (y value)
+            obs (dict): dict of 'e_data' (x values), and 'target' (y value)
         """
 
         # get env data
