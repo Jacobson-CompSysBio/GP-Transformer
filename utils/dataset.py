@@ -77,23 +77,25 @@ class GxE_Dataset(Dataset):
 class G_Dataset(Dataset):
 
     def __init__(self,
-                 split='train'
+                 split='train',
+                 data_path='../data/maize_data_2014-2022_vs_2023/'
                  ):
         """
         Parameters:
             split (str): train, val, or test
         """
-
+        
+        self.data_path = data_path
         # load data depending on split
         if split == 'train':
-            x_path = '../data/position_ec_raw_genotype/X_train.csv'
-            y_path = '../data/position_ec_raw_genotype/y_train.csv'
+            x_path = data_path + 'X_train.csv'
+            y_path = data_path +'y_train.csv'
         elif split == 'val':
-            x_path = '../data/position_ec_raw_genotype/X_val.csv'
-            y_path = '../data/position_ec_raw_genotype/y_val.csv'
+            x_path = data_path + 'X_val.csv'
+            y_path = data_path + 'y_val.csv'
         else:
-            x_path = '../data/position_ec_raw_genotype/X_test.csv'
-            y_path = '../data/position_ec_raw_genotype/y_test.csv'
+            x_path = data_path + 'X_test.csv'
+            y_path = data_path + 'y_test.csv'
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
