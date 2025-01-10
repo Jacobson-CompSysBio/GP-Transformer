@@ -21,7 +21,7 @@ class GxE_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023/'
+                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
                  ):
         """
         Parameters:
@@ -46,7 +46,7 @@ class GxE_Dataset(Dataset):
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
-        self.g_data = self.x_data.iloc[:, :2240]
+        self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
 
         # last 2240 features are lat/long and EC data
         self.e_data = self.x_data.iloc[:, 2240:] 
@@ -65,7 +65,7 @@ class GxE_Dataset(Dataset):
         """
 
         # get genotype data
-        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) + 2 # (add 2 to make everything positive)
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) # (add 2 to make everything positive)
 
         # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
@@ -81,7 +81,7 @@ class G_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023/'
+                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
                  ):
         """
         Parameters:
@@ -106,7 +106,7 @@ class G_Dataset(Dataset):
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
-        self.g_data = self.x_data.iloc[:, :2240]
+        self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -121,7 +121,7 @@ class G_Dataset(Dataset):
         """
 
         # get genotype data
-        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) + 2 # (add 2 to make everything positive)
+        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) # (add 2 to make everything positive)
         x = {'g_data': tokens}
         
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
@@ -133,7 +133,7 @@ class E_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023/'
+                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
                  ):
         """
         Parameters:

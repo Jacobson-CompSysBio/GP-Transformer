@@ -42,7 +42,7 @@ class Block(nn.Module):
 @dataclass
 class TransformerConfig:
     block_size: int = 2240 # max sequence length
-    vocab_size: int = 4 # 0, 1, 2, 3
+    vocab_size: int = 3 # 0, 0.5, 1
     n_layer: int = 2 # number of transformer layers
     n_head: int = 4 # number of heads
     n_embd: int = 128 # embedding size 
@@ -173,7 +173,8 @@ class G_Encoder(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = PositionalEncoding(config),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # wpe = PositionalEncoding(config),
             h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
@@ -194,12 +195,12 @@ class G_Encoder(nn.Module):
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}; block size is {self.config.block_size}"
 
         # embeddings
-        # pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape T
-        # pos_emb = self.transformer.wpe(pos)
-        # tok_emb = self.transformer.wte(idx)
-        # x = tok_emb + pos_emb
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape T
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb
 
-        x = self.transformer.wpe(self.transformer.wte(idx)) # add pos emb to token embedding input since it's static
+        # x = self.transformer.wpe(self.transformer.wte(idx)) # add pos emb to token embedding input since it's static
 
         # forward through blocks
         for block in self.transformer.h:
