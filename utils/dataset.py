@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import pandas as pd
 
 from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
 
 from transformers import (
     AutoModel, 
@@ -40,6 +41,9 @@ class GxE_Dataset(Dataset):
         else:
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
+        
+        # standard scaler init
+        self.scaler = StandardScaler()
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
@@ -49,7 +53,9 @@ class GxE_Dataset(Dataset):
         self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
 
         # last 2240 features are lat/long and EC data
-        self.e_data = self.x_data.iloc[:, 2240:] 
+        self.e_data = self.x_data.iloc[:, 2240:]
+        cols = self.e_data.columns
+        self.e_data = pd.DataFrame(self.scaler.fit_transform(self.e_data), columns=cols)
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -153,12 +159,17 @@ class E_Dataset(Dataset):
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
 
+        # standard scaler init
+        self.scaler = StandardScaler()
+
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # last 2240 features are lat/long and EC data
-        self.e_data = self.x_data.iloc[:, 2240:] 
+        self.e_data = self.x_data.iloc[:, 2240:]
+        cols = self.e_data.columns
+        self.e_data = pd.DataFrame(self.scaler.fit_transform(self.e_data), columns=cols) 
 
     def __len__(self):
         # return length (number of rows) in dataset
