@@ -22,15 +22,16 @@ class GxE_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
+                 data_path='../data/maize_data_2014-2023_vs_2024/'
                  ):
         """
         Parameters:
             split (str): train, val, or test
             data_path (str): path to data
         """
-        
+        self.split = split
         self.data_path = data_path
+
         # load data depending on split
         if split == 'train':
             x_path = data_path + 'X_train.csv'
@@ -38,7 +39,10 @@ class GxE_Dataset(Dataset):
         elif split == 'val':
             x_path = data_path + 'X_val.csv'
             y_path = data_path + 'y_val.csv'
+        elif split == 'sub':
+            x_path = data_path + 'X_test.csv'
         else:
+            assert data_path != '../data/maize_data_2014-2023_vs_2024/', '2024 y_test.csv not available'
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
         
@@ -47,7 +51,8 @@ class GxE_Dataset(Dataset):
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split != 'sub':
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
@@ -59,7 +64,7 @@ class GxE_Dataset(Dataset):
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.y_data)
+        return len(self.x_data)
     
     def __getitem__(self, index: int):
 
@@ -78,6 +83,10 @@ class GxE_Dataset(Dataset):
 
         x = {'g_data': tokens,  
              'e_data': env_data}
+        
+        if self.split == 'sub':
+            return x
+
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
         return x, y
@@ -87,15 +96,16 @@ class G_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
+                 data_path='../data/maize_data_2014-2023_vs_2024/'
                  ):
         """
         Parameters:
             split (str): train, val, or test
             data_path (str): path to data
         """
-        
+        self.split = split
         self.data_path = data_path
+
         # load data depending on split
         if split == 'train':
             x_path = data_path + 'X_train.csv'
@@ -103,20 +113,24 @@ class G_Dataset(Dataset):
         elif split == 'val':
             x_path = data_path + 'X_val.csv'
             y_path = data_path + 'y_val.csv'
+        elif split == 'sub':
+            x_path = data_path + 'X_test.csv'
         else:
+            assert data_path != '../data/maize_data_2014-2023_vs_2024/', '2024 y_test.csv not available'
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split != 'sub':
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.y_data)
+        return len(self.x_data)
     
     def __getitem__(self, index: int):
         """
@@ -130,6 +144,9 @@ class G_Dataset(Dataset):
         tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long) # (add 2 to make everything positive)
         x = {'g_data': tokens}
         
+        if self.split == 'sub':
+            return x
+
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
         return x, y 
@@ -139,15 +156,16 @@ class E_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2022_vs_2023_v2/'
+                 data_path='../data/maize_data_2014-2023_vs_2024/'
                  ):
         """
         Parameters:
             split (str): train, val, or test
             data_path (str): path to data
         """
-        
+        self.split = split
         self.data_path = data_path
+
         # load data depending on split
         if split == 'train':
             x_path = data_path + 'X_train.csv'
@@ -155,7 +173,10 @@ class E_Dataset(Dataset):
         elif split == 'val':
             x_path = data_path + 'X_val.csv'
             y_path = data_path + 'y_val.csv'
+        elif split == 'sub':
+            x_path = data_path + 'X_test.csv'
         else:
+            assert data_path != '../data/maize_data_2014-2023_vs_2024/', '2024 y_test.csv not available'
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
 
@@ -164,7 +185,8 @@ class E_Dataset(Dataset):
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split != 'sub':
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # last 2240 features are lat/long and EC data
         self.e_data = self.x_data.iloc[:, 2240:]
@@ -173,7 +195,7 @@ class E_Dataset(Dataset):
 
     def __len__(self):
         # return length (number of rows) in dataset
-        return len(self.y_data)
+        return len(self.x_data)
     
     def __getitem__(self, index: int):
         """
@@ -187,6 +209,9 @@ class E_Dataset(Dataset):
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
         x = {'e_data': env_data}
+
+        if self.split == 'sub':
+            return x
 
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
