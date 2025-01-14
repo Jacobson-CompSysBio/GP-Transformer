@@ -55,10 +55,10 @@ class GxE_Dataset(Dataset):
             self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
-        self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
+        self.g_data = self.x_data.iloc[:, :-374] * 2 # make these ints
 
         # last 2240 features are lat/long and EC data
-        self.e_data = self.x_data.iloc[:, 2240:]
+        self.e_data = self.x_data.iloc[:, -374:]
         cols = self.e_data.columns
         self.e_data = pd.DataFrame(self.scaler.fit_transform(self.e_data), columns=cols)
 
@@ -126,7 +126,7 @@ class G_Dataset(Dataset):
             self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # first 2240 features are genotype data
-        self.g_data = self.x_data.iloc[:, :2240] * 2 # make these ints
+        self.g_data = self.x_data.iloc[:, :-374] * 2 # make these ints
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -189,7 +189,7 @@ class E_Dataset(Dataset):
             self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
         # last 2240 features are lat/long and EC data
-        self.e_data = self.x_data.iloc[:, 2240:]
+        self.e_data = self.x_data.iloc[:, -374:]
         cols = self.e_data.columns
         self.e_data = pd.DataFrame(self.scaler.fit_transform(self.e_data), columns=cols) 
 
