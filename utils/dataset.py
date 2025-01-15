@@ -41,6 +41,7 @@ class GxE_Dataset(Dataset):
             y_path = data_path + 'y_val.csv'
         elif split == 'sub':
             x_path = data_path + 'X_test.csv'
+            y_path = data_path + 'X_test.csv'
         else:
             assert data_path != '../data/maize_data_2014-2023_vs_2024/', '2024 y_test.csv not available'
             x_path = data_path + 'X_test.csv'
@@ -51,8 +52,12 @@ class GxE_Dataset(Dataset):
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
-        if split != 'sub':
-            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split == "sub":
+            self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'])
+
+        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split == "sub":
+            self.y_data = self.y_data[['Env', 'Hybrid', 'Yield_Mg_ha']]
 
         # first 2240 features are genotype data
         self.g_data = self.x_data.iloc[:, :-374] * 2 # make these ints
@@ -85,7 +90,10 @@ class GxE_Dataset(Dataset):
              'e_data': env_data}
         
         if self.split == 'sub':
-            return x
+            y = {'Env': self.y_data.iloc[index, 0],
+                 'Hybrid': self.y_data.iloc[index, 1],
+                 'Yield_Mg_ha': self.y_data.iloc[index, 2]}
+            return x, y
 
         y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
         
