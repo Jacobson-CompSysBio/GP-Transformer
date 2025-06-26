@@ -63,7 +63,7 @@ while True:
     model.eval()
     with torch.no_grad():
         train_loss, val_loss = 0, 0
-        with tqdm(total=batches_per_eval, desc=' Eval') as pbar:
+        with tqdm(total=batches_per_eval, desc='Eval') as pbar:
             for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
                 xbt, ybt = xbt.to(device), ybt.to(device)
                 xbv, ybv = xbv.to(device), ybv.to(device)

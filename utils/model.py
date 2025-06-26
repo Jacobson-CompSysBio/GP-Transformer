@@ -45,7 +45,7 @@ class TransformerConfig:
     vocab_size: int = 3 # 0, 0.5, 1
     n_layer: int = 2 # number of transformer layers
     n_head: int = 4 # number of heads
-    n_embd: int = 128 # embedding size 
+    n_embd: int = 2240 # embedding size 
 
 # positional encoding (sine/cosine)
 class PositionalEncoding(nn.Module):
