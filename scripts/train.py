@@ -15,10 +15,19 @@ from ..utils.model import *
 from ..utils.GetLR import get_lr
 
 def setup_ddp():
-    """initialize torch distributed backend with srun vars"""
-    dist.init_process_group("nccl")
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    return dist.get_rank(), dist.get_world_size()
+    """initialize torch.distributed for rocm"""
+    if dist.is_initialized():
+        return dist.get_rank(), dist.get_world_size()
+    
+    # set global vars for DDP
+    rank = int(os.environ["LOCAL_RANK"], os.environ.get("SLURM_PROCID", 0))
+    world_size = int(os.environ["WORLD_SIZE"], os.environ.get("SLURM_NTASKS", 1))
+    local_rank = int(os.environ["LOCAL_RANK"], os.environ.get("SLURM_LOCALID", 0))
+
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(local_rank)
+    return rank, world_size
+
 
 def cleanup_ddp():
     """clean up torch distributed backend"""
@@ -31,11 +40,11 @@ def is_main(rank) -> bool:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--lr",          type=float, default=3e-4)
-    p.add_argument("--num_iters",   type=int, default=50_000)
-    p.add_argument("--seed",        type=int, default=1)
-    p.add_argument("--project",     default="gxe-ddp")
-    p.add_argument("--run_name",    default=None)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--num_iters", type=int, default=50_000)
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--project", default="gxe-transformer")
+    p.add_argument("--run_name", default=None)
     return p.parse_args()
 
 
@@ -75,7 +84,6 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_function = torch.nn.MSELoss()
-
 
     # other options
     batches_per_epoch = len(train_loader)
