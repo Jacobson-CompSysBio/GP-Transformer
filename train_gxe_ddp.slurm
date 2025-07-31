@@ -2,7 +2,7 @@
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
 #SBATCH -N 1
-#SBATCH -t 30:00
+#SBATCH -t 2:00:00
 #SBATCH -p batch 
 #SBATCH -q debug
 #SBATCH -C nvme
@@ -21,6 +21,10 @@ module load craype-accel-amd-gfx90a
 source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.sh
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
+export https_proxy=http://proxy.ccs.ornl.gov:3128
+export http_proxy=$https_proxy
+export WANDB_HTTP_TIMEOUT=90
+
 srun python -u scripts/train.py \
-    --batch_size 32 \
-    --num_iters 50000
+    --batch_size 128 \
+    --num_iters 100000 \ 

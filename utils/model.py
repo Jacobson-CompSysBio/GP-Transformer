@@ -10,7 +10,7 @@ from dataclasses import dataclass
 # create MLP block for flat layers
 class Block(nn.Module):
     """
-    Flat block with a single linear layer, batchnorm, dropout and activation
+    Flat block with a single linear layer, layernorm, dropout and activation
     """
 
     def __init__(self,
@@ -18,23 +18,23 @@ class Block(nn.Module):
                  output_dim: int,
                  activation: nn.Module = nn.GELU(),
                  dropout: float = 0.1,
-                 batchnorm: bool = True,
+                 layernorm: bool = True,
                  ):
         super().__init__()
 
         self.fc = nn.Linear(input_dim, output_dim)
         self.activation = activation
         self.dropout = nn.Dropout(dropout)
-        if batchnorm:
-            self.batchnorm = nn.BatchNorm1d(output_dim)
-    
+        if layernorm:
+            self.layernorm = nn.LayerNorm(output_dim)
+
     # fwd pass
     def forward(self, x):
         x = self.fc(x)
         x = self.activation(x)
         x = self.dropout(x)
-        if hasattr(self, 'batchnorm'):
-            x = self.batchnorm(x)
+        if hasattr(self, 'layernorm'):
+            x = self.layernorm(x)
         return x
 
 # ----------------------------------------------------------------
@@ -45,7 +45,7 @@ class TransformerConfig:
     vocab_size: int = 3 # 0, 0.5, 1
     n_layer: int = 2 # number of transformer layers
     n_head: int = 4 # number of heads
-    n_embd: int = 2240 # embedding size 
+    n_embd: int = 768 # embedding size
 
 # positional encoding (sine/cosine)
 class PositionalEncoding(nn.Module):
@@ -226,7 +226,7 @@ class E_Encoder(nn.Module):
                  n_hidden: int = 2,
                  activation: nn.Module = nn.GELU(),
                  dropout: float = 0.1,
-                 batchnorm: bool = True,
+                 layernorm: bool = True,
                  ):
         super().__init__()
 
@@ -237,10 +237,10 @@ class E_Encoder(nn.Module):
         self.n_hidden_layers = n_hidden
         self.activation = activation
         self.dropout = dropout
-        self.batchnorm = batchnorm
-        
+        self.layernorm = layernorm
+
         # make hidden layers
-        self.hidden_layers = nn.ModuleList([Block(input_dim, hidden_dim, activation, dropout, batchnorm) if i == 0 else Block(hidden_dim, hidden_dim, activation, dropout, batchnorm) for i in range(n_hidden)])
+        self.hidden_layers = nn.ModuleList([Block(input_dim, hidden_dim, activation, dropout, layernorm) if i == 0 else Block(hidden_dim, hidden_dim, activation, dropout, layernorm) for i in range(n_hidden)])
 
         # add final layer
         self.final_layer = nn.Linear(hidden_dim, output_dim)
@@ -273,7 +273,7 @@ class GxE_Transformer(nn.Module):
     
     def __init__(self,
                  dropout: float = 0.1,
-                 hidden_dim: int = 128,
+                 hidden_dim: int = 2240,
                  n_hidden: int =  1,
                  hidden_activation: nn.Module = nn.GELU(),
                  final_activation: nn.Module = nn.Identity(),
@@ -295,7 +295,7 @@ class GxE_Transformer(nn.Module):
         if self.g_enc:
             self.g_encoder = G_Encoder(config)
         if self.e_enc:
-            self.e_encoder = E_Encoder()
+            self.e_encoder = E_Encoder(output_dim=config.n_embd)
 
         # get output dimensions of G, E encoders (should be the same)
         if g_enc:

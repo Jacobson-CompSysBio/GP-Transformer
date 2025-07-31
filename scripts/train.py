@@ -117,11 +117,9 @@ def main():
     ### wandb logging ###
     if is_main(rank):
         wandb.init(
-            project=args.project,
-            name=args.run_name,
-            config=vars(args)
+            project=os.getenv("WANDB_PROJECT"),
+            entity=os.getenv("WANDB_ENTITY"),
         )
-        wandb.watch(model, log="gradients", log_freq=eval_interval)
     
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -157,7 +155,8 @@ def main():
                         min_lr)
             for pg in optimizer.param_groups:
                 pg['lr'] = lr
-            
+
+            # double check that ddp accumulates gradients 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
