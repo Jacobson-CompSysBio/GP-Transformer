@@ -22,5 +22,5 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 srun python -u scripts/train.py \
-    --batch_size 32
+    --batch_size 32 \
     --num_iters 50000

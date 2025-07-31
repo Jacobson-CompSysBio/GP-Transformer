@@ -1,6 +1,7 @@
 # imports
-import time, os, json, random, math, argparse
+import time, os, json, random, math, argparse, sys
 from pathlib import Path
+from dotenv import load_dotenv
 from contextlib import nullcontext
 from tqdm import tqdm
 import wandb
@@ -10,9 +11,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, random_split
 
-from ..utils.dataset import *
-from ..utils.model import *
-from ..utils.GetLR import get_lr
+# add parent directory (one level up) to sys.path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from utils.dataset import *
+from utils.model import *
+from utils.GetLR import get_lr
+
+load_dotenv()
+os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
+os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
+os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
 
 def setup_ddp():
     """initialize torch.distributed for rocm"""
@@ -20,9 +28,22 @@ def setup_ddp():
         return dist.get_rank(), dist.get_world_size()
     
     # set global vars for DDP
-    rank = int(os.environ["LOCAL_RANK"], os.environ.get("SLURM_PROCID", 0))
-    world_size = int(os.environ["WORLD_SIZE"], os.environ.get("SLURM_NTASKS", 1))
-    local_rank = int(os.environ["LOCAL_RANK"], os.environ.get("SLURM_LOCALID", 0))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
+
+    # propagate to environment
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+
+    # add master_addr for non-torchrun jobs
+    if "MASTER_ADDR" not in os.environ:
+        # get first node in the nodelist (fine for single node jobs)
+        nodelist = os.environ.get("SLURM_NODELIST")
+        os.environ["MASTER_ADDR"] = nodelist.split(",")[0] if nodelist else "localhost"
+    if "MASTER_PORT" not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
 
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
@@ -43,8 +64,6 @@ def parse_args():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--num_iters", type=int, default=50_000)
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--project", default="gxe-transformer")
-    p.add_argument("--run_name", default=None)
     return p.parse_args()
 
 

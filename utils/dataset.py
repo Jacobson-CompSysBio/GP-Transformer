@@ -1,5 +1,6 @@
 # import necessary libraries
-import time
+import time, sys
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -22,7 +23,7 @@ class GxE_Dataset(Dataset):
 
     def __init__(self,
                  split='train',
-                 data_path='../data/maize_data_2014-2023_vs_2024/'
+                 data_path='data/maize_data_2014-2023_vs_2024/' # need to go up one level and then down to data directory
                  ):
         """
         Parameters:
