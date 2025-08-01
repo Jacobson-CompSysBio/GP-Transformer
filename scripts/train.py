@@ -176,6 +176,8 @@ def main():
 
         ### evaluation ###
         with torch.no_grad():
+            train_loss_accum = 0
+            val_loss_accum = 0
             for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
                 for k, v in xbt.items():
                     xbt[k] = v.to(device, non_blocking=True)

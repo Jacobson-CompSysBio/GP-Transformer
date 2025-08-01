@@ -2,9 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
 #SBATCH -N 1
-#SBATCH -t 2:00:00
-#SBATCH -p batch 
-#SBATCH -q debug
+#SBATCH -t 8:00:00
+#SBATCH -p extended 
 #SBATCH -C nvme
 #SBATCH --gres=gpu:8
 #SBATCH -o logs/%x.out # Out Path
@@ -25,6 +24,4 @@ export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
 export WANDB_HTTP_TIMEOUT=90
 
-srun python -u scripts/train.py \
-    --batch_size 128 \
-    --num_iters 100000 \ 
+srun python -u scripts/train.py --batch_size 128 --num_iters 100_000    
