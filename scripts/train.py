@@ -61,7 +61,7 @@ def is_main(rank) -> bool:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=1e-6)
     p.add_argument("--num_iters", type=int, default=50_000)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
@@ -109,7 +109,7 @@ def main():
     batches_per_eval = len(val_loader)
     warmup_iters = batches_per_epoch
     lr_decay_iters = args.num_iters
-    max_lr, min_lr = 1e-3, 1e-7
+    max_lr, min_lr = (0.1 * args.lr), (0.01 * args.lr) 
     max_iters = args.num_iters
     eval_interval = batches_per_epoch
     early_stop = 10
@@ -172,7 +172,7 @@ def main():
             pbar.update(1)
             if pbar.n == pbar.total:
                 break
-        pbar.close
+        pbar.close()
 
         ### evaluation ###
         with torch.no_grad():
