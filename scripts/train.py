@@ -4,6 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import nullcontext
 from tqdm import tqdm
+import subprocess
 import wandb
 import torch
 import torch.distributed as dist
@@ -61,7 +62,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--num_iters", type=int, default=50_000)
+    p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
 
@@ -105,10 +106,12 @@ def main():
     # other options
     batches_per_epoch = len(train_loader)
     batches_per_eval = len(val_loader)
+    total_iters = args.num_epochs * batches_per_epoch
     warmup_iters = batches_per_epoch
-    lr_decay_iters = args.num_iters
+    lr_decay_iters = total_iters
     max_lr, min_lr = (0.1 * args.lr), (0.01 * args.lr) 
-    max_iters = args.num_iters
+    max_iters = total_iters
+    max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = 10
 
@@ -121,11 +124,11 @@ def main():
     
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
-    iter_num, epoch_num = 0, 0
+    iter_num = 0
     t0 = time.time()
 
     ### training loop ###
-    while iter_num < max_iters:
+    for epoch_num in range(max_epochs):
         train_sampler.set_epoch(epoch_num)
         model.train()
 
@@ -168,8 +171,6 @@ def main():
                 })
             iter_num += 1
             pbar.update(1)
-            if pbar.n == pbar.total:
-                break
         pbar.close()
 
         ### evaluation ###
@@ -225,7 +226,6 @@ def main():
             print(f"[Epoch {epoch_num}] train={train_loss:.4e} | "
                   f"val={val_loss:.4e} | best_val={best_val_loss:.4e} | "
                   f"elapsed={elapsed:.2f}m")
-        epoch_num += 1
 
     # finish + clean up
     if is_main(rank):

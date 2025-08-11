@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 1024 
-#SBATCH -t 02:00:00
+#SBATCH -N 32 
+#SBATCH -t 00:30:00
 #SBATCH -p extended
 #SBATCH -q debug
-#SBATCH -C nvme
 #SBATCH -o logs/%x.out # Out Path
 #SBATCH -e logs/%x.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -43,8 +42,12 @@ export MIOPEN_CUSTOM_CACHE_DIR=$MIOPEN_USER_DB_PATH
 rm -rf "$MIOPEN_USER_DB_PATH" && mkdir -p "$MIOPEN_USER_DB_PATH"
 export MIOPEN_FIND_MODE=NORMAL
 
-srun -N128 -n1024 --gpus-per-task=1 \
+### srun ###
+NPGUS=$(($SLURM_NNODES * 8))
+srun -N$SLURM_NNODES -n$NGPUS --gpus-per-task=1 \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py --batch_size 128 --num_iters 100_000    
+    python -u scripts/train.py --batch_size 128 --num_iters 100_000 
+
+   
