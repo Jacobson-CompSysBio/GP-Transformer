@@ -22,32 +22,31 @@ os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
 os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
 os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
 
+def extract_master_addr():
+    try:
+        # Use scontrol to get the hostname of the first node
+        nodelist = os.environ["SLURM_NODELIST"]
+        node = subprocess.check_output(
+            ["scontrol", "show", "hostname", nodelist]
+        ).decode().splitlines()[0]
+        return node
+    except Exception as e:
+        print(f"[WARN] Failed to extract master address from SLURM_NODELIST: {e}")
+        return "localhost"
+
 def setup_ddp():
-    """initialize torch.distributed for rocm"""
-    if dist.is_initialized():
-        return dist.get_rank(), dist.get_world_size()
+    rank = int(os.environ["SLURM_PROCID"])
+    world_size = int(os.environ["SLURM_NTASKS"])
+    local_rank = int(os.environ.get("SLURM_LOCALID", 0))
+
+    torch.cuda.set_device(0)
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size
+    )
     
-    # set global vars for DDP
-    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
-    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
-
-    # propagate to environment
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(local_rank)
-
-    # add master_addr for non-torchrun jobs
-    if "MASTER_ADDR" not in os.environ:
-        # get first node in the nodelist (fine for single node jobs)
-        nodelist = os.environ.get("SLURM_NODELIST")
-        os.environ["MASTER_ADDR"] = nodelist.split(",")[0] if nodelist else "localhost"
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = "29500"
-
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(local_rank)
-    return rank, world_size
+    return torch.device("cuda:0"), local_rank, rank, world_size
 
 
 def cleanup_ddp():
@@ -71,8 +70,7 @@ def parse_args():
 def main():
     # setup
     args = parse_args()
-    rank, world_size = setup_ddp()
-    device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
+    device, local_rank, rank, world_size = setup_ddp()
 
     # reproducibility 
     torch.manual_seed(args.seed + rank)
