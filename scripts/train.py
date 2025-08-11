@@ -60,7 +60,7 @@ def is_main(rank) -> bool:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=1e-6)
+    p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--num_iters", type=int, default=50_000)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
@@ -212,7 +212,7 @@ def main():
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch_num,
                     "val_loss": val_loss
-                }, f"checkpoint_{epoch_num:04d}.pt")
+                }, f"checkpoints/checkpoint_{epoch_num:04d}.pt")
                 print(f"*** validation loss improved: {best_val_loss:.4e} ***")
             else:
                 last_improved += 1
