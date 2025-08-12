@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 32 
+#SBATCH -N 64
 #SBATCH -t 00:30:00
 #SBATCH -p extended
 #SBATCH -q debug
@@ -43,11 +43,13 @@ rm -rf "$MIOPEN_USER_DB_PATH" && mkdir -p "$MIOPEN_USER_DB_PATH"
 export MIOPEN_FIND_MODE=NORMAL
 
 ### srun ###
-NPGUS=$(($SLURM_NNODES * 8))
-srun -N$SLURM_NNODES -n$NGPUS --gpus-per-task=1 \
+NGPUS=$(($SLURM_NNODES * 8))
+srun -N ${SLURM_NNODES} \
+    -n ${NGPUS} \
+    --gpus-per-task=1 \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py --batch_size 128 --num_iters 100_000 
+    python -u scripts/train.py --batch_size 128 --num_epochs 10_000 
 
    
