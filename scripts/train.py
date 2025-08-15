@@ -63,6 +63,7 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--num_epochs", type=int, default=1000)
+    p.add_argument("--early_stop", type=int, default=50)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
 
@@ -112,7 +113,7 @@ def main():
     max_lr, min_lr = (args.lr), (0.01 * args.lr) 
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
-    early_stop = 10
+    early_stop = args.early_stop
 
     ### wandb logging ###
     if is_main(rank):
