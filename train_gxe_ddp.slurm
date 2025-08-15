@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 64
-#SBATCH -t 00:30:00
-#SBATCH -p extended
-#SBATCH -q debug
+#SBATCH -N 32 
+#SBATCH -t 24:00:00
+#SBATCH -p extended 
 #SBATCH -o logs/%x.out # Out Path
 #SBATCH -e logs/%x.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
 
 ### env, modules, and settings ###
 set -eo pipefail
+
+ulimit -S -c 0 # disaple core dumps
 
 module purge
 module load PrgEnv-gnu/8.6.0
@@ -29,12 +30,6 @@ export WANDB_HTTP_TIMEOUT=90
 export MASTER_ADDR=$(hostname -i)
 export MASTER_PORT=6000
 export NCCL_SOCKET_IFNAME=hsn0
-export FI_MR_CACHE_MONITOR=kdreg2
-export FI_CXI_DEFAULT_CQ_SIZE=131072
-export FI_CXI_DEFAULT_TX_SIZE=2048
-export FI_CXI_RX_MATCH_MODE=hybrid
-export NCCL_NET_GDR_LEVEL=3
-export NCCL_CROSS_NIC=1
 
 ### miopen settings ###
 export MIOPEN_USER_DB_PATH=/tmp/miopen-$SLURM_JOB_ID
@@ -50,6 +45,4 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py --batch_size 128 --num_epochs 10_000 
-
-   
+    python -u scripts/train.py --batch_size 128 --num_epochs 100_000 

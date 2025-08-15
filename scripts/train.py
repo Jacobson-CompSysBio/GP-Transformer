@@ -121,6 +121,11 @@ def main():
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
         )
+
+        # use epochs as steps for epoch-level metrics
+        wandb.define_metric("epoch")
+        wandb.define_metric("train_loss_epoch", step_metric="epoch")
+        wandb.define_metric("val_loss", step_metric="epoch")
     
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -175,6 +180,7 @@ def main():
 
         ### evaluation ###
         with torch.no_grad():
+            model.eval()
             train_loss_accum = 0
             val_loss_accum = 0
             for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
@@ -203,8 +209,7 @@ def main():
                 "val_loss": val_loss,
                 "train_loss_epoch": train_loss,
                 "epoch": epoch_num,
-                "iter": iter_num
-            }, step=iter_num)
+            }, step=epoch_num)
 
             if val_loss < best_val_loss:
                 best_val_loss, last_improved = val_loss, 0
@@ -218,10 +223,19 @@ def main():
             else:
                 last_improved += 1
                 print(f"Validation has not improved in {last_improved} steps")
+        
+        # create a stop flag so all ranks stop training
+        stop_flag = torch.tensor([0], device=device)
+        if is_main(rank):
             if last_improved > early_stop:
                 print(f"*** no improvement for {early_stop} steps, stopping ***")
-                break
-
+                stop_flag[0] = 1
+        # broadcast stop flag to all ranks
+        dist.broadcast(stop_flag, src=0)
+        if stop_flag.item() == 1:
+            break
+                 
+        if is_main(rank):
             elapsed = (time.time() - t0) / 60
             print(f"[Epoch {epoch_num}] train={train_loss:.4e} | "
                   f"val={val_loss:.4e} | best_val={best_val_loss:.4e} | "
@@ -230,6 +244,7 @@ def main():
     # finish + clean up
     if is_main(rank):
         wandb.finish()
+    dist.barrier()
     cleanup_ddp()
 
 if __name__ == "__main__":
