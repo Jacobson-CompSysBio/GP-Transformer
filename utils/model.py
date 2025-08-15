@@ -133,6 +133,7 @@ class TransformerMLP(nn.Sequential):
             nn.GELU(approximate="tanh"),
             nn.Linear(4 * config.n_embd, config.n_embd)
         )
+
 class TransformerBlock(nn.Module):
     
     def __init__(self,config):
@@ -167,10 +168,6 @@ class G_Encoder(nn.Module):
                 ln_f = nn.LayerNorm(config.n_embd)
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, 1, bias=False)
-
-        # pool tokens, then project (B, T, 1) --> (B, 1) --> (B, n_embd)
-        self.f_proj = nn.Linear(1, config.n_embd, bias=False)
 
         # init weights
         self.apply(self._init_weights)
@@ -195,8 +192,7 @@ class G_Encoder(nn.Module):
         x = self.transformer.ln_f(x)
 
         # output
-        x = self.lm_head(x).squeeze(-1) # shape (B, T, 1)
-        x = self.f_proj(x.mean(dim=1, keepdim=True)) # shape (B, n_embd=768)
+        x = x.mean(dim=1) # mean pool over sequence length --> (B, n_embd)
         return x
 
     def _init_weights(self, m):
