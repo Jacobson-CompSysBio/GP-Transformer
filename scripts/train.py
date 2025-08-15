@@ -61,7 +61,7 @@ def is_main(rank) -> bool:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
@@ -107,10 +107,9 @@ def main():
     batches_per_epoch = len(train_loader)
     batches_per_eval = len(val_loader)
     total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch
+    warmup_iters = batches_per_epoch * 10 # warmup for 10 epochs
     lr_decay_iters = total_iters
-    max_lr, min_lr = (0.1 * args.lr), (0.01 * args.lr) 
-    max_iters = total_iters
+    max_lr, min_lr = (args.lr), (0.01 * args.lr) 
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = 10
@@ -121,6 +120,10 @@ def main():
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
         )
+
+        wandb.define_metric("iter_num")
+        wandb.define_metric("train_loss", step_metric="iter_num")
+        wandb.define_metric("learning_rate", step_metric="iter_num")
 
         # use epochs as steps for epoch-level metrics
         wandb.define_metric("epoch")
@@ -209,7 +212,7 @@ def main():
                 "val_loss": val_loss,
                 "train_loss_epoch": train_loss,
                 "epoch": epoch_num,
-            }, step=epoch_num)
+            })
 
             if val_loss < best_val_loss:
                 best_val_loss, last_improved = val_loss, 0
@@ -241,10 +244,9 @@ def main():
                   f"val={val_loss:.4e} | best_val={best_val_loss:.4e} | "
                   f"elapsed={elapsed:.2f}m")
 
-    # finish + clean up
+    dist.barrier()
     if is_main(rank):
         wandb.finish()
-    dist.barrier()
     cleanup_ddp()
 
 if __name__ == "__main__":
