@@ -122,6 +122,7 @@ def main():
         wandb.init(
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
+            run_name=f"4layers_16heads_256mlpwidth_768embd"
         )
 
         wandb.define_metric("iter_num")
