@@ -97,7 +97,9 @@ def main():
         pin_memory=True)
 
     # set up config
-    config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']))
+    config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']),
+                               n_layer=4,
+                               n_head=16)
     model = GxE_Transformer(config=config).to(device)
     model = DDP(model, device_ids=[device])
 

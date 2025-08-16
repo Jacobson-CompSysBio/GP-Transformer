@@ -3,7 +3,8 @@
 #SBATCH -J gxe-tf-ddp 
 #SBATCH -N 32 
 #SBATCH -t 02:00:00
-#SBATCH -p batch 
+#SBATCH -p extended 
+#SBATCH -q debug
 #SBATCH -o logs/%x.out # Out Path
 #SBATCH -e logs/%x.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
