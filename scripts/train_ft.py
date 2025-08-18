@@ -101,8 +101,10 @@ def main():
     config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']),
                                n_layer=4,
                                n_head=16)
-    model = GxE_Transformer(config=config).to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    model = GxE_FullTransformer(config=config).to(device)
+    model = DDP(model,
+                device_ids=[local_rank],
+                output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_function = torch.nn.MSELoss()
