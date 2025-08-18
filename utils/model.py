@@ -38,12 +38,14 @@ class Block(nn.Module):
 # ----------------------------------------------------------------
 # config for transformer
 @dataclass
-class TransformerConfig:
+class Config:
+    model_type: str = "base"
     block_size: int = 2240 # max sequence length
     vocab_size: int = 3 # 0, 0.5, 1
     n_layer: int = 4 # number of transformer layers
     n_head: int = 8 # number of heads
     n_embd: int = 768 # embedding size
+
 
 # positional encoding (sine/cosine)
 class PositionalEncoding(nn.Module):
@@ -192,7 +194,6 @@ class G_Encoder(nn.Module):
         x = self.transformer.ln_f(x)
 
         # output
-        x = x.mean(dim=1) # mean pool over sequence length --> (B, n_embd)
         return x
 
     def _init_weights(self, m):
@@ -246,7 +247,6 @@ class E_Encoder(nn.Module):
 class GxE_Transformer(nn.Module):
 
     """
-    Full transformer for genomic prediction
     """
     
     def __init__(self,
@@ -283,12 +283,12 @@ class GxE_Transformer(nn.Module):
 
         # only pass through G, E encoders if they exist
         if self.g_enc_flag and self.e_enc_flag:
-            g_enc = self.g_encoder(x["g_data"])
+            g_enc = self.g_encoder(x["g_data"]).mean(dim=1) # (B, T, n_embd) --> (B, n_embd)
             e_enc = self.e_encoder(x["e_data"])
             assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
             x = g_enc + e_enc
         elif self.g_enc_flag:
-            x = self.g_encoder(x["g_data"])
+            x = self.g_encoder(x["g_data"]).mean(dim=1)
         else:
             x = self.e_encoder(x["e_data"])
         for layer in self.hidden_layers:
@@ -331,7 +331,7 @@ class GxE_FullTransformer(nn.Module):
         # only pass through G, E encoders if they exist
         if self.g_enc_flag and self.e_enc_flag:
             g_enc = self.g_encoder(x["g_data"])
-            e_enc = self.e_encoder(x["e_data"])
+            e_enc = self.e_encoder(x["e_data"]).unsqueeze(dim=1)
             # assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
             x = g_enc + e_enc
         elif self.g_enc_flag:

@@ -106,7 +106,7 @@ def main():
         pin_memory=True)
 
     # set up config
-    config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']),
+    config = Config(block_size=len(gxe_train[0][0]['g_data']),
                                n_layer=args.layers_per_block,
                                n_head=args.heads,
                                n_embd=args.emb_size)
