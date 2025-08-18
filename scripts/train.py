@@ -40,14 +40,15 @@ def setup_ddp():
     world_size = int(os.environ["SLURM_NTASKS"])
     local_rank = int(os.environ.get("SLURM_LOCALID", 0))
 
-    torch.cuda.set_device(0)
+    local_rank = 0 
+    torch.cuda.set_device(local_rank)
     dist.init_process_group(
         backend="nccl",
         rank=rank,
         world_size=world_size
     )
-    
-    return torch.device("cuda:0"), local_rank, rank, world_size
+
+    return torch.device(f"cuda:{local_rank}"), local_rank, rank, world_size
 
 
 def cleanup_ddp():
@@ -98,7 +99,10 @@ def main():
     # set up config
     config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']))
     model = GxE_Transformer(n_hidden=2, config=config).to(device)
-    model = DDP(model, device_ids=[device], find_unused_parameters=True)
+    model = DDP(model, 
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_function = torch.nn.MSELoss()
