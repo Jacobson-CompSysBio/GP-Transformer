@@ -78,7 +78,7 @@ def main():
     args = parse_args()
 
     # get wandb run name
-    wandb_run_name = f"FT_{args.batch_size}bs_{args.lr}lr_{args.num_epochs}epochs_{args.early_stop}es" \
+    wandb_run_name = f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.num_epochs}epochs_{args.early_stop}es" \
         f"_{args.layers_per_block}lpb_{args.heads}heads_{args.emb_size}emb"
 
     device, local_rank, rank, world_size = setup_ddp()
@@ -131,6 +131,9 @@ def main():
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
+
+    if is_main(rank):
+        print(f"Training on {batches_per_epoch * args.batch_size} samples for {args.num_epochs} epochs.")
 
     ### wandb logging ###
     if is_main(rank):
