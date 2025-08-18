@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 2 
-#SBATCH -t 0:10:00
+#SBATCH -N 48 
+#SBATCH -t 8:00:00
 #SBATCH -p extended 
-#SBATCH -q debug
 #SBATCH -o logs/%x.out # Out Path
 #SBATCH -e logs/%x.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err

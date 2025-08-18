@@ -15,7 +15,8 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, random_spl
 # add parent directory (one level up) to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
-from utils.model import *
+from models.model import *
+from models.config import Config
 from utils.GetLR import get_lr
 
 load_dotenv()
@@ -112,6 +113,8 @@ def main():
                                n_embd=args.emb_size)
     if args.model_type == "ft":
         model = GxE_FullTransformer(config=config).to(device)
+    elif args.model_type == "ld":
+        model = GxE_LD_FullTransformer(config=config).to(device)
     else:
         model = GxE_Transformer(config=config).to(device)
     model = DDP(model,
