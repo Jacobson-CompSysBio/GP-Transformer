@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 # ----------------------------------------------------------------
 # CNN module for LD-based features

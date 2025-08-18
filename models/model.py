@@ -118,6 +118,48 @@ class GxE_LD_FullTransformer(nn.Module):
     Full transformer for genomic and environmental data with an added LD-encoding CNN
     """
 
-    def __init__(self,):
+
+    """
+    Full transformer for genomic prediction
+    """
     
+    def __init__(self,
+                 g_enc: bool = True,
+                 e_enc: bool = True,
+                 ld_enc: bool = True,
+                 config = None
+                 ):
+        super().__init__()
+
+        # set attributes
+        self.g_enc_flag, self.e_enc_flag, self.ld_enc_flag = g_enc, e_enc, ld_enc
+        if g_enc:
+            self.g_encoder = G_Encoder(config)
+        if e_enc:
+            self.e_encoder = E_Encoder(output_dim=config.n_embd)
+        if ld_enc:
+            self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
+                                         output_dim=config.n_embd,
+                                         num_blocks=config.n_layer)
+        self.hidden_dim = config.n_embd
+        self.hidden_layers = nn.ModuleList(
+            [TransformerBlock(config) for _ in range(config.n_layer)]
+            + [nn.LayerNorm(config.n_embd)]
+        )
+        
+        # init final layer (output of 1 for regression)
+        self.final_layer = nn.Linear(config.n_embd, 1)
+
     def forward(self, x):
+
+        # only pass through G, E encoders if they exist
+        g_enc = self.g_encoder(x["g_data"])
+        e_enc = self.e_encoder(x["e_data"]).unsqueeze(dim=1)
+        ld_enc = self.ld_encoder(x["g_data"])
+        x = g_enc + e_enc + ld_enc
+        for layer in self.hidden_layers:
+            x = layer(x)
+        
+        x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
+        return self.final_layer(x)
+
