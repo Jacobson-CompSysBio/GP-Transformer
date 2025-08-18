@@ -152,6 +152,27 @@ class TransformerBlock(nn.Module):
         x = x + self.dropout(self.mlp(self.ln_2(x)))
         return x
 
+class CNN(nn.Module):
+    pass
+
+class GCNNBlock(nn.module):
+
+    def __init__(self,
+                 channels_in: int,
+                 channels_out: int
+                 ):
+        super().__init__()
+        self.cnn_1 = CNN(channels_in, channels_out)
+        self.ln_1 = nn.LayerNorm(channels_out)
+        self.activation = nn.RELU()
+        self.cnn_2 = CNN(channels_out, channels_out)
+        self.ln_2 = nn.LayerNorm(channels_out)
+        
+    def forward(self, x):
+        x = self.activation(self.ln_1(self.cnn_1(x)))
+        x = self.ln_2(self.cnn_2(x))
+        return x
+
 # create transformer encoder for genotype data
 class G_Encoder(nn.Module):
 
@@ -243,6 +264,39 @@ class E_Encoder(nn.Module):
         return x
 
 # ----------------------------------------------------------------
+# genotype convolutional transformer for linkage dequilibrium extraction(?)
+class G_CNN_TF(nn.Module):
+
+    """
+    Placeholder
+    """
+
+    def __init__(self,
+                 channels_in: int,
+                 channels_out: int,
+                 n_blocks: int = 2,
+                 ):
+        super().__init__()
+
+        self.res_conv = CNN(channels_in, channels_out)
+        self.conv_blocks = nn.ModuleList(
+            [GCNNBlock(channels_in, channels_out)]
+            + [GCNNBlock(channels_out, channels_out) for _ in range(n_blocks-1)]
+        )
+        self.activation = nn.RELU()
+        
+    def forward(self, x):
+        res = self.res_conv(x)
+
+        for block in self.conv_blocks:
+            x = block(x)
+            x = x + res
+            x = self.activation(x)
+            res = x
+ 
+        return x
+
+# ----------------------------------------------------------------
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
 
@@ -257,16 +311,15 @@ class GxE_Transformer(nn.Module):
                  final_activation: nn.Module = nn.Identity(),
                  g_enc: bool = True,
                  e_enc: bool = True,
+                 g_cnn: bool = True,
                  config = None
                  ):
         super().__init__()
 
         # set attributes
-        self.g_enc_flag, self.e_enc_flag = g_enc, e_enc
-        if g_enc:
-            self.g_encoder = G_Encoder(config)
-        if e_enc:
-            self.e_encoder = E_Encoder(output_dim=config.n_embd)
+        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.e_encoder = E_Encoder(output_dim=config.n_embd) if e_enc else None
+        self.g_cnn_transformer = G_CNN_TF(config.vocab_size, config.n_embd) if g_cnn else None
         self.hidden_dim = config.n_embd
         self.hidden_layers = nn.ModuleList(
             [Block(self.g_encoder.output_dim if i == 0 else hidden_dim,
@@ -282,15 +335,11 @@ class GxE_Transformer(nn.Module):
     def forward(self, x):
 
         # only pass through G, E encoders if they exist
-        if self.g_enc_flag and self.e_enc_flag:
-            g_enc = self.g_encoder(x["g_data"]).mean(dim=1) # (B, T, n_embd) --> (B, n_embd)
-            e_enc = self.e_encoder(x["e_data"])
-            assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
-            x = g_enc + e_enc
-        elif self.g_enc_flag:
-            x = self.g_encoder(x["g_data"]).mean(dim=1)
-        else:
-            x = self.e_encoder(x["e_data"])
+        g_enc = self.g_encoder(x["g_data"]).mean(dim=1) if self.g_encoder else 0
+        e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
+        g_cnn = self.g_cnn_transformer(x["g_data"]) if self.g_cnn_transformer else 0 # TODO: dims will be wrong
+        x = g_enc + e_enc + g_cnn
+    
         for layer in self.hidden_layers:
             x = x + layer(x)
 
@@ -307,16 +356,15 @@ class GxE_FullTransformer(nn.Module):
     def __init__(self,
                  g_enc: bool = True,
                  e_enc: bool = True,
+                 g_cnn: bool = True,
                  config = None
                  ):
         super().__init__()
 
         # set attributes
-        self.g_enc_flag, self.e_enc_flag = g_enc, e_enc
-        if g_enc:
-            self.g_encoder = G_Encoder(config)
-        if e_enc:
-            self.e_encoder = E_Encoder(output_dim=config.n_embd)
+        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.e_encoder = E_Encoder(output_dim=config.n_embd) if e_enc else None
+        self.g_cnn_transformer = G_CNN_TF(config.vocab_size, config.n_embd) if g_cnn else None
         self.hidden_dim = config.n_embd
         self.hidden_layers = nn.ModuleList(
             [TransformerBlock(config) for _ in range(config.n_layer)]
@@ -329,15 +377,11 @@ class GxE_FullTransformer(nn.Module):
     def forward(self, x):
 
         # only pass through G, E encoders if they exist
-        if self.g_enc_flag and self.e_enc_flag:
-            g_enc = self.g_encoder(x["g_data"])
-            e_enc = self.e_encoder(x["e_data"]).unsqueeze(dim=1)
-            # assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
-            x = g_enc + e_enc
-        elif self.g_enc_flag:
-            x = self.g_encoder(x["g_data"])
-        else:
-            x = self.e_encoder(x["e_data"])
+        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        e_enc = self.e_encoder(x["e_data"]).unsqueeze(dim=1) if self.e_encoder else 0
+        g_cnn = self.g_cnn_transformer(x["g_data"]) if self.g_cnn_transformer else 0
+        x = g_enc + e_enc + g_cnn
+
         for layer in self.hidden_layers:
             x = layer(x)
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
