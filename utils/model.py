@@ -243,7 +243,7 @@ class E_Encoder(nn.Module):
 
 # ----------------------------------------------------------------
 # create full GxE transformer for genomic prediction
-class GxE_FullTransformer(nn.Module):
+class GxE_Transformer(nn.Module):
 
     """
     Full transformer for genomic prediction
@@ -298,7 +298,7 @@ class GxE_FullTransformer(nn.Module):
 
 # ----------------------------------------------------------------
 # create full GxE transformer (two transformer blocks) for genomic prediction
-class GxE_Transformer(nn.Module):
+class GxE_FullTransformer(nn.Module):
 
     """
     Full transformer for genomic prediction
