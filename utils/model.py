@@ -305,7 +305,6 @@ class GxE_Transformer(nn.Module):
     """
     
     def __init__(self,
-                 n_hidden: int =  4,
                  g_enc: bool = True,
                  e_enc: bool = True,
                  config = None
@@ -320,7 +319,7 @@ class GxE_Transformer(nn.Module):
             self.e_encoder = E_Encoder(output_dim=config.n_embd)
         self.hidden_dim = config.n_embd
         self.hidden_layers = nn.ModuleList(
-            [TransformerBlock(config) for _ in range(n_hidden)]
+            [TransformerBlock(config) for _ in range(config.n_layer)]
             + [nn.LayerNorm(config.n_embd)]
         )
         
