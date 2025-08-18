@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 32 
+#SBATCH -N 2 
 #SBATCH -t 01:00:00
 #SBATCH -p extended 
 #SBATCH -q debug
@@ -46,7 +46,7 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train_ft.py --batch_size 64 \
+    python -u scripts/train.py --batch_size 64 \
         --num_epochs 100_000 \
         --lr 1e-4 \
         --layers_per_block 4\

@@ -61,18 +61,26 @@ def is_main(rank) -> bool:
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--model_type", type=str, default="base")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--early_stop", type=int, default=50)
+    p.add_argument("--layers_per_block", type=int, default=4)
+    p.add_argument("--heads", type=int, default=16)
+    p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
-
 
 ### main ###
 def main():
     # setup
     args = parse_args()
+
+    # get wandb run name
+    wandb_run_name = f"FT_{args.batch_size}bs_{args.lr}lr_{args.num_epochs}epochs_{args.early_stop}es" \
+        f"_{args.layers_per_block}lpb_{args.heads}heads_{args.emb_size}emb"
+
     device, local_rank, rank, world_size = setup_ddp()
 
     # reproducibility 
@@ -99,10 +107,16 @@ def main():
 
     # set up config
     config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']),
-                               n_layer=4,
-                               n_head=16)
-    model = GxE_Transformer(config=config).to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+                               n_layer=args.layers_per_block,
+                               n_head=args.heads,
+                               n_embd=args.emb_size)
+    if args.model_type == "ft":
+        model = GxE_FullTransformer(config=config).to(device)
+    else:
+        model = GxE_Transformer(config=config).to(device)
+    model = DDP(model,
+                device_ids=[local_rank],
+                output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_function = torch.nn.MSELoss()
@@ -123,7 +137,7 @@ def main():
         wandb.init(
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
-            run_name=f"4layers_16heads_256mlpwidth_768embd"
+            name=wandb_run_name
         )
 
         wandb.define_metric("iter_num")
