@@ -195,8 +195,8 @@ class G_Encoder(nn.Module):
         x = self.transformer.ln_f(x)
 
         # output
-        x = self.lm_head(x).squeeze(-1) # shape (B, T, 1)
-        x = self.f_proj(x.mean(dim=1, keepdim=True)) # shape (B, n_embd=768)
+        # x = self.lm_head(x).squeeze(-1) # shape (B, T, 1)
+        # x = self.f_proj(x.mean(dim=1, keepdim=True)) # shape (B, n_embd=768)
         return x
 
     def _init_weights(self, m):
@@ -243,6 +243,9 @@ class E_Encoder(nn.Module):
         # through final layer
         x = self.final_activation(self.final_layer(x))
 
+        # add dimension for addition with encoded genotype data
+        x = x.unsqueeze(1)
+
         return x
 
 # ----------------------------------------------------------------
@@ -272,16 +275,21 @@ class GxE_Transformer(nn.Module):
         if e_enc:
             self.e_encoder = E_Encoder(output_dim=config.n_embd)
         self.hidden_dim = config.n_embd
+        # self.hidden_layers = nn.ModuleList(
+        #     [Block(self.g_encoder.output_dim if i == 0 else hidden_dim,
+        #            hidden_dim,
+        #            dropout=dropout,
+        #            activation=hidden_activation,
+        #            ) for i in range(n_hidden)]
+        # )
         self.hidden_layers = nn.ModuleList(
-            [Block(self.g_encoder.output_dim if i == 0 else hidden_dim,
-                   hidden_dim,
-                   dropout=dropout,
-                   activation=hidden_activation,
-                   ) for i in range(n_hidden)]
+            [TransformerBlock(config) for _ in range(n_hidden)]
+            + [nn.LayerNorm(config.n_embd)]
         )
         
         # init final layer (output of 1 for regression)
-        self.final_layer = nn.Linear(hidden_dim, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
+        # self.final_layer = nn.Linear(hidden_dim, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
+        self.final_layer = nn.Linear(config.n_embd, 1)
 
     def forward(self, x):
 
@@ -289,13 +297,15 @@ class GxE_Transformer(nn.Module):
         if self.g_enc_flag and self.e_enc_flag:
             g_enc = self.g_encoder(x["g_data"])
             e_enc = self.e_encoder(x["e_data"])
-            assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
+            # assert g_enc.shape == e_enc.shape, "G and E encoders must output same shape"
             x = g_enc + e_enc
         elif self.g_enc_flag:
             x = self.g_encoder(x["g_data"])
         else:
             x = self.e_encoder(x["e_data"])
         for layer in self.hidden_layers:
-            x = x + layer(x)
+            # x = x + layer(x)
+            x = layer(x)
+        x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
 
         return self.final_layer(x)

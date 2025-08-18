@@ -97,8 +97,8 @@ def main():
 
     # set up config
     config = TransformerConfig(block_size=len(gxe_train[0][0]['g_data']))
-    model = GxE_Transformer(config=config).to(device)
-    model = DDP(model, device_ids=[device])
+    model = GxE_Transformer(n_hidden=2, config=config).to(device)
+    model = DDP(model, device_ids=[device], find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     loss_function = torch.nn.MSELoss()
