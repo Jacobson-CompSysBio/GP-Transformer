@@ -46,4 +46,9 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train_ft.py --batch_size 64 --num_epochs 100_000 --lr 1e-4
+    python -u scripts/train_ft.py --batch_size 64 \
+        --num_epochs 100_000 \
+        --lr 1e-4 \
+        --layers_per_block 4\
+        --heads 16 \
+        --emb_size 768
