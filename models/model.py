@@ -151,11 +151,11 @@ class GxE_LD_FullTransformer(nn.Module):
         self.final_layer = nn.Linear(config.n_embd, 1)
 
     def forward(self, x):
-
-        # only pass through G, E encoders if they exist
+        # convert ld feats from (B, T) --> (B, T, C) with one hot
+        ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
+        ld_enc = self.ld_encoder(ld_feats.float())
         g_enc = self.g_encoder(x["g_data"])
         e_enc = self.e_encoder(x["e_data"]).unsqueeze(dim=1)
-        ld_enc = self.ld_encoder(x["g_data"])
         x = g_enc + e_enc + ld_enc
         for layer in self.hidden_layers:
             x = layer(x)

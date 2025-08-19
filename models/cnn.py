@@ -13,66 +13,91 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 class ResNetBlock1D(nn.Module):
     
     def __init__(self,
-                 input_channels = 768,
-                 output_channels = 768,
-                 num_conv = 2,
-                 activation = nn.ReLU(),
-                 dropout = 0.1):
+                 in_channels: int,
+                 out_channels: int,
+                 n_convs: int = 2,
+                 kernel_size: int = 3,
+                 activation: nn.Module = nn.ReLU(inplace=True),
+                 dropout: float = 0.1,
+                 use_batchnorm: bool = True):
 
         super().__init__()
-        self.activation = activation
-        self.dropout = nn.Dropout(dropout) 
-        self.convs = nn.ModuleList(
-           [nn.Conv1d(in_channels=input_channels,
-                      out_channels=output_channels,
-                      kernel_size=3,
-                      padding=1) for _ in range(num_conv)]
+        assert n_convs >= 1, "n_convs must be at least 1"
+
+        padding = kernel_size // 2 
+
+        layers = []
+        for i in range(n_convs):
+            conv_in = in_channels if i == 0 else out_channels
+            layers.append(nn.Conv1d(conv_in, out_channels,
+                                    kernel_size,
+                                    padding=padding))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(out_channels))
+            
+            layers.append(activation)
+            if dropout and dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        
+        self.body = nn.Sequential(*layers)
+        self.proj = (
+            nn.Conv1d(in_channels, out_channels,
+                      kernel_size=1)
+                      if in_channels != out_channels
+                      else nn.Identity()
         )
 
-        if input_channels != output_channels:
-            self.residual_conv = nn.Conv1d(in_channels=input_channels,
-                                           out_channels=output_channels,
-                                           kernel_size=1)
-        else:
-            self.residual_conv = None
-
     def forward(self, x):
-        res = self.residual_conv(x) if self.residual_conv else x
-        for conv in self.convs:
-            x = res + self.dropout(self.activation(conv(x)))
-        return x
+        # x: (B, C, L)
+        y = self.body(x)
+        res = self.proj(x)
+        return y + res
     
 class LD_Encoder(nn.Module):
     """
-    CNN-based encoder for LD-based features 
+    CNN-based encoder for LD-based features
+    input: (B, L, C) 
+    output: (B, L, emb_dim)
     """
 
     def __init__(self,
                  input_dim: int = 3,
                  output_dim: int = 768,
                  num_blocks: int = 4,
+                 n_convs_per_block: int = 2,
                  kernel_size: int = 3,
-                 activation: nn.Module = nn.ReLU(),
+                 activation: nn.Module = nn.ReLU(inplace=True),
                  dropout: float = 0.1):
         
         super().__init__()
-        self.input_block = ResNetBlock1D(input_channels=input_dim,
-                                          output_channels=output_dim,
-                                          num_conv=num_blocks,
-                                          activation=activation,
-                                          dropout=dropout)
-        self.res_blocks = nn.ModuleList(
-            [self.input_block] +
+        self.input_dim = input_dim
+
+        # stem to reach output dim
+        self.stem = nn.Conv1d(input_dim, output_dim, kernel_size=1)
+
+        self.blocks = nn.ModuleList(
             [
-                ResNetBlock1D(input_channels=output_dim,
-                              output_channels=output_dim,
-                              num_conv=num_blocks,
-                              activation=activation,
-                              dropout=dropout) for _ in range(num_blocks)
+                ResNetBlock1D(
+                    in_channels=output_dim,
+                    out_channels=output_dim,
+                    n_convs=n_convs_per_block,
+                    kernel_size=kernel_size,
+                    activation=activation,
+                    dropout=dropout,
+                    use_batchnorm=True
+                ) for _ in range(num_blocks)
             ]
         )
-    
+
     def forward(self, x):
-        for block in self.res_blocks:
+        # accept B, T, C and transpose to B, C, T
+        x = x.transpose(1, 2) # B, T, C --> B, C, T
+
+        # project up to emb_dim    
+        x = self.stem(x)
+        for block in self.blocks:
             x = block(x)
+        
+        # transpose back to original shape
+        x = x.transpose(1, 2) # B, C, T --> B, T, C
         return x

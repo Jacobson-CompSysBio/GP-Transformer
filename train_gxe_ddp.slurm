@@ -45,7 +45,7 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py --batch_size 64 \
+    python -u scripts/train.py --batch_size 32 \
         --model_type ld \
         --num_epochs 100_000 \
         --lr 1e-4 \
