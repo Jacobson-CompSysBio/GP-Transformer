@@ -1,6 +1,7 @@
 # import packages 
 import os, sys
 from pathlib import Path
+from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -55,12 +56,13 @@ def load_model(
     checkpoint_path = f'../checkpoints/best_weights/checkpoint_{best_epoch}.pt'
     # checkpoint_path = f'../checkpoints/{model_type}/checkpoint_{best_epoch}.pt'
     checkpoint = torch.load(checkpoint_path)["model"]
-    if model_type == "e_model":
-        model = GxE_Transformer(config=Config, g_enc=False).to(device)
-    elif model_type == "g_model":
-        model = GxE_Transformer(config=Config, e_enc=False).to(device)
-    else:
-        model = GxE_Transformer(config=Config).to(device)
+    # if model_type == "e_model":
+    #     model = GxE_Transformer(config=Config, g_enc=False).to(device)
+    # elif model_type == "g_model":
+    #     model = GxE_Transformer(config=Config, e_enc=False).to(device)
+    # else:
+    #     model = GxE_Transformer(config=Config).to(device)
+    model = GxE_LD_FullTransformer(config=Config).to(device)
     model.load_state_dict(checkpoint)
     return model
 
@@ -85,10 +87,6 @@ def eval(
             actuals.extend(yb.tolist())
     
     return actuals, preds
-
-# TODO: what do with these?
-pearsonr(actuals, preds)
-mean_squared_error(actuals, preds)
 
 def plot_results(
     model_type: str,
@@ -133,7 +131,13 @@ def save_results(
     location_results_df.to_csv(f'../data/results/{model_type}_location_results.csv')
 
 def main():
-    # TODO: make this a command line parameter
+    # set up wand tracking
+    # load_dotenv()
+    # os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
+    # os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
+    # os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
+
+    # TODO: make this a command line parameter / environment variable (preferable)
     model_type = "gxe_model"
 
     # load data
@@ -150,6 +154,10 @@ def main():
     actuals, preds = eval(device, model, test_loader)
     plot_results(model_type, actuals, preds)
     save_results(model_type, actuals, preds)
+
+    # TODO: log these to wandb
+    # pearsonr(actuals, preds)
+    # mean_squared_error(actuals, preds)
 
 if __name__ == "__main__":
     main()
