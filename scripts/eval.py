@@ -18,55 +18,54 @@ from utils.dataset import *
 from models.config import *
 from models.model import *
 
+import random
+random.seed(0); np.random.seed(0); torch.manual_seed(0)
+
 def load_data(
     model_type: str
 ) -> DataLoader:
     # load data
     if model_type == "e_model":
-        test = E_Dataset(split='test', data_path = '../data/maize_data_2014-2022_vs_2023_v2/')
+        test = E_Dataset(split='test', data_path = 'data/maize_data_2014-2023_vs_2024/')
     elif model_type == "g_model":
-        test = G_Dataset(split="test", data_path = '../data/maize_data_2014-2022_vs_2023_v2/')
+        test = G_Dataset(split="test", data_path = 'data/maize_data_2014-2023_vs_2024/')
     else:
-        test = GxE_Dataset(split="test", data_path = '../data/maize_data_2014-2022_vs_2023_v2/')
+        test = GxE_Dataset(split="test", data_path = 'data/maize_data_2014-2023_vs_2024/')
     test_loader = DataLoader(test,
-                            batch_size=64,
-                            shuffle=True)
+                            batch_size=1,
+                            shuffle=False,
+                            )
     return test_loader
-
-def best_epoch(
-    model_type: str
-) -> int:
-    with open(f'../logs/{model_type}/log.txt', 'r') as f:
-        logs = f.readlines()
-        logs = [l.strip() for l in logs][1:]
-    logs = [l.split(',') for l in logs]
-    logs = np.array(logs).astype(float)
-    epochs, train_loss, val_loss = logs.T
-    epochs = epochs.astype(int)
-    epochs = np.arange(0, epochs.max() + 1, 1)
-    best_epoch = int(epochs[np.argmin(val_loss)])
-    return best_epoch
 
 def load_model(
     model_type: str,
-    best_epoch: int,
     device: torch.device
 ):
     # TODO: check for model type (GxE_Transformer / FullTransformer / LD)
-    checkpoint_path = f'../checkpoints/best_weights/checkpoint_{best_epoch}.pt'
-    # checkpoint_path = f'../checkpoints/{model_type}/checkpoint_{best_epoch}.pt'
-    checkpoint = torch.load(checkpoint_path)["model"]
+
+
+    # get checkpoint with highest ending number
+    cpt_dir = os.listdir(f'checkpoints/')
+    best_cpt = max(cpt_dir, key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    checkpoint = torch.load('checkpoints/' + best_cpt)["model"]
+
     # if model_type == "e_model":
     #     model = GxE_Transformer(config=Config, g_enc=False).to(device)
     # elif model_type == "g_model":
     #     model = GxE_Transformer(config=Config, e_enc=False).to(device)
     # else:
     #     model = GxE_Transformer(config=Config).to(device)
-    model = GxE_LD_FullTransformer(config=Config).to(device)
+
+    # TODO: get config args from slurm script
+    config = Config(block_size=2240,
+                            n_layer=4,
+                            n_head=16,
+                            n_embd=768)
+    model = GxE_LD_FullTransformer(config=config).to(device)
     model.load_state_dict(checkpoint)
     return model
 
-def eval(
+def evaluate(
     model,
     test_loader: DataLoader,
     device: torch.device
@@ -81,11 +80,17 @@ def eval(
             
             # get things on device
             for key, value in xb.items():
-                xb[key] = value.to(device)
+                if isinstance(value, torch.Tensor):
+                    if torch.isnan(value).any() or torch.isinf(value).any():
+                        print(f"Invalid tensor found in input batch at key '{key}':")
+                        print(f"  NaN values present: {torch.isnan(value).any().item()}")
+                        print(f"  Inf values present: {torch.isinf(value).any().item()}")
+                        continue
+                    xb[key] = value.to(device, non_blocking=True)
 
             preds.extend(model(xb).detach().tolist())
-            actuals.extend(yb.tolist())
-    
+            actuals.extend(yb['Yield_Mg_ha'])
+
     return actuals, preds
 
 def plot_results(
@@ -107,7 +112,7 @@ def plot_results(
     plt.title("Predicted vs. Actual Maize Yield")
     plt.xlabel("Actual")
     plt.ylabel("Predicted")
-    plt.savefig(f"../data/results/{model_type}_pred_plot.png")
+    plt.savefig(f"data/results/{model_type}_pred_plot.png")
 
 def save_results(
     model_type: str,
@@ -115,20 +120,20 @@ def save_results(
     preds: list
 ) -> None:
     # get locations
-    locations = pd.read_csv('../data/maize_data_2014-2022_vs_2023_v2/location_2023.csv')
-    location_names = list(np.unique(locations['Field_Location']))
+    locations = pd.read_csv('data/maize_data_2014-2023_vs_2024/location_2024.csv')
+    location_names = list(np.unique(locations['Env']))
     locations['actual'] = actuals
     locations['pred'] = preds
 
     location_results_df = pd.DataFrame({'location':[],
                                         'pearson':[]})
     for location in location_names:
-        subset = locations[locations['Field_Location'] == location]
+        subset = locations[locations['Env'] == location]
         pcc = pearsonr(subset['actual'], subset['pred'])[0]
         new_result = pd.DataFrame({'location': [location], 'pearson': [pcc]})
         location_results_df = pd.concat([location_results_df, new_result])
     location_results_df = location_results_df.reset_index(drop=True)
-    location_results_df.to_csv(f'../data/results/{model_type}_location_results.csv')
+    location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
 
 def main():
     # set up wand tracking
@@ -141,23 +146,26 @@ def main():
     model_type = "gxe_model"
 
     # load data
+    print("Loading data...")
     test_loader = load_data(model_type)
 
     # load model
     local_rank = int(os.environ.get("SLURM_LOCALID", 0))
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    torch.cuda.set_device(local_rank)
 
-    best_epoch = best_epoch(model_type)
-    model = load_model(model_type, best_epoch, device)
+    print("Loading model...")
+    model = load_model(model_type, device)
 
     # evaluate
-    actuals, preds = eval(device, model, test_loader)
+    print("Evaluating model...")
+    actuals, preds = evaluate(model, test_loader, device)
     plot_results(model_type, actuals, preds)
     save_results(model_type, actuals, preds)
 
     # TODO: log these to wandb
-    # pearsonr(actuals, preds)
-    # mean_squared_error(actuals, preds)
+    print("Pearson Correlation:", pearsonr(actuals, preds))
+    print("Mean Squared Error:", mean_squared_error(actuals, preds))
 
 if __name__ == "__main__":
     main()
