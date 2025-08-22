@@ -58,10 +58,7 @@ class GxE_Dataset(Dataset):
         if split != "test":
             self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
         else:
-            self.y_data = pd.read_csv(y_path)
-
-            # make sure y_data is aligned with x_data
-            self.y_data = self.y_data[self.y_data.index.isin(self.x_data.index)]
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
             # remove env, hybrid, yield
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'])

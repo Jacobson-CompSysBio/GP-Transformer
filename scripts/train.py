@@ -65,6 +65,7 @@ def parse_args():
     p.add_argument("--model_type", type=str, default="base")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--early_stop", type=int, default=50)
     p.add_argument("--layers_per_block", type=int, default=4)
@@ -121,7 +122,7 @@ def main():
                 device_ids=[local_rank],
                 output_device=local_rank)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_function = torch.nn.MSELoss()
 
     # other options

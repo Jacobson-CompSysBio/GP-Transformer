@@ -32,7 +32,7 @@ def load_data(
     else:
         test = GxE_Dataset(split="test", data_path = 'data/maize_data_2014-2023_vs_2024/')
     test_loader = DataLoader(test,
-                            batch_size=1,
+                            batch_size=32,
                             shuffle=False,
                             )
     return test_loader
@@ -45,9 +45,10 @@ def load_model(
 
 
     # get checkpoint with highest ending number
-    cpt_dir = os.listdir(f'checkpoints/')
-    best_cpt = max(cpt_dir, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-    checkpoint = torch.load('checkpoints/' + best_cpt)["model"]
+    #cpt_dir = os.listdir(f'checkpoints/')
+    #best_cpt = max(cpt_dir, key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    print(os.listdir('checkpoints/'))
+    checkpoint = torch.load('checkpoints/checkpoint_0966.pt')["model"]
 
     # if model_type == "e_model":
     #     model = GxE_Transformer(config=Config, g_enc=False).to(device)
@@ -77,7 +78,6 @@ def evaluate(
     with torch.no_grad():
     # loop through
         for xb, yb in tqdm(test_loader):
-            
             # get things on device
             for key, value in xb.items():
                 if isinstance(value, torch.Tensor):
@@ -99,7 +99,7 @@ def plot_results(
     preds: list
 ) -> None:
     #find line of best fit
-    actuals = np.array(actuals).squeeze(-1)
+    actuals = np.array(actuals)
     preds = np.array(preds).squeeze(-1)
     a, b = np.polyfit(actuals, preds, 1)
 
@@ -150,9 +150,9 @@ def main():
     test_loader = load_data(model_type)
 
     # load model
-    local_rank = int(os.environ.get("SLURM_LOCALID", 0))
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    torch.cuda.set_device(local_rank)
+    # local_rank = int(os.environ.get("SLURM_LOCALID", 0))
+    device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
+    torch.cuda.set_device(0)
 
     print("Loading model...")
     model = load_model(model_type, device)
@@ -161,7 +161,10 @@ def main():
     print("Evaluating model...")
     actuals, preds = evaluate(model, test_loader, device)
     plot_results(model_type, actuals, preds)
-    save_results(model_type, actuals, preds)
+    #save_results(model_type, actuals, preds)
+
+    actuals = np.array(actuals)
+    preds = np.array(preds).squeeze(-1)
 
     # TODO: log these to wandb
     print("Pearson Correlation:", pearsonr(actuals, preds))
