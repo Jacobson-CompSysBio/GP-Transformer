@@ -117,11 +117,6 @@ class GxE_LD_FullTransformer(nn.Module):
     """
     Full transformer for genomic and environmental data with an added LD-encoding CNN
     """
-
-
-    """
-    Full transformer for genomic prediction
-    """
     
     def __init__(self,
                  g_enc: bool = True,

@@ -44,7 +44,6 @@ class GxE_Dataset(Dataset):
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'X_test.csv'
         else:
-            assert data_path != '../data/maize_data_2014-2023_vs_2024/', '2024 y_test.csv not available'
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
         
@@ -56,7 +55,14 @@ class GxE_Dataset(Dataset):
         if split == "sub":
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'])
 
-        self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        if split != "test":
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+        else:
+            self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+
+            # remove env, hybrid, yield
+            self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'])
+
         if split == "sub":
             self.y_data = self.y_data[['Env', 'Hybrid', 'Yield_Mg_ha']]
 
@@ -90,7 +96,7 @@ class GxE_Dataset(Dataset):
         x = {'g_data': tokens,  
              'e_data': env_data}
         
-        if self.split == 'sub':
+        if self.split == 'sub' or self.split == 'test':
             y = {'Env': self.y_data.iloc[index, 0],
                  'Hybrid': self.y_data.iloc[index, 1],
                  'Yield_Mg_ha': self.y_data.iloc[index, 2]}

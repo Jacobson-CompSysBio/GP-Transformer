@@ -1,5 +1,6 @@
 # imports
 import time, os, json, random, math, argparse, sys
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import nullcontext
@@ -65,6 +66,7 @@ def parse_args():
     p.add_argument("--model_type", type=str, default="base")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--early_stop", type=int, default=50)
     p.add_argument("--layers_per_block", type=int, default=4)
@@ -73,14 +75,18 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1)
     return p.parse_args()
 
+def make_run_name(args) -> str:
+    return (
+        f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
+        f"{args.heads}heads_{args.emb_size}emb"    
+    )
+
 ### main ###
 def main():
     # setup
     args = parse_args()
-
-    # get wandb run name
-    wandb_run_name = f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.num_epochs}epochs_{args.early_stop}es" \
-        f"_{args.layers_per_block}lpb_{args.heads}heads_{args.emb_size}emb"
+    wandb_run_name = make_run_name(args)
 
     device, local_rank, rank, world_size = setup_ddp()
 
@@ -121,7 +127,7 @@ def main():
                 device_ids=[local_rank],
                 output_device=local_rank)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     loss_function = torch.nn.MSELoss()
 
     # other options
@@ -140,20 +146,39 @@ def main():
 
     ### wandb logging ###
     if is_main(rank):
-        wandb.init(
+        run = wandb.init(
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
             name=wandb_run_name
         )
 
-        wandb.define_metric("iter_num")
-        wandb.define_metric("train_loss", step_metric="iter_num")
-        wandb.define_metric("learning_rate", step_metric="iter_num")
+        # make checkpoint dir that matches run name
+        run_ckpt_dir = Path("checkpoints") / wandb_run_name
+        if run_ckpt_dir.exists():
+            shutil.rmtree(run_ckpt_dir)
+        run_ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # write run id to logs
+        run_id_file = os.environ.get("WANDB_RUN_ID_FILE")
+        if run_id_file:
+            with open(run_id_file, "w") as f:
+                f.write(run.id.strip())
+            print(f"[INFO] WandB run id written to {run_id_file}: {run.id}")
+
+        cdir_file = os.environ.get("CHECKPOINT_DIR_FILE")
+        if cdir_file:
+            with open(cdir_file, "w") as f:
+                f.write(str(run_ckpt_dir.resolve()))
+            print(f"[INFO] Checkpoint dir written to {cdir_file}: {run_ckpt_dir.resolve()}")
+
+        run.define_metric("iter_num")
+        run.define_metric("train_loss", step_metric="iter_num")
+        run.define_metric("learning_rate", step_metric="iter_num")
 
         # use epochs as steps for epoch-level metrics
-        wandb.define_metric("epoch")
-        wandb.define_metric("train_loss_epoch", step_metric="epoch")
-        wandb.define_metric("val_loss", step_metric="epoch")
+        run.define_metric("epoch")
+        run.define_metric("train_loss_epoch", step_metric="epoch")
+        run.define_metric("val_loss", step_metric="epoch")
     
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -241,12 +266,23 @@ def main():
 
             if val_loss < best_val_loss:
                 best_val_loss, last_improved = val_loss, 0
-                torch.save({
+                ckpt = {
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch_num,
-                    "val_loss": val_loss
-                }, f"checkpoints/checkpoint_{epoch_num:04d}.pt")
+                    "val_loss": val_loss,
+                    "config": {
+                        "model_type": args.model_type,
+                        "block_size": config.block_size,
+                        "n_layer": args.layers_per_block,
+                        "n_head": args.heads,
+                        "n_embd": args.emb_size
+                    },
+                    "run": {"id": run.id if 'run' in locals() else None,
+                            "name": wandb_run_name}
+                }
+                ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
+                torch.save(ckpt, ckpt_path)
                 print(f"*** validation loss improved: {best_val_loss:.4e} ***")
             else:
                 last_improved += 1
@@ -271,7 +307,7 @@ def main():
 
     dist.barrier()
     if is_main(rank):
-        wandb.finish()
+        run.finish()
     cleanup_ddp()
 
 if __name__ == "__main__":
