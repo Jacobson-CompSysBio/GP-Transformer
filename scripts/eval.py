@@ -1,5 +1,7 @@
 # import packages 
 import os, sys
+import wandb
+from argparse import ArgumentParser
 from pathlib import Path
 from dotenv import load_dotenv
 import numpy as np
@@ -21,9 +23,11 @@ from models.model import *
 import random
 random.seed(0); np.random.seed(0); torch.manual_seed(0)
 
-def load_data(
-    model_type: str
-) -> DataLoader:
+RESULTS_DIR = Path("data/results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def load_data(model_type: str):
+
     # load data
     if model_type == "e_model":
         test = E_Dataset(split='test', data_path = 'data/maize_data_2014-2023_vs_2024/')
@@ -35,69 +39,32 @@ def load_data(
                             batch_size=32,
                             shuffle=False,
                             )
-    return test_loader
+    return test, test_loader
 
-def load_model(
-    model_type: str,
-    device: torch.device
-):
-    # TODO: check for model type (GxE_Transformer / FullTransformer / LD)
+def evaluate(model,
+             test_loader: DataLoader,
+             device: torch.device):
 
-
-    # get checkpoint with highest ending number
-    #cpt_dir = os.listdir(f'checkpoints/')
-    #best_cpt = max(cpt_dir, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-    print(os.listdir('checkpoints/'))
-    checkpoint = torch.load('checkpoints/checkpoint_0966.pt')["model"]
-
-    # if model_type == "e_model":
-    #     model = GxE_Transformer(config=Config, g_enc=False).to(device)
-    # elif model_type == "g_model":
-    #     model = GxE_Transformer(config=Config, e_enc=False).to(device)
-    # else:
-    #     model = GxE_Transformer(config=Config).to(device)
-
-    # TODO: get config args from slurm script
-    config = Config(block_size=2240,
-                            n_layer=4,
-                            n_head=16,
-                            n_embd=768)
-    model = GxE_LD_FullTransformer(config=config).to(device)
-    model.load_state_dict(checkpoint)
-    return model
-
-def evaluate(
-    model,
-    test_loader: DataLoader,
-    device: torch.device
-) -> tuple[list, list]:
     preds = []
     actuals = []
-
     model.eval()
+
     with torch.no_grad():
     # loop through
         for xb, yb in tqdm(test_loader):
             # get things on device
             for key, value in xb.items():
-                if isinstance(value, torch.Tensor):
-                    if torch.isnan(value).any() or torch.isinf(value).any():
-                        print(f"Invalid tensor found in input batch at key '{key}':")
-                        print(f"  NaN values present: {torch.isnan(value).any().item()}")
-                        print(f"  Inf values present: {torch.isinf(value).any().item()}")
-                        continue
-                    xb[key] = value.to(device, non_blocking=True)
+                xb[key] = value.to(device, non_blocking=True)
 
             preds.extend(model(xb).detach().tolist())
             actuals.extend(yb['Yield_Mg_ha'])
 
     return actuals, preds
 
-def plot_results(
-    model_type: str,
-    actuals: list,
-    preds: list
-) -> None:
+def plot_results(model_type: str,
+                 actuals: list,
+                 preds: list):
+
     #find line of best fit
     actuals = np.array(actuals)
     preds = np.array(preds).squeeze(-1)
@@ -112,13 +79,19 @@ def plot_results(
     plt.title("Predicted vs. Actual Maize Yield")
     plt.xlabel("Actual")
     plt.ylabel("Predicted")
-    plt.savefig(f"data/results/{model_type}_pred_plot.png")
+
+    out_path = RESULTS_DIR / f"{model_type}_pred_plot.png"
+    plt.savefig(out_path)
+    plt.close()
+    
+    return out_path
+
 
 def save_results(
-    model_type: str,
-    actuals: list,
-    preds: list
-) -> None:
+        model_type: str,
+        actuals: list,
+        preds: list):
+
     # get locations
     locations = pd.read_csv('data/maize_data_2014-2023_vs_2024/location_2024.csv')
     location_names = list(np.unique(locations['Env']))
@@ -135,40 +108,136 @@ def save_results(
     location_results_df = location_results_df.reset_index(drop=True)
     location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
 
-def main():
-    # set up wand tracking
-    # load_dotenv()
-    # os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
-    # os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
-    # os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
+def parse_args():
+    p = ArgumentParser()
+    p.add_argument('--model_type', type=str, default='gxe_model')
+    p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--layers_per_block', type=int, default=4)
+    p.add_argument('--heads', type=int, default=16)
+    p.add_argument('--emb_size', type=int, default=768)
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--checkpoint_dir', type=str, required=True,     # optional manual override
+                   help='Directory from train.py for this run')
+    return p.parse_args()
 
+def make_run_name(args) -> str:
+    return (
+        f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
+        f"{args.heads}heads_{args.emb_size}emb"    
+    )
+
+def load_model(model_type: str,
+               dataset: Dataset,
+               device: torch.device,
+               args):
+
+    ckpt_root = Path(args.checkpoint_dir)
+    if not ckpt_root.exists():
+        raise FileNotFoundError(f"Checkpoint directory {ckpt_root} does not exist.")
+
+    ckpts = sorted([p for p in ckpt_root.glob("checkpoint_*.pt") if p.is_file()])
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoint files found in {ckpt_root}.")
+    
+    best_path = ckpts[-1]
+    print(f"Loading model from {best_path}")
+    payload = torch.load(best_path, map_location="cpu")
+    state = payload["model"]
+    config = payload.get("config", {})
+
+    blk = config.get("block_size", len(dataset[0][0]['g_data']))
+    mtype = config.get("model_type", model_type)
+    n_layer = config.get("n_layer", args.layers_per_block)
+    n_head = config.get("n_head", args.heads)
+    n_embd = config.get("n_embd", args.emb_size)
+
+    config = Config(block_size=blk,
+                    n_layer=n_layer,
+                    n_head=n_head,
+                    n_embd=n_embd
+                )
+    if mtype == "ft":
+        model = GxE_FullTransformer(config=config).to(device)
+    elif mtype == "ld":
+        model = GxE_LD_FullTransformer(config=config).to(device)
+    else:
+        model = GxE_Transformer(config=config).to(device)
+
+    model.load_state_dict(state, strict=False)
+    model.eval()
+
+    return model
+
+def main():
+    args = parse_args()
+
+    # set up wand tracking
+    load_dotenv()
+    os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
+    os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
+    os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
+
+    # resume the run from exported slurm id
+    run_kwargs = dict(
+        project=os.getenv("WANDB_PROJECT"),
+        entity=os.getenv("WANDB_ENTITY"),
+    )
+    run_id = os.getenv("WANDB_RUN_ID")
+    if run_id:
+        run_kwargs.update(dict(id=run_id, resume="allow"))
+        print(f"[INFO] Resuming WandB run with id: {run_id} | Appending eval metrics")
+    else:
+        print("[WARNING] No WandB run ID found. Starting a new run.")
+        run_kwargs.update(dict(name=f"eval_{args.model_type}"))
+    run = wandb.init(**run_kwargs)
+
+    
     # TODO: make this a command line parameter / environment variable (preferable)
-    model_type = "gxe_model"
+    model_type = args.model_type
 
     # load data
     print("Loading data...")
-    test_loader = load_data(model_type)
+    test_data, test_loader = load_data(model_type)
 
     # load model
-    # local_rank = int(os.environ.get("SLURM_LOCALID", 0))
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(0)
 
     print("Loading model...")
-    model = load_model(model_type, device)
+    model = load_model(model_type,
+                       test_data,
+                       device,
+                       args)
 
     # evaluate
     print("Evaluating model...")
     actuals, preds = evaluate(model, test_loader, device)
-    plot_results(model_type, actuals, preds)
+    plot_path = plot_results(model_type, actuals, preds)
     #save_results(model_type, actuals, preds)
 
     actuals = np.array(actuals)
     preds = np.array(preds).squeeze(-1)
 
     # TODO: log these to wandb
-    print("Pearson Correlation:", pearsonr(actuals, preds))
-    print("Mean Squared Error:", mean_squared_error(actuals, preds))
+    pcc = pearsonr(actuals, preds).statistic
+    mse = mean_squared_error(actuals, preds)
+    print("Pearson Correlation:", pcc)
+    print("Mean Squared Error:", mse)
+
+    # log metrics
+    run.summary["test/pearson"] = float(pcc)
+    run.summary["test/mse"] = float(mse)
+    run.summary["test/model_type"] = args.model_type
+    
+    run.log({
+        "test/pearson": float(pcc),
+        "test/mse": float(mse),
+    })
+
+    # plot image
+    run.log({"test/pred_vs_actual": wandb.Image(str(plot_path))})
+    run.finish()
 
 if __name__ == "__main__":
     main()
