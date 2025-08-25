@@ -18,7 +18,7 @@ class ResNetBlock1D(nn.Module):
                  n_convs: int = 2,
                  kernel_size: int = 3,
                  activation: nn.Module = nn.ReLU(inplace=True),
-                 dropout: float = 0.1,
+                 dropout: float = 0.25,
                  use_batchnorm: bool = True):
 
         super().__init__()
@@ -67,7 +67,7 @@ class LD_Encoder(nn.Module):
                  n_convs_per_block: int = 2,
                  kernel_size: int = 3,
                  activation: nn.Module = nn.ReLU(inplace=True),
-                 dropout: float = 0.1):
+                 dropout: float = 0.25):
         
         super().__init__()
         self.input_dim = input_dim

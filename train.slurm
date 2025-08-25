@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J gxe-tf-ddp 
-#SBATCH -N 2 
-#SBATCH -t 1:00:00
-#SBATCH -p extended 
-#SBATCH -q debug
+#SBATCH -N 32 
+#SBATCH -t 8:00:00
+#SBATCH -p extended
 #SBATCH -o logs/%x.out # Out Path
 #SBATCH -e logs/%x.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -23,14 +22,14 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### train hyperparameters ###
-export BATCH_SIZE=128
+export BATCH_SIZE=32
 export MODEL_TYPE=ld
-export NUM_EPOCHS=1
+export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export LAYERS_PER_BLOCK=1
-export HEADS=1
-export EMB_SIZE=256
+export LAYERS_PER_BLOCK=4
+export HEADS=16
+export EMB_SIZE=768
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

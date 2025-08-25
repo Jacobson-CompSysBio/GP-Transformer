@@ -19,7 +19,7 @@ class GxE_Transformer(nn.Module):
     """
     
     def __init__(self,
-                 dropout: float = 0.1,
+                 dropout: float = 0.25,
                  hidden_dim: int = 768,
                  n_hidden: int =  4,
                  hidden_activation: nn.Module = nn.GELU(),

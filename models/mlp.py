@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-
 # ----------------------------------------------------------------
 # create MLP block for flat layers
 class Block(nn.Module):
@@ -19,7 +18,7 @@ class Block(nn.Module):
                  input_dim: int,
                  output_dim: int,
                  activation: nn.Module = nn.GELU(),
-                 dropout: float = 0.1,
+                 dropout: float = 0.25,
                  layernorm: bool = True,
                  ):
         super().__init__()
@@ -47,7 +46,7 @@ class E_Encoder(nn.Module):
                  hidden_dim: int = 128,
                  n_hidden: int = 2,
                  activation: nn.Module = nn.GELU(),
-                 dropout: float = 0.1,
+                 dropout: float = 0.25,
                  layernorm: bool = True,
                  ):
         super().__init__()
