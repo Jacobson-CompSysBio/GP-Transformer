@@ -282,7 +282,10 @@ def main():
                     "epoch": epoch_num,
                     "val_loss": val_loss,
                     "config": {
-                        "model_type": args.model_type,
+                        "g_enc": args.g_enc,
+                        "e_enc": args.e_enc,
+                        "ld_enc": args.ld_enc,
+                        "final_tf": args.final_tf,
                         "block_size": config.block_size,
                         "n_layer": args.layers_per_block,
                         "n_head": args.heads,

@@ -154,6 +154,10 @@ def load_model(dataset: Dataset,
     state = payload["model"]
     config = payload.get("config", {})
 
+    g_enc = config.get("g_enc", args.g_enc)
+    e_enc = config.get("e_enc", args.e_enc)
+    ld_enc = config.get("ld_enc", args.ld_enc)
+    final_tf = config.get("final_tf", args.final_tf)
     blk = config.get("block_size", len(dataset[0][0]['g_data']))
     n_layer = config.get("n_layer", args.layers_per_block)
     n_head = config.get("n_head", args.heads)
@@ -163,10 +167,10 @@ def load_model(dataset: Dataset,
                     n_layer=n_layer,
                     n_head=n_head,
                     n_embd=n_embd)
-    model = GxE_Transformer(g_enc=args.g_enc,
-                            e_enc=args.e_enc,
-                            ld_enc=args.ld_enc,
-                            final_tf=args.final_tf,
+    model = GxE_Transformer(g_enc=g_enc,
+                            e_enc=e_enc,
+                            ld_enc=ld_enc,
+                            final_tf=final_tf,
                             config=config).to(device)
 
     model.load_state_dict(state, strict=False)
