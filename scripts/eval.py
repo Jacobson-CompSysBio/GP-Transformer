@@ -110,7 +110,10 @@ def save_results(
 
 def parse_args():
     p = ArgumentParser()
-    p.add_argument('--model_type', type=str, default='gxe_model')
+    p.add_argument("--g_enc", type=bool, default=True)
+    p.add_argument("--e_enc", type=bool, default=True)
+    p.add_argument("--ld_enc", type=bool, default=True)
+    p.add_argument("--final_tf", type=bool, default=True)
     p.add_argument('--batch_size', type=int, default=32)
     p.add_argument('--layers_per_block', type=int, default=4)
     p.add_argument('--heads', type=int, default=16)
@@ -121,14 +124,19 @@ def parse_args():
     return p.parse_args()
 
 def make_run_name(args) -> str:
+    g = "g+" if args.g_enc else ""
+    e = "e+" if args.e_enc else ""
+    ld = "ld+" if args.ld_enc else ""
+    tf = "tf+" if args.final_tf else ""
+    model_type = g + e + ld + tf
+    model_type = model_type[:-1]
     return (
-        f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
-        f"{args.heads}heads_{args.emb_size}emb"    
+        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
 
-def load_model(model_type: str,
-               dataset: Dataset,
+def load_model(dataset: Dataset,
                device: torch.device,
                args):
 
@@ -147,7 +155,6 @@ def load_model(model_type: str,
     config = payload.get("config", {})
 
     blk = config.get("block_size", len(dataset[0][0]['g_data']))
-    mtype = config.get("model_type", model_type)
     n_layer = config.get("n_layer", args.layers_per_block)
     n_head = config.get("n_head", args.heads)
     n_embd = config.get("n_embd", args.emb_size)
@@ -155,14 +162,12 @@ def load_model(model_type: str,
     config = Config(block_size=blk,
                     n_layer=n_layer,
                     n_head=n_head,
-                    n_embd=n_embd
-                )
-    if mtype == "ft":
-        model = GxE_FullTransformer(config=config).to(device)
-    elif mtype == "ld":
-        model = GxE_LD_FullTransformer(config=config).to(device)
-    else:
-        model = GxE_Transformer(config=config).to(device)
+                    n_embd=n_embd)
+    model = GxE_Transformer(g_enc=args.g_enc,
+                            e_enc=args.e_enc,
+                            ld_enc=args.ld_enc,
+                            final_tf=args.final_tf,
+                            config=config).to(device)
 
     model.load_state_dict(state, strict=False)
     model.eval()
@@ -171,6 +176,8 @@ def load_model(model_type: str,
 
 def main():
     args = parse_args()
+
+    model_type = make_run_name(args)
 
     # set up wand tracking
     load_dotenv()
@@ -189,12 +196,8 @@ def main():
         print(f"[INFO] Resuming WandB run with id: {run_id} | Appending eval metrics")
     else:
         print("[WARNING] No WandB run ID found. Starting a new run.")
-        run_kwargs.update(dict(name=f"eval_{args.model_type}"))
+        run_kwargs.update(dict(name=f"eval_{model_type}"))
     run = wandb.init(**run_kwargs)
-
-    
-    # TODO: make this a command line parameter / environment variable (preferable)
-    model_type = args.model_type
 
     # load data
     print("Loading data...")
@@ -205,8 +208,7 @@ def main():
     torch.cuda.set_device(0)
 
     print("Loading model...")
-    model = load_model(model_type,
-                       test_data,
+    model = load_model(test_data,
                        device,
                        args)
 
@@ -228,7 +230,7 @@ def main():
     # log metrics
     run.summary["test/pearson"] = float(pcc)
     run.summary["test/mse"] = float(mse)
-    run.summary["test/model_type"] = args.model_type
+    run.summary["test/model_type"] = model_type
     
     run.log({
         "test/pearson": float(pcc),
