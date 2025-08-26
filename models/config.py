@@ -13,3 +13,4 @@ class Config:
     n_layer: int = 4 # number of transformer layers
     n_head: int = 8 # number of heads
     n_embd: int = 768 # embedding size
+    dropout: float = 0.25 # dropout frequency

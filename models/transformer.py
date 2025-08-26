@@ -27,7 +27,7 @@ class PositionalEncoding(nn.Module):
         # add batch dimension to pos encoding (1, seq_len, d_model)
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe, persistent=False)
-        self.dropout = nn.Dropout(p=0.25)
+        self.dropout = nn.Dropout(p=config.dropout)
     
     def forward(self, x):
         """
@@ -103,7 +103,7 @@ class TransformerBlock(nn.Module):
         self.attn = SelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = TransformerMLP(config)
-        self.dropout = nn.Dropout(0.25)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         # resid connections
