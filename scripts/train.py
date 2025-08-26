@@ -63,7 +63,10 @@ def is_main(rank) -> bool:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model_type", type=str, default="base")
+    p.add_argument("--g_enc", type=bool, default=True)
+    p.add_argument("--e_enc", type=bool, default=True)
+    p.add_argument("--ld_enc", type=bool, default=True)
+    p.add_argument("--final_tf", type=bool, default=True)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-5)
@@ -73,13 +76,20 @@ def parse_args():
     p.add_argument("--heads", type=int, default=16)
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--dropout", type=float, default=0.25)
     return p.parse_args()
 
 def make_run_name(args) -> str:
+    g = "g+" if args.g_enc else ""
+    e = "e+" if args.e_enc else ""
+    ld = "ld+" if args.ld_enc else ""
+    tf = "tf+" if args.final_tf else ""
+    model_type = g + e + ld + tf
+    model_type = model_type[:-1]
     return (
-        f"{args.model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
-        f"{args.heads}heads_{args.emb_size}emb"    
+        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
 
 ### main ###
@@ -116,13 +126,13 @@ def main():
     config = Config(block_size=len(gxe_train[0][0]['g_data']),
                                n_layer=args.layers_per_block,
                                n_head=args.heads,
-                               n_embd=args.emb_size)
-    if args.model_type == "ft":
-        model = GxE_FullTransformer(config=config).to(device)
-    elif args.model_type == "ld":
-        model = GxE_LD_FullTransformer(config=config).to(device)
-    else:
-        model = GxE_Transformer(config=config).to(device)
+                               n_embd=args.emb_size,
+                               dropout=args.dropout)
+    model = GxE_Transformer(g_enc=args.g_enc,
+                            e_enc=args.e_enc,
+                            ld_enc=args.ld_enc,
+                            final_tf=args.final_tf,
+                            config=config).to(device)
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank)
