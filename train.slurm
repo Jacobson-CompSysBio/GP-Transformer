@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J ld_enc 
-#SBATCH -N 8
-#SBATCH -t 02:00:00
+#SBATCH -J pcc 
+#SBATCH -N 1
+#SBATCH -t 00:10:00
 #SBATCH -p batch 
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -22,16 +23,18 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### train hyperparameters ###
-export G_ENC=False
-export E_ENC=False
+export G_ENC=True
+export E_ENC=True
 export LD_ENC=True
-export BATCH_SIZE=256
-export NUM_EPOCHS=5000
+export BATCH_SIZE=1024
+export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export LAYERS_PER_BLOCK=1
-export HEADS=2
+export HEADS=1
 export EMB_SIZE=128
+export LOSS="pcc"
+export ALPHA=0.5  # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -74,7 +77,8 @@ srun -N ${SLURM_NNODES} \
         --layers_per_block $LAYERS_PER_BLOCK \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
-
+        --loss $LOSS \
+        --alpha $ALPHA
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -105,3 +109,5 @@ python -u scripts/eval.py \
     --layers_per_block $LAYERS_PER_BLOCK \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
+    --loss $LOSS \
+    --alpha $ALPHA
