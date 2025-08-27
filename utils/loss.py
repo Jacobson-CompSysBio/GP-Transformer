@@ -23,7 +23,7 @@ def torch_pearsonr(pred: torch.Tensor, target: torch.Tensor, dim=0, eps=1e-8):
     r = cov / (v_pred.clamp_min(eps).sqrt() * v_target.clamp_min(eps).sqrt())
     return r.clamp(-1.0, 1.0)
 
-class PearsonCorrLoss(nn.Module):
+class LocalPearsonCorrLoss(nn.Module):
     """
     Local (non-DDP) Pearson loss.
     Loss = 1 - r  (averaged across targets if multi-D).
@@ -99,7 +99,7 @@ class BothLoss(nn.Module):
     def __init__(self, alpha: float=0.5):
         super().__init__()
         self.mse = nn.MSELoss(reduction="mean")
-        self.pcc = GlobalPearsonCorrLoss(reduction="mean")
+        self.pcc = LocalPearsonCorrLoss(reduction="mean")
         self.alpha = alpha
 
     def forward(self, pred, target):
@@ -116,7 +116,7 @@ def build_loss(name: str,
     if n == "mse":
         return nn.MSELoss()
     if n == "pcc":
-        return GlobalPearsonCorrLoss()
+        return LocalPearsonCorrLoss()
     if n == "both":
         return BothLoss(alpha=alpha)
     raise ValueError(f"Unknown loss: {name} (expected 'mse', 'pcc', or 'both')")
