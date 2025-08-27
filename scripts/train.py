@@ -63,10 +63,10 @@ def is_main(rank) -> bool:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--g_enc", type=bool, default=True)
-    p.add_argument("--e_enc", type=bool, default=True)
-    p.add_argument("--ld_enc", type=bool, default=True)
-    p.add_argument("--final_tf", type=bool, default=True)
+    p.add_argument("--g_enc", type=bool, action="store_true")
+    p.add_argument("--e_enc", type=bool, action="store_true")
+    p.add_argument("--ld_enc", type=bool, action="store_true")
+    p.add_argument("--final_tf", type=bool, action="store_true")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-5)
