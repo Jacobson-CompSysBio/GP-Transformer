@@ -1,13 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J pcc 
-#SBATCH -N 1
-#SBATCH -t 00:30:00
-#SBATCH -J mse 
-#SBATCH -N 1
-#SBATCH -t 00:10:00
+#SBATCH -J g_enc_mse 
+#SBATCH -N 8
+#SBATCH -t 02:00:00
 #SBATCH -p batch 
-#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -29,15 +25,15 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export BATCH_SIZE=1024
-export NUM_EPOCHS=1
+export BATCH_SIZE=256
+export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export LAYERS_PER_BLOCK=1
-export HEADS=1
+export HEADS=2
 export EMB_SIZE=128
 export LOSS="mse"
-export ALPHA=0.5  # only used if LOSS is "both"
+export ALPHA=0.01  # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
