@@ -56,7 +56,8 @@ class GxE_Transformer(nn.Module):
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
 
     def _forward_tf(self, g_enc, e_enc, ld_enc):
-        e_enc = e_enc.unsqueeze(dim=1)
+        if isinstance(e_enc, torch.Tensor): 
+            e_enc = e_enc.unsqueeze(dim=1)
         x = g_enc + e_enc + ld_enc
         for layer in self.hidden_layers:
             x = layer(x)
@@ -64,40 +65,23 @@ class GxE_Transformer(nn.Module):
         return x
 
     def _forward_mlp(self, g_enc, e_enc, ld_enc):
-        g_enc = g_enc.mean(dim=1)
+        # convert [B, T, C] -> [B, C]
+        if isinstance(g_enc, torch.Tensor):
+            g_enc = g_enc.mean(dim=1)
+        if isinstance(ld_enc, torch.Tensor):
+            ld_enc = ld_enc.mean(dim=1)
         x = g_enc + e_enc + ld_enc
         for layer in self.hidden_layers:
             x = x + layer(x)
         return x
     
     def forward(self, x):
-
-        B = x["g_data"].shape[0]
-        T = x["g_data"].shape[1]
-        device = x["g_data"].device
-        dtype = torch.float32
-
-        # only pass through G, E, LD encoders if they exist
-        #g
-        if self.g_encoder:
-            g_enc = self.g_encoder(x["g_data"])
-        else:
-            g_enc = torch.zeros(B, T, self.config.n_embd, device=device, dtype=dtype)
-
-        # e
-        if self.e_encoder:
-            e_enc = self.e_encoder(x["e_data"])
-        else:
-            e_enc = torch.zeros(B, self.config.n_embd, device=device, dtype=dtype)
-
-        # ld 
+        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
+        ld_enc = 0
         if self.ld_encoder:
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
-        else:
-            ld_enc = torch.zeros(B, T, self.config.n_embd, device=device, dtype=dtype)
-
-        #  
         if self.final_tf:
             x = self._forward_tf(g_enc, e_enc, ld_enc)
         else:
