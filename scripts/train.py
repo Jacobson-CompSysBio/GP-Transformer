@@ -19,6 +19,7 @@ from utils.dataset import *
 from models.model import *
 from models.config import Config
 from utils.GetLR import get_lr
+from utils.loss import build_loss, GlobalPearsonCorrLoss
 
 load_dotenv()
 os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
@@ -88,6 +89,10 @@ def parse_args():
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
+    p.add_argument("--loss", type=str, default="mse",
+                   choices=["mse", "pcc", "both"])
+    p.add_argument("--alpha", type=float, default=0.5,
+                   help="weight for MSE when --loss both (loss = alpha*MSE + (1-alpha)*(1-PCC))")
     return p.parse_args()
 
 def make_run_name(args) -> str:
@@ -97,8 +102,9 @@ def make_run_name(args) -> str:
     tf = "tf+" if args.final_tf else ""
     model_type = g + e + ld + tf
     model_type = model_type[:-1]
+    loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (
-        f"{model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
@@ -149,7 +155,9 @@ def main():
                 output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    loss_function = torch.nn.MSELoss()
+    loss_function = build_loss(args.loss, args.alpha)
+    mse_loss_log = nn.MSELoss(reduction="mean")
+    pcc_loss_log = GlobalPearsonCorrLoss(reduction="mean")
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -163,7 +171,7 @@ def main():
     early_stop = args.early_stop
 
     if is_main(rank):
-        print(f"Training on {batches_per_epoch * args.batch_size} samples for {args.num_epochs} epochs.")
+        print(f"Training on {batches_per_epoch * args.batch_size * int(os.getenv('SLURM_NNODES'))* 8} samples for {args.num_epochs} epochs.")
 
     ### wandb logging ###
     if is_main(rank):
@@ -200,7 +208,22 @@ def main():
         run.define_metric("epoch")
         run.define_metric("train_loss_epoch", step_metric="epoch")
         run.define_metric("val_loss", step_metric="epoch")
-    
+
+        # loss tracking
+        wandb.config.update({"loss": args.loss,
+                             "alpha": args.alpha},
+                             allow_val_change=True)
+        if args.loss == "both":
+            # batch level            
+            run.define_metric("mse", step_metric="iter_num")
+            run.define_metric("pcc_loss", step_metric="iter_num")
+
+            # epoch level
+            run.define_metric("mse_epoch", step_metric="epoch")
+            run.define_metric("pcc_loss_epoch", step_metric="epoch")
+            run.define_metric("mse_epoch", step_metric="epoch")
+            run.define_metric("pcc_loss_epoch", step_metric="epoch")
+
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
     iter_num = 0
@@ -219,13 +242,32 @@ def main():
         for xb, yb in train_loader:
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True).float()
 
             # fwd/bwd pass
             logits = model(xb)
             loss = loss_function(logits, yb)
+
+            # sanity checks
+            assert any(p.requires_grad for p in model.parameters()), "All params have requires_grad=False!"
+            assert logits.is_floating_point(), f"logits dtype must be floating (got {logits.dtype})"
+            assert logits.requires_grad, "logits.requires_grad=False (check encoders/final head for detach/int/argmax/round)"
+            assert loss.requires_grad, "loss.requires_grad=False (computed under no_grad or logits detached?)"
+        
+            # also check final head weights are trainable
+            fw = model.module.final_layer.weight if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.final_layer.weight
+            assert fw.requires_grad, "final_layer weights are frozen"
+
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")
+
+            # compute losses for wandb logging 
+            train_mse_val = None
+            train_pcc_loss_val = None
+            if args.loss == "both":
+                with torch.no_grad():
+                    train_mse_val = mse_loss_log(logits, yb)
+                    train_pcc_loss_val = pcc_loss_log(logits, yb)
 
             # apply learning rate schedule              
             lr = get_lr(iter_num,
@@ -243,11 +285,15 @@ def main():
 
             # log wandb
             if is_main(rank):
-                wandb.log({
+                log_payload = {
                     "train_loss": loss.item(),
                     "learning_rate": lr,
                     "iter_num": iter_num,
-                })
+                }
+                if args.loss == "both":
+                    log_payload["mse"] = float(train_mse_val.item())
+                    log_payload["pcc_loss"] = float(train_pcc_loss_val.item())
+                wandb.log(log_payload)
             iter_num += 1
             pbar.update(1)
         pbar.close()
@@ -257,33 +303,63 @@ def main():
             model.eval()
             train_loss_accum = 0
             val_loss_accum = 0
+
+            # for wandb logging
+            train_mse_accum = torch.tensor(0.0, device=device)
+            train_pcc_loss_accum = torch.tensor(0.0, device=device)
+            val_mse_accum = torch.tensor(0.0, device=device)
+            val_pcc_loss_accum = torch.tensor(0.0, device=device)
+
             for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
                 for k, v in xbt.items():
                     xbt[k] = v.to(device, non_blocking=True)
-                ybt = ybt.to(device, non_blocking=True)
+                ybt = ybt.to(device, non_blocking=True).float()
                 for k, v in xbv.items():
                     xbv[k] = v.to(device, non_blocking=True)
-                ybv = ybv.to(device, non_blocking=True)
+                ybv = ybv.to(device, non_blocking=True).float()
 
                 train_loss_accum += loss_function(model(xbt), ybt)
                 val_loss_accum += loss_function(model(xbv), ybv)
+
+                if args.loss == "both":
+                    train_mse_accum += mse_loss_log(model(xbt), ybt)
+                    train_pcc_loss_accum += pcc_loss_log(model(xbt), ybt)
+                    val_mse_accum += mse_loss_log(model(xbv), ybv)
+                    val_pcc_loss_accum += pcc_loss_log(model(xbv), ybv)
+
                 if train_loss_accum.isnan() or val_loss_accum.isnan():
                     raise RuntimeError("Loss is NaN during evaluation, stopping training.")
         
         # aggregate losses over all ranks
         dist.all_reduce(train_loss_accum)
         dist.all_reduce(val_loss_accum)
+        if args.loss == "both":
+            for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
+                dist.all_reduce(t)
 
         train_loss = (train_loss_accum / batches_per_eval / world_size).item()
         val_loss = (val_loss_accum / batches_per_eval / world_size).item()
+        if args.loss == "both":
+            train_mse = (train_mse_accum / batches_per_eval / world_size).item()
+            train_pcc_loss = (train_pcc_loss_accum / batches_per_eval / world_size).item()
+            val_mse = (val_mse_accum / batches_per_eval / world_size).item()
+            val_pcc_loss = (val_pcc_loss_accum / batches_per_eval / world_size).item()
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
-            wandb.log({
+            log_epoch_payload = {
                 "val_loss": val_loss,
                 "train_loss_epoch": train_loss,
                 "epoch": epoch_num,
-            })
+            }
+            if args.loss == "both":
+                log_epoch_payload.update({
+                    "train_mse": train_mse,
+                    "train_pcc_loss": train_pcc_loss,
+                    "val_mse": val_mse,
+                    "val_pcc_loss": val_pcc_loss,
+                })
+            wandb.log(log_epoch_payload)
 
             if val_loss < best_val_loss:
                 best_val_loss, last_improved = val_loss, 0
@@ -300,7 +376,9 @@ def main():
                         "block_size": config.block_size,
                         "n_layer": args.layers_per_block,
                         "n_head": args.heads,
-                        "n_embd": args.emb_size
+                        "n_embd": args.emb_size,
+                        "loss": args.loss,
+                        "alpha": args.alpha
                     },
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}

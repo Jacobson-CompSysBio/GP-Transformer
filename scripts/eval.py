@@ -135,6 +135,10 @@ def parse_args():
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
+    p.add_argument("--loss", type=str, default="mse",
+                   choices=["mse", "pcc", "both"])
+    p.add_argument("--alpha", type=float, default=0.5,
+                   help="weight for MSE when --loss both (loss = alpha*MSE + (1-alpha)*(1-PCC))")
     p.add_argument('--checkpoint_dir', type=str, required=True,     # optional manual override
                    help='Directory from train.py for this run')
     return p.parse_args()
@@ -146,8 +150,9 @@ def make_run_name(args) -> str:
     tf = "tf+" if args.final_tf else ""
     model_type = g + e + ld + tf
     model_type = model_type[:-1]
+    loss_tag = args.loss
     return (
-        f"{model_type}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
@@ -178,6 +183,8 @@ def load_model(dataset: Dataset,
     n_layer = config.get("n_layer", args.layers_per_block)
     n_head = config.get("n_head", args.heads)
     n_embd = config.get("n_embd", args.emb_size)
+    loss = config.get("loss", args.loss)
+    alpha = config.get("alpha", args.alpha)
 
     config = Config(block_size=blk,
                     n_layer=n_layer,
