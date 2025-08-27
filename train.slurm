@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J gxe-tf-ddp 
-#SBATCH -N 32 
-#SBATCH -t 8:00:00
-#SBATCH -p extended
-#SBATCH -o logs/%x.out # Out Path
-#SBATCH -e logs/%x.err # Err Path
+#SBATCH -J ld_enc 
+#SBATCH -N 8
+#SBATCH -t 02:00:00
+#SBATCH -p batch 
+#SBATCH -o logs/%x-%j.out # Out Path
+#SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
 
 ### env, modules, and settings ###
@@ -22,14 +22,16 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### train hyperparameters ###
-export BATCH_SIZE=32
-export MODEL_TYPE=ld
+export G_ENC=False
+export E_ENC=False
+export LD_ENC=True
+export BATCH_SIZE=256
 export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export LAYERS_PER_BLOCK=4
-export HEADS=16
-export EMB_SIZE=768
+export LAYERS_PER_BLOCK=1
+export HEADS=2
+export EMB_SIZE=128
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -61,14 +63,18 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py --batch_size $BATCH_SIZE \
-        --model_type $MODEL_TYPE \
+    python -u scripts/train.py \
+        --batch_size $BATCH_SIZE \
+        --g_enc $G_ENC \
+        --e_enc $E_ENC \
+        --ld_enc $LD_ENC \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
         --layers_per_block $LAYERS_PER_BLOCK \
         --heads $HEADS \
-        --emb_size $EMB_SIZE 
+        --emb_size $EMB_SIZE \
+
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -88,9 +94,14 @@ else
     exit 2
 fi
 
-python -u scripts/eval.py --model_type $MODEL_TYPE \
+python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
+    --g_enc $G_ENC \
+    --e_enc $E_ENC \
+    --ld_enc $LD_ENC \
+    --num_epochs $NUM_EPOCHS \
+    --lr $LR \
+    --weight_decay $WEIGHT_DECAY \
     --layers_per_block $LAYERS_PER_BLOCK \
     --heads $HEADS \
-    --emb_size $EMB_SIZE \
-    --checkpoint_dir "$CHECKPOINT_DIR"
+    --checkpoint_dir "$CHECKPOINT_DIR" \

@@ -27,6 +27,8 @@ class GxE_Transformer(nn.Module):
                  ):
         super().__init__()
 
+        self.config = config
+
         # set attributes
         self.g_encoder = G_Encoder(config) if g_enc else None
         self.e_encoder = E_Encoder(output_dim=config.n_embd, dropout=config.dropout) if e_enc else None
@@ -53,7 +55,7 @@ class GxE_Transformer(nn.Module):
         # init final layer (output of 1 for regression)
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
 
-    def _forward_tf(self, x, g_enc, e_enc, ld_enc):
+    def _forward_tf(self, g_enc, e_enc, ld_enc):
         e_enc = e_enc.unsqueeze(dim=1)
         x = g_enc + e_enc + ld_enc
         for layer in self.hidden_layers:
@@ -61,7 +63,7 @@ class GxE_Transformer(nn.Module):
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
         return x
 
-    def _forward_mlp(self, x, g_enc, e_enc, ld_enc):
+    def _forward_mlp(self, g_enc, e_enc, ld_enc):
         g_enc = g_enc.mean(dim=1)
         x = g_enc + e_enc + ld_enc
         for layer in self.hidden_layers:
@@ -70,17 +72,36 @@ class GxE_Transformer(nn.Module):
     
     def forward(self, x):
 
-        # only pass through G, E encoders if they exist
-        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
-        e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
-        ld_enc = 0
+        B = x["g_data"].shape[0]
+        T = x["g_data"].shape[1]
+        device = x["g_data"].device
+        dtype = torch.float32
+
+        # only pass through G, E, LD encoders if they exist
+        #g
+        if self.g_encoder:
+            g_enc = self.g_encoder(x["g_data"])
+        else:
+            g_enc = torch.zeros(B, T, self.config.n_embd, device=device, dtype=dtype)
+
+        # e
+        if self.e_encoder:
+            e_enc = self.e_encoder(x["e_data"])
+        else:
+            e_enc = torch.zeros(B, self.config.n_embd, device=device, dtype=dtype)
+
+        # ld 
         if self.ld_encoder:
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
-        if self.final_tf:
-            x = self._forward_tf(x, g_enc, e_enc, ld_enc)
         else:
-            x = self._forward_mlp(x, g_enc, e_enc, ld_enc)
+            ld_enc = torch.zeros(B, T, self.config.n_embd, device=device, dtype=dtype)
+
+        #  
+        if self.final_tf:
+            x = self._forward_tf(g_enc, e_enc, ld_enc)
+        else:
+            x = self._forward_mlp(g_enc, e_enc, ld_enc)
 
         return self.final_layer(x)
 

@@ -61,12 +61,23 @@ def is_main(rank) -> bool:
     """check if current process is main"""
     return rank == 0
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--g_enc", type=bool, action="store_true")
-    p.add_argument("--e_enc", type=bool, action="store_true")
-    p.add_argument("--ld_enc", type=bool, action="store_true")
-    p.add_argument("--final_tf", type=bool, action="store_true")
+    p.add_argument("--g_enc", type=str2bool, default=True)
+    p.add_argument("--e_enc", type=str2bool, default=True)
+    p.add_argument("--ld_enc", type=str2bool, default=True)
+    p.add_argument("--final_tf", type=str2bool, default=True)
+
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-5)

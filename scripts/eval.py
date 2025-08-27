@@ -1,7 +1,7 @@
 # import packages 
 import os, sys
 import wandb
-from argparse import ArgumentParser
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 import numpy as np
@@ -108,17 +108,33 @@ def save_results(
     location_results_df = location_results_df.reset_index(drop=True)
     location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 def parse_args():
-    p = ArgumentParser()
-    p.add_argument("--g_enc", type=bool, action="store_true")
-    p.add_argument("--e_enc", type=bool, action="store_true")
-    p.add_argument("--ld_enc", type=bool, action="store_true")
-    p.add_argument("--final_tf", type=bool, action="store_true")
-    p.add_argument('--batch_size', type=int, default=32)
-    p.add_argument('--layers_per_block', type=int, default=4)
-    p.add_argument('--heads', type=int, default=16)
-    p.add_argument('--emb_size', type=int, default=768)
-    p.add_argument('--seed', type=int, default=1)
+    p = argparse.ArgumentParser()
+    p.add_argument("--g_enc", type=str2bool, default=True)
+    p.add_argument("--e_enc", type=str2bool, default=True)
+    p.add_argument("--ld_enc", type=str2bool, default=True)
+    p.add_argument("--final_tf", type=str2bool, default=True)
+
+    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-5)
+    p.add_argument("--num_epochs", type=int, default=1000)
+    p.add_argument("--early_stop", type=int, default=50)
+    p.add_argument("--layers_per_block", type=int, default=4)
+    p.add_argument("--heads", type=int, default=16)
+    p.add_argument("--emb_size", type=int, default=768)
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--dropout", type=float, default=0.25)
     p.add_argument('--checkpoint_dir', type=str, required=True,     # optional manual override
                    help='Directory from train.py for this run')
     return p.parse_args()
