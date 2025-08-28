@@ -122,25 +122,36 @@ def main():
     random.seed(args.seed + rank)
 
     # data (samplers are needed for DDP)
-    gxe = GxE_Dataset(split="train")
-    gxe_train, gxe_val = random_split(gxe, 
-                                      [int(len(gxe)*0.8), len(gxe)-int(len(gxe)*0.8)])
-    train_sampler = DistributedSampler(gxe_train, shuffle=True)
-    val_sampler = DistributedSampler(gxe_val, shuffle=False)
+    train_ds = GxE_Dataset(
+        split="train",
+        data_path='data/maize_data_2014-2023_vs_2024/',
+        index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+        scaler=None
+    )
+    scaler = train_ds.scaler
+    val_ds = GxE_Dataset(
+        split="val",
+        data_path="data/maize_data_2014-2023_vs_2024/",
+        index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
+        scaler=scaler
+    )
+
+    train_sampler = DistributedSampler(train_ds, shuffle=True)
+    val_sampler = DistributedSampler(val_ds, shuffle=False)
     train_loader = DataLoader(
-        gxe_train,
+        train_ds,
         batch_size=args.batch_size,
         sampler=train_sampler,
         pin_memory=True,
     )
     val_loader = DataLoader(
-        gxe_val, 
+        val_ds, 
         batch_size=args.batch_size, 
         sampler=val_sampler,
         pin_memory=True)
 
     # set up config
-    config = Config(block_size=len(gxe_train[0][0]['g_data']),
+    config = Config(block_size=len(train_ds[0][0]['g_data']),
                                n_layer=args.layers_per_block,
                                n_head=args.heads,
                                n_embd=args.emb_size,

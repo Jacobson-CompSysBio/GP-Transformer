@@ -25,21 +25,39 @@ random.seed(0); np.random.seed(0); torch.manual_seed(0)
 
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR = 'data/maize_data_2014-2023_vs_2024/'
+INDEX_MAP = 'data/maize_data_2014-2023_vs_2024/'
 
-def load_data(model_type: str):
+def _fit_train_scaler():
+    """
+    Build train dataset once to fit the standard scaler
+    """
+    train_ds = GxE_Dataset(
+        split="train",
+        data_path=DATA_DIR,
+        index_map_path=INDEX_MAP + 'location_2014_2023.csv',
+        scaler=None
+    )
+    return train_ds.scaler
 
-    # load data
-    if model_type == "e_model":
-        test = E_Dataset(split='test', data_path = 'data/maize_data_2014-2023_vs_2024/')
-    elif model_type == "g_model":
-        test = G_Dataset(split="test", data_path = 'data/maize_data_2014-2023_vs_2024/')
-    else:
-        test = GxE_Dataset(split="test", data_path = 'data/maize_data_2014-2023_vs_2024/')
-    test_loader = DataLoader(test,
-                            batch_size=32,
-                            shuffle=False,
-                            )
-    return test, test_loader
+def load_data(split: str = "test",
+              batch_size: int = 32):
+    # get scaler 
+    scaler = _fit_train_scaler()
+    ds = GxE_Dataset(
+        split=split,
+        data_path=DATA_DIR,
+        index_map_path=INDEX_MAP + 'location_2024.csv',
+        scaler=scaler
+    )
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=True
+    )
+
+    return ds, loader 
 
 def evaluate(model,
              test_loader: DataLoader,
@@ -228,7 +246,7 @@ def main():
 
     # load data
     print("Loading data...")
-    test_data, test_loader = load_data(model_type)
+    test_data, test_loader = load_data(split="test")
 
     # load model
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")

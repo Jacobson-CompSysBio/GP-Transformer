@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J pcc-mse 
+#SBATCH -J new-train-split 
 #SBATCH -N 1
 #SBATCH -t 00:10:00
 #SBATCH -p batch 

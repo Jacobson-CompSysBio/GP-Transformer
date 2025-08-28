@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J g_enc_mse 
+#SBATCH -J all_enc_both
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch 
@@ -32,8 +32,8 @@ export WEIGHT_DECAY=1e-5
 export LAYERS_PER_BLOCK=1
 export HEADS=2
 export EMB_SIZE=128
-export LOSS="mse"
-export ALPHA=0.01  # only used if LOSS is "both"
+export LOSS="both"
+export ALPHA=0.5  # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
