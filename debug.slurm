@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J new-train-split 
+#SBATCH -J debug-ext-gxe 
 #SBATCH -N 1
 #SBATCH -t 00:10:00
-#SBATCH -p batch 
-#SBATCH -q debug
+#SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -26,15 +25,21 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export BATCH_SIZE=1024
+
+export BATCH_SIZE=256
 export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export LAYERS_PER_BLOCK=1
-export HEADS=1
-export EMB_SIZE=128
+
+export G_LAYERS=1
+export LD_LAYERS=1
+export MLP_LAYERS=1
+export GXE_LAYERS=1
+
+export HEADS=4
+export EMB_SIZE=256
 export LOSS="both"
-export ALPHA=0.1  # only used if LOSS is "both"
+export ALPHA=0.01  # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -74,7 +79,10 @@ srun -N ${SLURM_NNODES} \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
-        --layers_per_block $LAYERS_PER_BLOCK \
+        --g_layers $G_LAYERS \
+        --ld_layers $LD_LAYERS \
+        --mlp_layers $MLP_LAYERS \
+        --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
@@ -106,8 +114,12 @@ python -u scripts/eval.py \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
-    --layers_per_block $LAYERS_PER_BLOCK \
+    --g_layers $G_LAYERS \
+    --ld_layers $LD_LAYERS \
+    --mlp_layers $MLP_LAYERS \
+    --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
-    --checkpoint_dir "$CHECKPOINT_DIR" \
+    --emb_size $EMB_SIZE \
     --loss $LOSS \
-    --alpha $ALPHA
+    --alpha $ALPHA \
+    --checkpoint_dir "$CHECKPOINT_DIR"

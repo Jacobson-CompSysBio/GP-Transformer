@@ -125,7 +125,7 @@ class G_Encoder(nn.Module):
             dict(
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
                 wpe = PositionalEncoding(config),
-                h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)]),
+                h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_g_layer)]),
                 ln_f = nn.LayerNorm(config.n_embd)
             )
         )

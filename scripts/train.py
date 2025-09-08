@@ -84,7 +84,12 @@ def parse_args():
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--early_stop", type=int, default=50)
-    p.add_argument("--layers_per_block", type=int, default=4)
+
+    p.add_argument("--g_layers", type=int, default=1)
+    p.add_argument("--ld_layers", type=int, default=1)
+    p.add_argument("--mlp_layers", type=int, default=1)
+    p.add_argument("--gxe_layers", type=int, default=4)
+
     p.add_argument("--heads", type=int, default=16)
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
@@ -105,7 +110,8 @@ def make_run_name(args) -> str:
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (
         f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
-        f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
+        f"{args.num_epochs}epochs_{args.early_stop}es_"
+        f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
 
@@ -152,10 +158,13 @@ def main():
 
     # set up config
     config = Config(block_size=len(train_ds[0][0]['g_data']),
-                               n_layer=args.layers_per_block,
-                               n_head=args.heads,
-                               n_embd=args.emb_size,
-                               dropout=args.dropout)
+                    n_head=args.heads,
+                    n_g_layer=args.g_layers,
+                    n_ld_layer=args.ld_layers,
+                    n_mlp_layer=args.mlp_layers,
+                    n_gxe_layer=args.gxe_layers,
+                    n_embd=args.emb_size,
+                    dropout=args.dropout)
     model = GxE_Transformer(g_enc=args.g_enc,
                             e_enc=args.e_enc,
                             ld_enc=args.ld_enc,
@@ -385,7 +394,10 @@ def main():
                         "ld_enc": args.ld_enc,
                         "final_tf": args.final_tf,
                         "block_size": config.block_size,
-                        "n_layer": args.layers_per_block,
+                        "g_layers": args.g_layers,
+                        "ld_layers": args.ld_layers,
+                        "mlp_layers": args.mlp_layers,
+                        "gxe_layers": args.gxe_layers,
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
                         "loss": args.loss,

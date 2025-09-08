@@ -32,16 +32,18 @@ class GxE_Transformer(nn.Module):
 
         # set attributes
         self.g_encoder = G_Encoder(config) if g_enc else None
-        self.e_encoder = E_Encoder(output_dim=config.n_embd, dropout=config.dropout) if e_enc else None
+        self.e_encoder = E_Encoder(output_dim=config.n_embd,
+                                   n_hidden=config.n_mlp_layer,
+                                   dropout=config.dropout) if e_enc else None
         self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
-                                         output_dim=config.n_embd,
-                                         num_blocks=config.n_layer,
-                                         dropout=config.dropout) if ld_enc else None
+                                     output_dim=config.n_embd,
+                                     num_blocks=config.n_ld_layer,
+                                     dropout=config.dropout) if ld_enc else None
         self.moe_w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0])) if moe else None
         if final_tf:
             self.final_tf = True
             self.hidden_layers = nn.ModuleList(
-            [TransformerBlock(config) for _ in range(config.n_layer)]
+            [TransformerBlock(config) for _ in range(config.n_gxe_layer)]
             + [nn.LayerNorm(config.n_embd)]
             )
         else:
@@ -51,7 +53,7 @@ class GxE_Transformer(nn.Module):
                     config.n_embd,
                     dropout=config.dropout,
                     activation=nn.GELU(),
-                    ) for i in range(config.n_layer)]
+                    ) for i in range(config.n_gxe_layer)]
             )
         
         # init final layer (output of 1 for regression)
@@ -97,4 +99,3 @@ class GxE_Transformer(nn.Module):
             x = self._forward_mlp(g_enc, e_enc, ld_enc)
 
         return self.final_layer(x)
-

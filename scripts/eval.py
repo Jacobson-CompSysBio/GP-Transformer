@@ -148,7 +148,12 @@ def parse_args():
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=1000)
     p.add_argument("--early_stop", type=int, default=50)
-    p.add_argument("--layers_per_block", type=int, default=4)
+
+    p.add_argument("--g_layers", type=int, default=1)
+    p.add_argument("--ld_layers", type=int, default=1)
+    p.add_argument("--mlp_layers", type=int, default=1)
+    p.add_argument("--gxe_layers", type=int, default=4)
+
     p.add_argument("--heads", type=int, default=16)
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
@@ -168,10 +173,11 @@ def make_run_name(args) -> str:
     tf = "tf+" if args.final_tf else ""
     model_type = g + e + ld + tf
     model_type = model_type[:-1]
-    loss_tag = args.loss
+    loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (
         f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
-        f"{args.num_epochs}epochs_{args.early_stop}es_{args.layers_per_block}lpb_"
+        f"{args.num_epochs}epochs_{args.early_stop}es_"
+        f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
     )
 
@@ -198,14 +204,20 @@ def load_model(dataset: Dataset,
     ld_enc = config.get("ld_enc", args.ld_enc)
     final_tf = config.get("final_tf", args.final_tf)
     blk = config.get("block_size", len(dataset[0][0]['g_data']))
-    n_layer = config.get("n_layer", args.layers_per_block)
+    g_layer = config.get("g_layers", args.g_layers)
+    ld_layer = config.get("ld_layers", args.ld_layers)
+    mlp_layer = config.get("mlp_layers", args.mlp_layers)
+    gxe_layer = config.get("gxe_layers", args.gxe_layers)
     n_head = config.get("n_head", args.heads)
     n_embd = config.get("n_embd", args.emb_size)
     loss = config.get("loss", args.loss)
     alpha = config.get("alpha", args.alpha)
 
     config = Config(block_size=blk,
-                    n_layer=n_layer,
+                    n_g_layer=g_layer,
+                    n_ld_layer=ld_layer,
+                    n_mlp_layer=mlp_layer,
+                    n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd)
     model = GxE_Transformer(g_enc=g_enc,
@@ -213,7 +225,6 @@ def load_model(dataset: Dataset,
                             ld_enc=ld_enc,
                             final_tf=final_tf,
                             config=config).to(device)
-
     model.load_state_dict(state, strict=False)
     model.eval()
 
