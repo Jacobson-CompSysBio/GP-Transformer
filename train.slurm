@@ -4,7 +4,6 @@
 #SBATCH -N 8
 #SBATCH -t 00:45:00
 #SBATCH -p batch
-#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err

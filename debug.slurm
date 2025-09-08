@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J new-train-split 
+#SBATCH -J debug-ext-gxe 
 #SBATCH -N 1
 #SBATCH -t 00:10:00
-#SBATCH -p batch 
-#SBATCH -q debug
+#SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -27,7 +26,7 @@ export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 
-export BATCH_SIZE=1024
+export BATCH_SIZE=256
 export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
@@ -35,7 +34,7 @@ export WEIGHT_DECAY=1e-5
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=4
+export GXE_LAYERS=1
 
 export HEADS=4
 export EMB_SIZE=256
