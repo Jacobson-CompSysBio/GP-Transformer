@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J newdata
+#SBATCH -J moe-gxe-extended
 #SBATCH -N 8
-#SBATCH -t 00:45:00
+#SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -25,6 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
+export MOE=True
 
 export BATCH_SIZE=256
 export NUM_EPOCHS=10_000
@@ -34,7 +35,7 @@ export WEIGHT_DECAY=1e-5
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=4
+export GXE_LAYERS=16
 
 export HEADS=4
 export EMB_SIZE=256
@@ -76,6 +77,7 @@ srun -N ${SLURM_NNODES} \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
+        --moe $MOE \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -111,6 +113,7 @@ python -u scripts/eval.py \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
+    --moe $MOE \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
