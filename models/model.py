@@ -23,6 +23,7 @@ class GxE_Transformer(nn.Module):
                  e_enc: bool = True,
                  ld_enc: bool = True,
                  final_tf: bool = True,
+                 moe: bool = True,
                  config = None
                  ):
         super().__init__()
@@ -36,6 +37,7 @@ class GxE_Transformer(nn.Module):
                                          output_dim=config.n_embd,
                                          num_blocks=config.n_layer,
                                          dropout=config.dropout) if ld_enc else None
+        self.moe_w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0])) if moe else None
         if final_tf:
             self.final_tf = True
             self.hidden_layers = nn.ModuleList(
@@ -54,11 +56,18 @@ class GxE_Transformer(nn.Module):
         
         # init final layer (output of 1 for regression)
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
+    
+    def _concat(self, g_enc, e_enc, ld_enc):
+        if self.moe_w is not None:
+            g_enc = self.moe_w[0] * g_enc
+            e_enc = self.moe_w[1] * e_enc
+            ld_enc = self.moe_w[2] * ld_enc
+        return g_enc + e_enc + ld_enc
 
     def _forward_tf(self, g_enc, e_enc, ld_enc):
         if isinstance(e_enc, torch.Tensor): 
             e_enc = e_enc.unsqueeze(dim=1)
-        x = g_enc + e_enc + ld_enc
+        x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
             x = layer(x)
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
@@ -70,7 +79,7 @@ class GxE_Transformer(nn.Module):
             g_enc = g_enc.mean(dim=1)
         if isinstance(ld_enc, torch.Tensor):
             ld_enc = ld_enc.mean(dim=1)
-        x = g_enc + e_enc + ld_enc
+        x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
             x = x + layer(x)
         return x
