@@ -25,7 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export GXE_ENC="tf"  # options: "tf", "mlp", "cnn"
+export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256
@@ -78,6 +78,7 @@ srun -N ${SLURM_NNODES} \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
+        --gxe_enc $GXE_ENC \
         --moe $MOE \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
@@ -114,6 +115,7 @@ python -u scripts/eval.py \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
+    --gxe_enc $GXE_ENC \
     --moe $MOE \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \

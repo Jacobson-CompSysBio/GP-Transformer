@@ -36,7 +36,7 @@ export WEIGHT_DECAY=1e-5
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=16
+export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
@@ -78,6 +78,7 @@ srun -N ${SLURM_NNODES} \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
+        --gxe_enc $GXE_ENC \
         --moe $MOE \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
@@ -114,6 +115,7 @@ python -u scripts/eval.py \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
+    --gxe_enc $GXE_ENC \
     --moe $MOE \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
