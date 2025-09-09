@@ -22,7 +22,7 @@ class GxE_Transformer(nn.Module):
                  g_enc: bool = True,
                  e_enc: bool = True,
                  ld_enc: bool = True,
-                 gxe_enc: bool = True,
+                 gxe_enc: str = "tf",
                  moe: bool = True,
                  config = None
                  ):

@@ -25,6 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
+export GXE_ENC="tf"  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256

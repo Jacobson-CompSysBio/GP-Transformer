@@ -15,7 +15,7 @@ def parse_args():
     p.add_argument("--g_enc", type=str2bool, default=True)
     p.add_argument("--e_enc", type=str2bool, default=True)
     p.add_argument("--ld_enc", type=str2bool, default=True)
-    p.add_argument("--final_tf", type=str2bool, default=True)
+    p.add_argument("--gxe_enc", type=str, default=True)
     p.add_argument("--moe", type=str2bool, default=True)
 
     p.add_argument("--batch_size", type=int, default=32)
@@ -45,8 +45,11 @@ def make_run_name(args) -> str:
     g = "g+" if args.g_enc else ""
     e = "e+" if args.e_enc else ""
     ld = "ld+" if args.ld_enc else ""
-    tf = "tf+" if args.final_tf else ""
-    model_type = g + e + ld + tf
+    if args.gxe_enc in ["tf", "mlp", "cnn"]:
+        gxe = f"{args.gxe_enc}+"
+    else:
+        gxe = ""
+    model_type = g + e + ld + gxe
     model_type = model_type[:-1]
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (

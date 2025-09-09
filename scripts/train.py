@@ -115,7 +115,7 @@ def main():
     model = GxE_Transformer(g_enc=args.g_enc,
                             e_enc=args.e_enc,
                             ld_enc=args.ld_enc,
-                            final_tf=args.final_tf,
+                            gxe_enc=args.gxe_enc,
                             moe=args.moe,
                             config=config).to(device)
     model = DDP(model,
@@ -340,7 +340,7 @@ def main():
                         "g_enc": args.g_enc,
                         "e_enc": args.e_enc,
                         "ld_enc": args.ld_enc,
-                        "final_tf": args.final_tf,
+                        "gxe_enc": args.gxe_enc,
                         "block_size": config.block_size,
                         "g_layers": args.g_layers,
                         "ld_layers": args.ld_layers,

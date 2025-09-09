@@ -127,21 +127,6 @@ def save_results(
     location_results_df = location_results_df.reset_index(drop=True)
     location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
 
-def make_run_name(args) -> str:
-    g = "g+" if args.g_enc else ""
-    e = "e+" if args.e_enc else ""
-    ld = "ld+" if args.ld_enc else ""
-    tf = "tf+" if args.final_tf else ""
-    model_type = g + e + ld + tf
-    model_type = model_type[:-1]
-    loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
-    return (
-        f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
-        f"{args.num_epochs}epochs_{args.early_stop}es_"
-        f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
-        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
-    )
-
 def load_model(dataset: Dataset,
                device: torch.device,
                args):
@@ -163,7 +148,7 @@ def load_model(dataset: Dataset,
     g_enc = config.get("g_enc", args.g_enc)
     e_enc = config.get("e_enc", args.e_enc)
     ld_enc = config.get("ld_enc", args.ld_enc)
-    final_tf = config.get("final_tf", args.final_tf)
+    gxe_enc = config.get("gxe_enc", args.gxe_enc)
     blk = config.get("block_size", len(dataset[0][0]['g_data']))
     g_layer = config.get("g_layers", args.g_layers)
     ld_layer = config.get("ld_layers", args.ld_layers)
@@ -184,7 +169,7 @@ def load_model(dataset: Dataset,
     model = GxE_Transformer(g_enc=g_enc,
                             e_enc=e_enc,
                             ld_enc=ld_enc,
-                            final_tf=final_tf,
+                            gxe_enc=gxe_enc,
                             config=config).to(device)
     model.load_state_dict(state, strict=False)
     model.eval()
