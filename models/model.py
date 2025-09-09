@@ -57,11 +57,15 @@ class GxE_Transformer(nn.Module):
             )
         elif gxe_enc == "cnn":
             self.gxe_enc = "cnn"
-            # write cnn code here
+            self.hidden_layers = nn.ModuleList(
+                [ResNetBlock1D(in_channels=self.g_encoder.output_dim if i == 0 else config.n_embd,
+                               out_channels=config.n_embd,
+                               dropout=config.dropout,
+                               use_batchnorm=True) for i in range(config.n_gxe_layer)]
+            )
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
-
-        
+ 
         # init final layer (output of 1 for regression)
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
     
@@ -93,11 +97,15 @@ class GxE_Transformer(nn.Module):
         return x
     
     def _forward_cnn(self, g_enc, e_enc, ld_enc):
+        #unsqueeze e to concat properly
         if isinstance(e_enc, torch.Tensor): 
             e_enc = e_enc.unsqueeze(dim=1)
         x = self._concat(g_enc, e_enc, ld_enc)
+
+        x = x.transpose(1, 2) # (B, T, C) -> (B, C, T)
         for layer in self.hidden_layers:
-            x = x + layer(x)
+            x = layer(x)
+        x = x.transpose(1, 2) # (B, C, T) -> (B, T, C)
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd) 
         return x
     

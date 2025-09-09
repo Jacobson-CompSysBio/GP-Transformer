@@ -101,6 +101,3 @@ class LD_Encoder(nn.Module):
         # transpose back to original shape
         x = x.transpose(1, 2) # B, C, T --> B, T, C
         return x
-
-class GxE_CNN(nn.Module):
-    pass

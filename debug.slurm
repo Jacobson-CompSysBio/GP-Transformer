@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-moe
+#SBATCH -J debug-cnn
 #SBATCH -N 1
 #SBATCH -t 00:10:00
 #SBATCH -p batch
@@ -25,7 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
+export GXE_ENC=cnn  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256
