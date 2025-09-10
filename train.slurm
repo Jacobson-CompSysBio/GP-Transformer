@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J moe-gxe-extended
+#SBATCH -J gxe-transformer
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -25,23 +25,24 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export GXE_ENC="tf"  # options: "tf", "mlp", "cnn"
+export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256
-export NUM_EPOCHS=10_000
+export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
+export DROPOUT=0.5
 
 export G_LAYERS=1
-export LD_LAYERS=1
+export LD_LAYERS=2
 export MLP_LAYERS=1
 export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="both"
-export ALPHA=0.01  # only used if LOSS is "both"
+export LOSS="pcc"
+export ALPHA=0.0001 # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -83,6 +84,7 @@ srun -N ${SLURM_NNODES} \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
         --g_layers $G_LAYERS \
         --ld_layers $LD_LAYERS \
         --mlp_layers $MLP_LAYERS \
@@ -120,6 +122,7 @@ python -u scripts/eval.py \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
+    --dropout $DROPOUT \
     --g_layers $G_LAYERS \
     --ld_layers $LD_LAYERS \
     --mlp_layers $MLP_LAYERS \

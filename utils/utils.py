@@ -45,11 +45,12 @@ def make_run_name(args) -> str:
     g = "g+" if args.g_enc else ""
     e = "e+" if args.e_enc else ""
     ld = "ld+" if args.ld_enc else ""
+    moe = "moe+" if args.moe else ""
     if args.gxe_enc in ["tf", "mlp", "cnn"]:
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
-    model_type = g + e + ld + gxe
+    model_type = g + e + ld + gxe + moe
     model_type = model_type[:-1]
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (
