@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J gxe-transformer
+#SBATCH -J lower-lr
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -30,7 +30,7 @@ export MOE=True
 
 export BATCH_SIZE=256
 export NUM_EPOCHS=5000
-export LR=1e-4
+export LR=1e-5
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.5
 
