@@ -28,13 +28,16 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
+# rolling GxE dataset
 class GxE_Dataset(Dataset):
 
     def __init__(self,
                  split='train', # train <= 2022, val == 2023
                  data_path='data/maize_data_2014-2023_vs_2024/', # need to go up one level and then down to data directory
                  index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
-                 scaler: StandardScaler | None = None
+                 scaler: StandardScaler | None = None,
+                 train_year_max: int | None = None,
+                 val_year: int | None = None
                  ):
         
         """
@@ -68,6 +71,22 @@ class GxE_Dataset(Dataset):
         if 'INDEX' not in idx_map.columns or 'Env' not in idx_map.columns:
             raise ValueError(f"index_map_path must contain INDEX, Env columns")
         idx_map['Year'] = idx_map['Env'].apply(_env_year_from_str)
+
+        # get data for rolling max
+        if split == "train":
+            if train_year_max is not None:
+                keep_mask = idx_map['Year'] <= train_year_max
+            else:
+                keep_mask = idx_map['Year'] <= 2022
+        elif split == "val":
+            if val_year is not None:
+                keep_mask = idx_map['Year'] == val_year
+            else:
+                keep_mask = idx_map['Year'] == 2023
+        elif split in ('test', 'sub'):
+            keep_mask = idx_map['Year'] >= 2024
+        else:
+            raise ValueError(f"Invalid split='{split}'")
 
         # load data
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
@@ -149,8 +168,7 @@ class GxE_Dataset(Dataset):
             return x, y
 
         # regression target
-        y = torch.tensor(self.y_data.iloc[index].values, dtype=torch.float32)
-        
+        y = torch.tensor(float(self.y_data.iloc[index]), dtype=torch.float32) 
         return x, y
 
 # only genotype data

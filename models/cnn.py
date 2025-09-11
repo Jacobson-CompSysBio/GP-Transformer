@@ -26,6 +26,8 @@ class ResNetBlock1D(nn.Module):
 
         padding = kernel_size // 2 
 
+        norm = nn.GroupNorm(1, out_channels)
+
         layers = []
         for i in range(n_convs):
             conv_in = in_channels if i == 0 else out_channels
@@ -33,7 +35,7 @@ class ResNetBlock1D(nn.Module):
                                     kernel_size,
                                     padding=padding))
             if use_batchnorm:
-                layers.append(nn.BatchNorm1d(out_channels))
+                layers.append(norm)
             
             layers.append(activation)
             if dropout and dropout > 0:

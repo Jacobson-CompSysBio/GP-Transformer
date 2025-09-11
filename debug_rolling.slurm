@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J softmax-moe
-#SBATCH -N 8
-#SBATCH -t 02:00:00
+#SBATCH -J debug-rolling
+#SBATCH -N 2
+#SBATCH -t 01:30:00
 #SBATCH -p batch
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -42,7 +43,7 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="pcc"
+export LOSS="both"
 export ALPHA=1e-5 # only used if LOSS is "both"
 
 ### wandb settings ###
@@ -75,7 +76,7 @@ srun -N ${SLURM_NNODES} \
     --cpu-bind=cores \
     --export=ALL \
     --kill-on-bad-exit=1 \
-    python -u scripts/train.py \
+    python -u scripts/train_rolling.py \
         --batch_size $BATCH_SIZE \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
@@ -95,42 +96,3 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
         --alpha $ALPHA
-
-### python (model eval) ###
-if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
-    export WANDB_RESUME=allow
-    export WANDB_RUN_ID=$(cat "$WANDB_RUN_ID_FILE")
-else
-    echo "[WARNING] WandB run ID file not found... Eval will create a new run."
-    unset WANDB_RESUME
-    unset WANDB_RUN_ID
-fi
-
-if [[ -f "$CHECKPOINT_DIR_FILE" ]]; then
-    CHECKPOINT_DIR=$(cat "$CHECKPOINT_DIR_FILE")
-    echo "[INFO] Using checkpoint dir from train: $CHECKPOINT_DIR"
-else
-    echo "[ERROR] checkpoint dir file not found: $CHECKPOINT_DIR_FILE"
-    exit 2
-fi
-
-python -u scripts/eval.py \
-    --batch_size $BATCH_SIZE \
-    --g_enc $G_ENC \
-    --e_enc $E_ENC \
-    --ld_enc $LD_ENC \
-    --gxe_enc $GXE_ENC \
-    --moe $MOE \
-    --num_epochs $NUM_EPOCHS \
-    --lr $LR \
-    --weight_decay $WEIGHT_DECAY \
-    --dropout $DROPOUT \
-    --early_stop $EARLY_STOP \
-    --g_layers $G_LAYERS \
-    --ld_layers $LD_LAYERS \
-    --mlp_layers $MLP_LAYERS \
-    --gxe_layers $GXE_LAYERS \
-    --heads $HEADS \
-    --checkpoint_dir "$CHECKPOINT_DIR" \
-    --loss $LOSS \
-    --alpha $ALPHA

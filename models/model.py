@@ -71,9 +71,10 @@ class GxE_Transformer(nn.Module):
     
     def _concat(self, g_enc, e_enc, ld_enc):
         if self.moe_w is not None:
-            g_enc = self.moe_w[0] * g_enc
-            e_enc = self.moe_w[1] * e_enc
-            ld_enc = self.moe_w[2] * ld_enc
+            softmax_moe = F.softmax(self.moe_w, dim=0)
+            g_enc = softmax_moe[0] * g_enc
+            e_enc = softmax_moe[1] * e_enc
+            ld_enc = softmax_moe[2] * ld_enc
         return g_enc + e_enc + ld_enc
 
     def _forward_tf(self, g_enc, e_enc, ld_enc):
