@@ -67,6 +67,12 @@ def main():
     # setup
     args = parse_args()
     device, local_rank, rank, world_size = setup_ddp()
+    wandb_run_name = make_run_name(args)
+
+    if is_main(rank):
+        run_ckpt_dir = Path("checkpoints") / wandb_run_name
+        run_ckpt_dir.mkdir(parents=True, exist_ok=True)
+    dist.barrier()
 
     # reproducibility 
     torch.manual_seed(args.seed + rank)
@@ -275,9 +281,8 @@ def main():
             # aggregate losses over all ranks
             dist.all_reduce(train_loss_accum)
             dist.all_reduce(val_loss_accum)
-            if args.loss == "both":
-                for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
-                    dist.all_reduce(t)
+            for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
+                dist.all_reduce(t)
 
             train_loss = (train_loss_accum / n_train / world_size).item()
             val_loss = (val_loss_accum / n_val / world_size).item()
@@ -338,6 +343,7 @@ def main():
                                 "name": wandb_run_name}
                     }
                     ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
+                    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(ckpt, ckpt_path)
                     print(f"*** validation loss improved: {best_val_loss:.4e} ***")
                 else:
@@ -374,7 +380,7 @@ def main():
     if is_main(rank) and len(fold_records) > 0:
         import numpy as np
         table = wandb.Table(columns=[
-            "fold", "train_le", "val_y", "best_val_loss", "best_val_mse", "best_val_pcc_loss"
+            "fold", "train_le", "val_y", "best_val_loss", "best_val_mse", "best_val_pcc"
         ])
         for r in fold_records:
             table.add_data(r["fold"], r["train_le"], r["val_y"], r["best_val_loss"], r["best_val_mse"], r["best_val_pcc"], r["epoch"])

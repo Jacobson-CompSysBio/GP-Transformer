@@ -168,7 +168,7 @@ class GxE_Dataset(Dataset):
             return x, y
 
         # regression target
-        y = torch.tensor(float(self.y_data.iloc[index]), dtype=torch.float32) 
+        y = torch.tensor(self.y_data.iloc[index], dtype=torch.float32) 
         return x, y
 
 # only genotype data
