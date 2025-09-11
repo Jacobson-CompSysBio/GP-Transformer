@@ -30,8 +30,8 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256
-export NUM_EPOCHS=5000
-export LR=1e-5
+export NUM_EPOCHS=2
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
