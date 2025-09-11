@@ -98,11 +98,6 @@ def main():
         # expose run id for eval.py to resume
         os.environ["WANDB_RUN_ID"] = run.id
 
-        # define common metrics
-        run.define_metric("epoch")
-        run.define_metric("iter_num")
-        run.define_metric("learning_rate", step_metric="iter_num")
-
         # config snapshot
         wandb.config.update({
             "loss": args.loss,
@@ -112,6 +107,14 @@ def main():
     for fold_idx, (train_year_max, val_year) in enumerate(folds, start=1):
         if is_main(rank):
             print(f"\n=== Fold {fold_idx}/{len(folds)}: train <= {train_year_max}, val = {val_year} ===")
+            # per-year step metrics + namespaces
+            run.define_metric(f"fold/{val_year}/iter")
+            run.define_metric(f"fold/{val_year}/epoch")
+            run.define_metric(f"fold/{val_year}/*", step_metric=f"fold/{val_year}/iter")
+            run.define_metric(f"fold/{val_year}/epoch/*", step_metric=f"fold/{val_year}/epoch")
+
+        # local fold iteration count
+        iter_in_fold = 0
 
         # create datasets for this fold
         train_ds = GxE_Dataset(
@@ -242,16 +245,15 @@ def main():
                 # log wandb
                 if is_main(rank):
                     log_payload = {
-                        "train_loss": loss.item(),
+                        f"fold/{val_year}/iter": iter_in_fold,
                         f"fold/{val_year}/train_loss": loss.item(),
-                        "learning_rate": lr,
-                        "iter_num": iter_num,
+                        f"fold/{val_year}/learning_rate": lr,
                     }
                     if args.loss == "both":
-                        log_payload[f"fold/{val_year}/mse"] = float(train_mse_val.item())
-                        log_payload[f"fold/{val_year}/pcc_loss"] = float(train_pcc_loss_val.item())
+                        log_payload[f"fold/{val_year}/mse_iter"] = float(train_mse_val.item())
+                        log_payload[f"fold/{val_year}/pcc_loss_iter"] = float(train_pcc_loss_val.item())
                     wandb.log(log_payload)
-                iter_num += 1
+                iter_in_fold += 1
                 pbar.update(1)
             pbar.close()
 
@@ -293,19 +295,15 @@ def main():
 
             # log eval / early stop (only rank 0)
             if is_main(rank):
-                log_epoch_payload = {
+                wandb.log({
+                    f"fold/{val_year}/epoch": epoch_num,
+                    f"fold/{val_year}/train_loss": train_loss,
                     f"fold/{val_year}/val_loss": val_loss,
-                    f"fold/{val_year}/train_loss_epoch": train_loss,
-                    "epoch": epoch_num,
-                }
-                if args.loss == "both":
-                    log_epoch_payload.update({
-                        f"fold/{val_year}/train_mse": train_mse,
-                        f"fold/{val_year}/train_pcc_loss": train_pcc_loss,
-                        f"fold/{val_year}/val_mse": val_mse,
-                        f"fold/{val_year}/val_pcc_loss": val_pcc_loss,
-                    })
-                wandb.log(log_epoch_payload)
+                    f"fold/{val_year}/train_mse": train_mse,
+                    f"fold/{val_year}/train_pcc": train_pcc_loss,
+                    f"fold/{val_year}/val_mse": val_mse,
+                    f"fold/{val_year}/val_pcc": val_pcc_loss,
+                }) 
 
                 if val_loss < best_val_loss:
                     best_val_loss, last_improved = val_loss, 0
@@ -342,7 +340,7 @@ def main():
                         "run": {"id": run.id if 'run' in locals() else None,
                                 "name": wandb_run_name}
                     }
-                    ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
+                    ckpt_path = Path("checkpoints") / wandb_run_name / f"{val_year}" / f"checkpoint_{epoch_num:04d}.pt"
                     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(ckpt, ckpt_path)
                     print(f"*** validation loss improved: {best_val_loss:.4e} ***")
@@ -380,28 +378,28 @@ def main():
     if is_main(rank) and len(fold_records) > 0:
         import numpy as np
         table = wandb.Table(columns=[
-            "fold", "train_le", "val_y", "best_val_loss", "best_val_mse", "best_val_pcc"
+            "fold", "train_le", "val_y", "best_val_loss", "best_val_mse", "best_val_pcc_loss"
         ])
         for r in fold_records:
-            table.add_data(r["fold"], r["train_le"], r["val_y"], r["best_val_loss"], r["best_val_mse"], r["best_val_pcc"], r["epoch"])
+            table.add_data(r["fold"], r["train_le"], r["val_y"], r["best_val_loss"], r["best_val_mse"], r["best_val_pcc_loss"], r["epoch"])
         mean_loss = float(np.mean([r["best_val_loss"] for r in fold_records]))
         mean_mse  = float(np.mean([r["best_val_mse"]  for r in fold_records]))
-        mean_pcc  = float(np.mean([r["best_val_pcc"]  for r in fold_records]))
+        mean_pcc  = float(np.mean([r["best_val_pcc_loss"]  for r in fold_records]))
         std_mse   = float(np.std( [r["best_val_mse"]  for r in fold_records]))
-        std_pcc   = float(np.std( [r["best_val_pcc"]  for r in fold_records]))
+        std_pcc   = float(np.std( [r["best_val_pcc_loss"]  for r in fold_records]))
         wandb.log({
             "cv/folds_table":   table,
             "cv/mean_val_loss": mean_loss,
             "cv/mean_val_mse":  mean_mse,
-            "cv/mean_val_pcc":  mean_pcc,
+            "cv/mean_val_pcc_loss":  mean_pcc,
             "cv/std_val_mse":   std_mse,
-            "cv/std_val_pcc":   std_pcc,
+            "cv/std_val_pcc_loss":   std_pcc,
         })
         run.summary["cv/mean_val_loss"] = mean_loss
         run.summary["cv/mean_val_mse"]  = mean_mse
-        run.summary["cv/mean_val_pcc"]  = mean_pcc
+        run.summary["cv/mean_val_pcc_loss"]  = mean_pcc
         run.summary["cv/std_val_mse"]   = std_mse
-        run.summary["cv/std_val_pcc"]   = std_pcc
+        run.summary["cv/std_val_pcc_loss"]   = std_pcc
 
     dist.barrier()
     if is_main(rank):
