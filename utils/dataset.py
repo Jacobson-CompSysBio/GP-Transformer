@@ -35,6 +35,7 @@ class GxE_Dataset(Dataset):
                  split='train', # train <= 2022, val == 2023
                  data_path='data/maize_data_2014-2023_vs_2024/', # need to go up one level and then down to data directory
                  index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+                 residual: bool = False,
                  scaler: StandardScaler | None = None,
                  train_year_max: int | None = None,
                  val_year: int | None = None
@@ -50,6 +51,7 @@ class GxE_Dataset(Dataset):
 
         self.split = split
         self.data_path = data_path
+        self.residual_flag = residual
 
         # load data depending on split
         if split == 'train':
@@ -111,14 +113,11 @@ class GxE_Dataset(Dataset):
         # feature partitioning and scaling
         # first 2240 are genotypes, last 374 are lat/lon and ECs
         self.scaler = scaler if scaler is not None else StandardScaler()
-
         # genotype features
         self.g_data = (self.x_data.iloc[:, :-374] * 2).astype('int64')
-
         # env features
         self.e_cols = list(self.x_data.columns[-374:])
         e_block = self.x_data[self.e_cols].copy()
-
         # fit scaler ONLY on train to avoid data leakage
         if scaler is None:
             if split != 'train':
@@ -126,6 +125,15 @@ class GxE_Dataset(Dataset):
             self.e_data = pd.DataFrame(self.scaler.fit_transform(e_block), columns=self.e_cols)
         else:
             self.e_data = pd.DataFrame(self.scaler.transform(e_block), columns=self.e_cols)
+
+        # per-year mean yield as target for env head
+        # both train/val and test .csvs have Yield_Mg_ha column
+        if self.residual_flag:
+            self.y_series = self.y_data['Yield_Mg_ha']
+            self.year_series = self.idx_map['Year']
+            # compute per-year means using only rows in a certain split
+            self.year_mean = self.y_series.groupby(self.year_series).transform('mean')
+            self.residual = self.y_series - self.year_mean
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -142,7 +150,6 @@ class GxE_Dataset(Dataset):
 
         # get genotype data
         tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long)
-
         # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
 
@@ -155,9 +162,20 @@ class GxE_Dataset(Dataset):
                  'Yield_Mg_ha': self.y_data.iloc[index, 2]}
             return x, y
 
-        # regression target
-        y = torch.tensor(self.y_data.iloc[index], dtype=torch.float32) 
-        return x, y
+        # regression + residual target
+        y_total = torch.tensor(self.y_data.iloc[index], dtype=torch.float32) 
+
+        if not self.residual_flag:
+            return x, y_total
+
+        y_year_mean = torch.tensor(self.year_mean.iloc[index], dtype=torch.float32)
+        y_residual = torch.tensor(self.residual.iloc[index], dtype=torch.float32)
+        targets = {
+            'total': y_total,
+            'ymean': y_year_mean,
+            'residual': y_residual
+        }
+        return x, targets
 
 # only genotype data
 class G_Dataset(Dataset):

@@ -65,8 +65,8 @@ class GxE_Transformer(nn.Module):
             )
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
- 
-        # init final layer (output of 1 for regression)
+
+        # init final layer
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
     
     def _concat(self, g_enc, e_enc, ld_enc):
@@ -116,6 +116,7 @@ class GxE_Transformer(nn.Module):
         if self.ld_encoder:
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
+        
         if self.gxe_enc == "tf":
             x = self._forward_tf(g_enc, e_enc, ld_enc)
         elif self.gxe_enc == "mlp":
@@ -126,9 +127,10 @@ class GxE_Transformer(nn.Module):
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
         return self.final_layer(x)
-    
+
+
 # create full GxE transformer for genomic prediction
-class GxE_Transformer(nn.Module):
+class GxE_ResidualTransformer(nn.Module):
 
     """
     """
@@ -139,11 +141,13 @@ class GxE_Transformer(nn.Module):
                  ld_enc: bool = True,
                  gxe_enc: str = "tf",
                  moe: bool = True,
+                 residual: bool = False,
                  config = None
                  ):
         super().__init__()
 
         self.config = config
+        self.residual = residual
 
         # set attributes
         self.g_encoder = G_Encoder(config) if g_enc else None
@@ -180,8 +184,11 @@ class GxE_Transformer(nn.Module):
             )
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
- 
-        # init final layer (output of 1 for regression)
+
+        # env head to predict per-year mean yield (if residual)
+        self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
+
+        # init final layer --> predicts residual in residual mode, total otherwise
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
     
     def _concat(self, g_enc, e_enc, ld_enc):
@@ -231,6 +238,7 @@ class GxE_Transformer(nn.Module):
         if self.ld_encoder:
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
+        
         if self.gxe_enc == "tf":
             x = self._forward_tf(g_enc, e_enc, ld_enc)
         elif self.gxe_enc == "mlp":
@@ -240,4 +248,21 @@ class GxE_Transformer(nn.Module):
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
-        return self.final_layer(x)
+        # non-residual mode: final layer predicts total yield 
+        if not self.residual:
+            return self.final_layer(x)
+        
+        # residual mode:
+        ymean_pred = self.ymean_head(e_enc) if self.ymean_head is not None else 0
+        resid_pred = self.final_layer(x)
+
+        # option: detach ymean_pred to prevent env head from learning residual signal
+        if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+            total_pred = ymean_pred.detach() + resid_pred
+        else:
+            total_pred = ymean_pred + resid_pred
+        return {'total': total_pred,
+                'ymean': ymean_pred,
+                'resid': resid_pred,
+        }
+    

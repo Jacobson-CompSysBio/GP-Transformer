@@ -62,6 +62,14 @@ def is_main(rank) -> bool:
     """check if current process is main"""
     return rank == 0
 
+# residual: small helper to move nested dicts to device
+def _move_to_device(obj, device):
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device) 
+    if isinstance(obj, dict):
+        return {k: _move_to_device(v, device) for k, v in obj.items()}
+    return obj
+
 ### main ###
 def main():
     # setup
@@ -79,6 +87,7 @@ def main():
         split="train",
         data_path='data/maize_data_2014-2023_vs_2024/',
         index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+        residual=args.residual,
         scaler=None
     )
     scaler = train_ds.scaler
@@ -86,6 +95,7 @@ def main():
         split="val",
         data_path="data/maize_data_2014-2023_vs_2024/",
         index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
+        residual=args.residual,
         scaler=scaler
     )
 
@@ -112,12 +122,21 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout)
-    model = GxE_Transformer(g_enc=args.g_enc,
-                            e_enc=args.e_enc,
-                            ld_enc=args.ld_enc,
-                            gxe_enc=args.gxe_enc,
-                            moe=args.moe,
-                            config=config).to(device)
+    if args.residual:
+        model = GxE_ResidualTransformer(g_enc=args.g_enc,
+                                e_enc=args.e_enc,
+                                ld_enc=args.ld_enc,
+                                gxe_enc=args.gxe_enc,
+                                moe=args.moe,
+                                config=config).to(device)
+        model.detach_ymean_in_sum = args.detach_ymean
+    else:
+        model = GxE_Transformer(g_enc=args.g_enc,
+                                e_enc=args.e_enc,
+                                ld_enc=args.ld_enc,
+                                gxe_enc=args.gxe_enc,
+                                moe=args.moe,
+                                config=config).to(device)
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank)
@@ -179,7 +198,11 @@ def main():
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
-                             "alpha": args.alpha},
+                             "alpha": args.alpha,
+                             "residual": args.residual,
+                             "detach_ymean": args.detach_ymean,
+                             "lambda_ymean": args.lambda_ymean,
+                             "lambda_resid": args.lambda_resid},
                              allow_val_change=True)
         if args.loss == "both":
             # batch level            
@@ -191,6 +214,13 @@ def main():
             run.define_metric("pcc_loss_epoch", step_metric="epoch")
             run.define_metric("mse_epoch", step_metric="epoch")
             run.define_metric("pcc_loss_epoch", step_metric="epoch")
+        
+        # track residual losses 
+        if args.residual:
+            run.define_metric("aux_ymean_loss", step_metric="iter_num")
+            run.define_metric("aux_resid_loss", step_metric="iter_num")
+            run.define_metric("aux_ymean_mse_epoch", step_metric="epoch")
+            run.define_metric("aux_resid_mse_epoch", step_metric="epoch")
 
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -210,21 +240,50 @@ def main():
         for xb, yb in train_loader:
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True).float()
+            yb = _move_to_device(yb, device) 
 
             # fwd/bwd pass
             logits = model(xb)
-            loss = loss_function(logits, yb)
+
+            # residual: compute main and aux losses
+            if args.residual:
+                pred_total = logits['total']
+                loss_main = loss_function(pred_total, yb['total'])
+                loss_aux_ymean = F.mse_loss(logits['ymean'], yb['ymean'])
+                loss_aux_resid = F.mse_loss(logits['resid'], yb['resid'])
+                loss = (loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid))
+            
+            # non-residual: just compute main loss
+            else:
+                loss = loss_function(logits, yb)
+
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
             # compute losses for wandb logging 
             train_mse_val = None
             train_pcc_loss_val = None
-            if args.loss == "both":
-                with torch.no_grad():
-                    train_mse_val = mse_loss_log(logits, yb)
-                    train_pcc_loss_val = pcc_loss_log(logits, yb)
+            aux_ymean_val = None
+            aux_resid_val = None
+
+            with torch.no_grad():
+                if args.residual:
+                    # log on total
+                    pred_total = logits['total']
+                    tgt_total = yb['total']
+                    if args.loss == "both":
+                        train_mse_val = mse_loss_log(pred_total, tgt_total)
+                        train_pcc_loss_val = pcc_loss_log(pred_total, tgt_total)
+                    # aux logs regardless of main loss choice
+                    if "ymean" in logits:
+                        aux_ymean_val = F.mse_loss(logits['ymean'], yb['ymean'])
+                    if "resid" in logits:
+                        aux_resid_val = F.mse_loss(logits['resid'], yb['resid'])
+                else:
+                    if args.loss == "both":
+                        with torch.no_grad():
+                            train_mse_val = mse_loss_log(logits, yb)
+                            train_pcc_loss_val = pcc_loss_log(logits, yb)
 
             # apply learning rate schedule              
             lr = get_lr(iter_num,
@@ -247,9 +306,13 @@ def main():
                     "learning_rate": lr,
                     "iter_num": iter_num,
                 }
-                if args.loss == "both":
+                if args.loss == "both" and train_mse_val is not None:
                     log_payload["mse"] = float(train_mse_val.item())
                     log_payload["pcc_loss"] = float(train_pcc_loss_val.item())
+                if aux_ymean_val is not None:
+                    log_payload["aux_ymean_loss"] = float(aux_ymean_val.item())
+                if aux_resid_val is not None:
+                    log_payload["aux_resid_loss"] = float(aux_resid_val.item())
                 wandb.log(log_payload)
             iter_num += 1
             pbar.update(1)
@@ -267,32 +330,61 @@ def main():
             val_mse_accum = torch.tensor(0.0, device=device)
             val_pcc_loss_accum = torch.tensor(0.0, device=device)
 
+            aux_train_ymean_accum = torch.tensor(0.0, device=device)
+            aux_train_resid_accum = torch.tensor(0.0, device=device)
+            aux_val_ymean_accum = torch.tensor(0.0, device=device)
+            aux_val_resid_accum = torch.tensor(0.0, device=device)
+
             for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
                 for k, v in xbt.items():
                     xbt[k] = v.to(device, non_blocking=True)
-                ybt = ybt.to(device, non_blocking=True).float()
+                ybt = _move_to_device(ybt, device) 
                 for k, v in xbv.items():
                     xbv[k] = v.to(device, non_blocking=True)
-                ybv = ybv.to(device, non_blocking=True).float()
+                ybv = _move_to_device(ybv, device)
 
-                train_loss_accum += loss_function(model(xbt), ybt)
-                val_loss_accum += loss_function(model(xbv), ybv)
+                out_train = model(xbt)
+                out_val = model(xbv)
 
-                if args.loss == "both":
-                    train_mse_accum += mse_loss_log(model(xbt), ybt)
-                    train_pcc_loss_accum += pcc_loss_log(model(xbt), ybt)
-                    val_mse_accum += mse_loss_log(model(xbv), ybv)
-                    val_pcc_loss_accum += pcc_loss_log(model(xbv), ybv)
+                if args.residual:
+                    loss_train = loss_function(out_train['total'], ybt['total'])
+                    loss_val = loss_function(out_val['total'], ybv['total'])
+                    train_loss_accum += loss_train
+                    val_loss_accum += loss_val
 
+                    # aux accumulation (for monitoring)
+                    aux_train_ymean_accum += F.mse_loss(out_train['ymean'], ybt['ymean'])
+                    aux_train_resid_accum += F.mse_loss(out_train['resid'], ybt['resid'])
+                    aux_val_ymean_accum += F.mse_loss(out_val['ymean'], ybv['ymean'])
+                    aux_val_resid_accum += F.mse_loss(out_val['resid'], ybv['resid'])
+
+                    if args.loss == "both":
+                        train_mse_accum += mse_loss_log(out_train['total'], ybt['total'])
+                        train_pcc_loss_accum += pcc_loss_log(out_train['total'], ybt['total'])
+                        val_mse_accum += mse_loss_log(out_val['total'], ybv['total'])
+                        val_pcc_loss_accum += pcc_loss_log(out_val['total'], ybv['total'])
+                else:
+                    loss_train = loss_function(out_train, ybt)
+                    loss_val = loss_function(out_val, ybv)
+                    train_loss_accum += loss_train
+                    val_loss_accum += loss_val
+
+                    if args.loss == "both":
+                        train_mse_accum += mse_loss_log(out_train, ybt)
+                        train_pcc_loss_accum += pcc_loss_log(out_train, ybt)
+                        val_mse_accum += mse_loss_log(out_val, ybv)
+                        val_pcc_loss_accum += pcc_loss_log(out_val, ybv)
+                
                 if train_loss_accum.isnan() or val_loss_accum.isnan():
                     raise RuntimeError("Loss is NaN during evaluation, stopping training.")
         
         # aggregate losses over all ranks
-        dist.all_reduce(train_loss_accum)
-        dist.all_reduce(val_loss_accum)
-        if args.loss == "both":
-            for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
-                dist.all_reduce(t)
+        for t in (train_loss_accum, val_loss_accum,
+                  train_mse_accum, train_pcc_loss_accum,
+                  val_mse_accum, val_pcc_loss_accum,
+                  aux_train_ymean_accum, aux_train_resid_accum,
+                  aux_val_ymean_accum, aux_val_resid_accum): 
+            dist.all_reduce(t)
 
         train_loss = (train_loss_accum / batches_per_eval / world_size).item()
         val_loss = (val_loss_accum / batches_per_eval / world_size).item()
@@ -302,12 +394,19 @@ def main():
             val_mse = (val_mse_accum / batches_per_eval / world_size).item()
             val_pcc_loss = (val_pcc_loss_accum / batches_per_eval / world_size).item()
 
+        aux_train_ymean = (aux_train_ymean_accum / batches_per_eval / world_size).item()
+        aux_train_resid = (aux_train_resid_accum / batches_per_eval / world_size).item()
+        aux_val_ymean = (aux_val_ymean_accum / batches_per_eval / world_size).item()
+        aux_val_resid = (aux_val_resid_accum / batches_per_eval / world_size).item()
+
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
                 "val_loss": val_loss,
                 "train_loss_epoch": train_loss,
                 "epoch": epoch_num,
+                "aux_ymean_mse_epoch": aux_val_ymean,
+                "aux_resid_mse_epoch": aux_val_resid
             }
             if args.loss == "both":
                 log_epoch_payload.update({
@@ -338,7 +437,11 @@ def main():
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
                         "loss": args.loss,
-                        "alpha": args.alpha
+                        "alpha": args.alpha,
+                        "residual": args.residual,
+                        "lambda_ymean": args.lambda_ymean,
+                        "lambda_resid": args.lambda_resid,
+                        "detach_ymean": args.detach_ymean,
                     },
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}

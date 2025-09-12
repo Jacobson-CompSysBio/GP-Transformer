@@ -17,6 +17,11 @@ def parse_args():
     p.add_argument("--ld_enc", type=str2bool, default=True)
     p.add_argument("--gxe_enc", type=str, default=True)
     p.add_argument("--moe", type=str2bool, default=True)
+    p.add_argument("--residual", type=str2bool, default=False)
+
+    p.add_argument("--detach_ymean", type=str2bool, default=True)
+    p.add_argument("--lambda_ymean", type=float, default=0.5)
+    p.add_argument("--lambda_resid", type=float, default=1.0)
 
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -33,6 +38,7 @@ def parse_args():
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
+
     p.add_argument("--loss", type=str, default="mse",
                    choices=["mse", "pcc", "both"])
     p.add_argument("--alpha", type=float, default=0.5,
@@ -46,11 +52,12 @@ def make_run_name(args) -> str:
     e = "e+" if args.e_enc else ""
     ld = "ld+" if args.ld_enc else ""
     moe = "moe+" if args.moe else ""
+    res = "res+" if args.residual else ""
     if args.gxe_enc in ["tf", "mlp", "cnn"]:
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
-    model_type = g + e + ld + gxe + moe
+    model_type = g + e + ld + gxe + moe + res
     model_type = model_type[:-1]
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     return (

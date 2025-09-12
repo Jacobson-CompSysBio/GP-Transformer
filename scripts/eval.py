@@ -75,7 +75,11 @@ def evaluate(model,
             for key, value in xb.items():
                 xb[key] = value.to(device, non_blocking=True)
 
-            preds.extend(model(xb).detach().tolist())
+            out = model(xb)
+            if isinstance(out, dict):
+                out = out['total']
+
+            preds.extend(out.detach().tolist())
             actuals.extend(yb['Yield_Mg_ha'])
 
     return actuals, preds
@@ -156,8 +160,10 @@ def load_model(dataset: Dataset,
     gxe_layer = config.get("gxe_layers", args.gxe_layers)
     n_head = config.get("n_head", args.heads)
     n_embd = config.get("n_embd", args.emb_size)
+    moe = config.get("moe", args.moe)
     loss = config.get("loss", args.loss)
     alpha = config.get("alpha", args.alpha)
+    residual = config.get("residual", args.residual)
 
     config = Config(block_size=blk,
                     n_g_layer=g_layer,
@@ -166,11 +172,22 @@ def load_model(dataset: Dataset,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd)
-    model = GxE_Transformer(g_enc=g_enc,
-                            e_enc=e_enc,
-                            ld_enc=ld_enc,
-                            gxe_enc=gxe_enc,
-                            config=config).to(device)
+    if args.residual:
+        model = GxE_ResidualTransformer(g_enc=g_enc,
+                                        e_enc=e_enc,
+                                        ld_enc=ld_enc,
+                                        gxe_enc=gxe_enc,
+                                        moe=moe,
+                                        residual=residual,
+                                        config=config).to(device)
+        model.detach_ymean_in_sum = args.detach_ymean
+    else:
+        model = GxE_Transformer(g_enc=g_enc,
+                                e_enc=e_enc,
+                                ld_enc=ld_enc,
+                                gxe_enc=gxe_enc,
+                                moe=moe,
+                                config=config).to(device)
     model.load_state_dict(state, strict=False)
     model.eval()
 
