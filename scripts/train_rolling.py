@@ -381,7 +381,7 @@ def main():
             "fold", "train_le", "val_y", "best_val_loss", "best_val_mse", "best_val_pcc_loss"
         ])
         for r in fold_records:
-            table.add_data(r["fold"], r["train_le"], r["val_y"], r["best_val_loss"], r["best_val_mse"], r["best_val_pcc_loss"], r["epoch"])
+            table.add_data(r["fold"], r["train_le"], r["val_y"], r["best_val_loss"], r["best_val_mse"], r["best_val_pcc_loss"])
         mean_loss = float(np.mean([r["best_val_loss"] for r in fold_records]))
         mean_mse  = float(np.mean([r["best_val_mse"]  for r in fold_records]))
         mean_pcc  = float(np.mean([r["best_val_pcc_loss"]  for r in fold_records]))
