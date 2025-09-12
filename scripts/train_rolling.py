@@ -18,7 +18,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.model import *
 from models.config import Config
-from utils.GetLR import get_lr
+from utils.get_lr import get_lr
 from utils.loss import build_loss, GlobalPearsonCorrLoss
 from utils.utils import parse_args, make_run_name
 
@@ -173,11 +173,10 @@ def main():
 
         # other options
         batches_per_epoch = len(train_loader)
-        batches_per_eval = len(val_loader)
         total_iters = args.num_epochs * batches_per_epoch
-        warmup_iters = batches_per_epoch * 10 # warmup for 10 epochs
-        lr_decay_iters = total_iters * .5 
-        max_lr, min_lr = (args.lr), (0.001 * args.lr) 
+        warmup_iters = batches_per_epoch  # warmup for 1 epoch - should be enough
+        lr_decay_iters = total_iters * .5
+        max_lr, min_lr = (args.lr), (0.001 * args.lr)
         max_epochs = args.num_epochs
         eval_interval = batches_per_epoch
         early_stop = args.early_stop
@@ -229,7 +228,7 @@ def main():
                         train_pcc_loss_val = pcc_loss_log(logits, yb)
 
                 # apply learning rate schedule              
-                lr = get_lr(iter_num,
+                lr = get_lr(iter_in_fold,
                             warmup_iters,
                             lr_decay_iters,
                             max_lr,
@@ -297,12 +296,12 @@ def main():
             if is_main(rank):
                 wandb.log({
                     f"fold/{val_year}/epoch": epoch_num,
-                    f"fold/{val_year}/train_loss": train_loss,
-                    f"fold/{val_year}/val_loss": val_loss,
-                    f"fold/{val_year}/train_mse": train_mse,
-                    f"fold/{val_year}/train_pcc": train_pcc_loss,
-                    f"fold/{val_year}/val_mse": val_mse,
-                    f"fold/{val_year}/val_pcc": val_pcc_loss,
+                    f"fold/{val_year}/epoch/train_loss": train_loss,
+                    f"fold/{val_year}/epoch/val_loss": val_loss,
+                    f"fold/{val_year}/epoch/train_mse": train_mse,
+                    f"fold/{val_year}/epoch/train_pcc": train_pcc_loss,
+                    f"fold/{val_year}/epoch/val_mse": val_mse,
+                    f"fold/{val_year}/epoch/val_pcc": val_pcc_loss,
                 }) 
 
                 if val_loss < best_val_loss:

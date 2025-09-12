@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J softmax-moe
+#SBATCH -J train_rolling
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -30,7 +30,7 @@ export MOE=True
 
 export BATCH_SIZE=256
 export NUM_EPOCHS=5000
-export LR=1e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -42,8 +42,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="pcc"
-export ALPHA=1e-5 # only used if LOSS is "both"
+export LOSS="both"
+export ALPHA=5e-5 # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
