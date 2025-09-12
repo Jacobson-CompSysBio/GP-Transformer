@@ -93,11 +93,9 @@ class GxE_Dataset(Dataset):
         if split == "sub":
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
-
         # for explicit test, remove non-feature cols from X
         if split == "test":
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
-
         if split == "sub":
             # keep metadata for submission
             self.y_data = self.y_data[['Env', 'Hybrid', 'Yield_Mg_ha']]
@@ -105,17 +103,7 @@ class GxE_Dataset(Dataset):
         # year filtering with index map
         # align lengths (sanity check)
         if len(idx_map) != len(self.x_data):
-            raise ValueError(f"Length mismatch: idx_map={len(idx_map)}, x_data={len(self.x_data)}")
-
-        if split == "train":
-            keep_mask = idx_map['Year'] <= 2022
-        elif split == "val":
-            keep_mask = idx_map['Year'] == 2023
-        elif split in ('test', 'sub'):
-            keep_mask = idx_map['Year'] >= 2024
-        else:
-            raise ValueError(f"Invalid split='{split}'")
-        
+            raise ValueError(f"Length mismatch: idx_map={len(idx_map)}, x_data={len(self.x_data)}") 
         self.x_data = self.x_data.loc[keep_mask.values].reset_index(drop=True)
         self.y_data = self.y_data.loc[keep_mask.values].reset_index(drop=True)
         self.idx_map = idx_map.loc[keep_mask.values].reset_index(drop=True)
