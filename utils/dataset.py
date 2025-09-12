@@ -163,13 +163,13 @@ class GxE_Dataset(Dataset):
             return x, y
 
         # regression + residual target
-        y_total = torch.tensor(self.y_data.iloc[index], dtype=torch.float32) 
+        y_total = torch.tensor([self.y_data.iloc[index, 0]], dtype=torch.float32)
 
         if not self.residual_flag:
             return x, y_total
 
-        y_year_mean = torch.tensor(self.year_mean.iloc[index], dtype=torch.float32)
-        y_residual = torch.tensor(self.residual.iloc[index], dtype=torch.float32)
+        y_year_mean = torch.tensor([self.year_mean.iloc[index]], dtype=torch.float32)
+        y_residual = torch.tensor([self.residual.iloc[index]], dtype=torch.float32)
         targets = {
             'total': y_total,
             'ymean': y_year_mean,

@@ -35,13 +35,13 @@ export LR=1e-4
 export WEIGHT_DECAY=1e-5
 
 export G_LAYERS=1
-export LD_LAYERS=1
+export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=1
+export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="both"
+export LOSS="pcc"
 export ALPHA=0.5  # only used if LOSS is "both"
 
 ### wandb settings ###
