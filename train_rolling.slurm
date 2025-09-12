@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J train_rolling
-#SBATCH -N 8
+#SBATCH -N 64
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -28,8 +28,8 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-export BATCH_SIZE=256
-export NUM_EPOCHS=5000
+export BATCH_SIZE=32
+export NUM_EPOCHS=2500
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
