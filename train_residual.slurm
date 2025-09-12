@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-noresidual
-#SBATCH -N 1
-#SBATCH -t 00:10:00
+#SBATCH -J train_residual
+#SBATCH -N 8
+#SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -30,19 +30,21 @@ export MOE=True
 export RES=True
 
 export BATCH_SIZE=256
-export NUM_EPOCHS=1
-export LR=1e-4
+export NUM_EPOCHS=5000
+export LR=1e-5
 export WEIGHT_DECAY=1e-5
+export DROPOUT=0.15
+export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=1
+export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=1
+export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="both"
-export ALPHA=0.5  # only used if LOSS is "both"
+export LOSS="pcc"
+export ALPHA=1e-5 # only used if LOSS is "both"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -81,10 +83,11 @@ srun -N ${SLURM_NNODES} \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
-        --residual $RES \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
+        --early_stop $EARLY_STOP \
         --g_layers $G_LAYERS \
         --ld_layers $LD_LAYERS \
         --mlp_layers $MLP_LAYERS \
@@ -119,16 +122,16 @@ python -u scripts/eval.py \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
-    --residual $RES \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
+    --dropout $DROPOUT \
+    --early_stop $EARLY_STOP \
     --g_layers $G_LAYERS \
     --ld_layers $LD_LAYERS \
     --mlp_layers $MLP_LAYERS \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
-    --emb_size $EMB_SIZE \
+    --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA \
-    --checkpoint_dir "$CHECKPOINT_DIR"
+    --alpha $ALPHA

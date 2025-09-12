@@ -128,6 +128,7 @@ def main():
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
                                 moe=args.moe,
+                                residual=args.residual,
                                 config=config).to(device)
         model.detach_ymean_in_sum = args.detach_ymean
     else:

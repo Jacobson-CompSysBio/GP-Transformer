@@ -173,7 +173,7 @@ class GxE_Dataset(Dataset):
         targets = {
             'total': y_total,
             'ymean': y_year_mean,
-            'residual': y_residual
+            'resid': y_residual
         }
         return x, targets
 
