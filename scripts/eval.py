@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.config import *
 from models.model import *
-from utils.utils import parse_args, make_run_name
+from utils.utils import parse_args, make_run_name, LabelScaler
 
 import random
 random.seed(0); np.random.seed(0); torch.manual_seed(0)
@@ -29,27 +29,35 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = 'data/maize_data_2014-2023_vs_2024/'
 INDEX_MAP = 'data/maize_data_2014-2023_vs_2024/'
 
-def _fit_train_scaler():
-    """
-    Build train dataset once to fit the standard scaler
-    """
-    train_ds = GxE_Dataset(
-        split="train",
-        data_path=DATA_DIR,
-        index_map_path=INDEX_MAP + 'location_2014_2023.csv',
-        scaler=None
-    )
-    return train_ds.scaler
+def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:
+    if not payload:
+        return None
+    scaler = StandardScaler()
+    scaler.mean_ = np.array(payload['mean'], dtype=float)
+    scaler.scale_ = np.array(payload['scale'], dtype=float)
+    scaler.var_ = np.array(payload['var'], dtype=float)
+    scaler.n_features_in_ = int(payload['n_features_in'])
+    return scaler
 
-def load_data(split: str = "test",
-              batch_size: int = 32):
+def _rebuild_y_scalers(payload: dict) -> dict | None:
+    if not payload:
+        return None
+    return {k: LabelScaler(v.mean, v.std) for k, v in payload.items()}
+
+def load_data(args,
+              split: str = "test",
+              batch_size: int = 32,
+              env_scaler: StandardScaler | None = None,
+              scaler: LabelScaler | None = None):
     # get scaler 
-    scaler = _fit_train_scaler()
     ds = GxE_Dataset(
         split=split,
         data_path=DATA_DIR,
         index_map_path=INDEX_MAP + 'location_2024.csv',
-        scaler=scaler
+        scaler=env_scaler,
+        label_scaler=scaler,
+        scale_targets=args.scale_targets
+
     )
     loader = DataLoader(
         ds,
@@ -62,6 +70,7 @@ def load_data(split: str = "test",
 
 def evaluate(model,
              test_loader: DataLoader,
+             y_scalers: dict | None,
              device: torch.device):
 
     preds = []
@@ -78,6 +87,9 @@ def evaluate(model,
             out = model(xb)
             if isinstance(out, dict):
                 out = out['total']
+
+            if y_scalers and 'total' in y_scalers:
+                out = y_scalers['total'].inverse_transform(out)
 
             preds.extend(out.detach().tolist())
             actuals.extend(yb['Yield_Mg_ha'])
@@ -131,8 +143,7 @@ def save_results(
     location_results_df = location_results_df.reset_index(drop=True)
     location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
 
-def load_model(dataset: Dataset,
-               device: torch.device,
+def load_model(device: torch.device,
                args):
 
     ckpt_root = Path(args.checkpoint_dir)
@@ -153,7 +164,7 @@ def load_model(dataset: Dataset,
     e_enc = config.get("e_enc", args.e_enc)
     ld_enc = config.get("ld_enc", args.ld_enc)
     gxe_enc = config.get("gxe_enc", args.gxe_enc)
-    blk = config.get("block_size", len(dataset[0][0]['g_data']))
+    blk = config.get("block_size", 2240)
     g_layer = config.get("g_layers", args.g_layers)
     ld_layer = config.get("ld_layers", args.ld_layers)
     mlp_layer = config.get("mlp_layers", args.mlp_layers)
@@ -164,6 +175,10 @@ def load_model(dataset: Dataset,
     loss = config.get("loss", args.loss)
     alpha = config.get("alpha", args.alpha)
     residual = config.get("residual", args.residual)
+
+    # build scalers
+    env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
+    y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
 
     config = Config(block_size=blk,
                     n_g_layer=g_layer,
@@ -191,7 +206,7 @@ def load_model(dataset: Dataset,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model
+    return model, y_scalers, env_scaler 
 
 def main():
     args = parse_args()
@@ -218,18 +233,18 @@ def main():
         run_kwargs.update(dict(name=f"eval_{model_type}"))
     run = wandb.init(**run_kwargs)
 
-    # load data
-    print("Loading data...")
-    test_data, test_loader = load_data(split="test")
-
     # load model
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(0)
-
     print("Loading model...")
-    model = load_model(test_data,
-                       device,
-                       args)
+    model, y_scalers, env_scaler = load_model(device, args)    
+    
+    # load data
+    print("Loading data...")
+    test_data, test_loader = load_data(args,
+                                       env_scaler=env_scaler,
+                                       scaler=y_scalers,
+                                       split="test")
 
     # evaluate
     print("Evaluating model...")

@@ -20,7 +20,7 @@ from models.model import *
 from models.config import Config
 from utils.get_lr import get_lr
 from utils.loss import build_loss, GlobalPearsonCorrLoss
-from utils.utils import parse_args, make_run_name
+from utils.utils import *
 
 load_dotenv()
 os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
@@ -79,14 +79,19 @@ def main():
         split="train",
         data_path='data/maize_data_2014-2023_vs_2024/',
         index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
-        scaler=None
+        scaler=None,
+        y_scalers=None, # train will fit the scalers
+        scale_targets=args.scale_targets
     )
-    scaler = train_ds.scaler
+    env_scaler = train_ds.scaler
+    y_scalers = train_ds.label_scalers
     val_ds = GxE_Dataset(
         split="val",
         data_path="data/maize_data_2014-2023_vs_2024/",
         index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
-        scaler=scaler
+        scaler=env_scaler,
+        y_scalers=y_scalers,
+        scale_targets=args.scale_targets
     )
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -320,6 +325,22 @@ def main():
 
             if val_loss < best_val_loss:
                 best_val_loss, last_improved = val_loss, 0
+
+                # collect env scaler and y scalers
+                env_scaler_payload = {
+                    "mean": env_scaler.mean_.tolist(),
+                    "scale": env_scaler.scale_.tolist(),
+                    "var": env_scaler.var_.tolist(),
+                    "n_features_in": int(train_ds.scaler.n_features_in_),
+                }
+
+                label_scalers_payload = None
+                if hasattr(train_ds, 'label_scalers') and train_ds.label_scalers:
+                    label_scalers_payload = {
+                        k: {"mean": float(v.mean), "std": float(v.std)}
+                        for k, v in train_ds.label_scalers.items()
+                    }
+
                 ckpt = {
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
@@ -338,8 +359,11 @@ def main():
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
                         "loss": args.loss,
-                        "alpha": args.alpha
+                        "alpha": args.alpha,
+                        "scale_targets": args.scale_targets,
                     },
+                    "env_scaler": env_scaler_payload,
+                    "label_scalers": label_scalers_payload,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }

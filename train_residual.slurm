@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J train_residual
-#SBATCH -N 64
-#SBATCH -t 08:00:00
-#SBATCH -p extended
+#SBATCH -N 8
+#SBATCH -t 02:00:00
+#SBATCH -p batch 
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -34,7 +34,7 @@ export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=200
+export EARLY_STOP=500
 
 export G_LAYERS=1
 export LD_LAYERS=2
@@ -43,8 +43,9 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=128
-export LOSS="pcc"
+export LOSS="both"
 export ALPHA=5e-4 # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -96,7 +97,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --alpha $ALPHA \
+        --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -136,4 +138,5 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA
+    --alpha $ALPHA \
+    --scale_targets $SCALE_TARGETS

@@ -44,6 +44,7 @@ export HEADS=4
 export EMB_SIZE=256
 export LOSS="both"
 export ALPHA=5e-5 # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -94,4 +95,5 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --alpha $ALPHA \
+        --scale_targets $SCALE_TARGETS

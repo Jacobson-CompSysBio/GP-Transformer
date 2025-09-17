@@ -5,6 +5,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import pandas as pd
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
@@ -18,6 +21,8 @@ from transformers import (
 
 from transformers.models.bert.configuration_bert import BertConfig
 
+from .utils import *
+
 # ----------------------------------------------------------------
 # helper to get year from locations file
 def _env_year_from_str(env_str: str) -> int:
@@ -27,6 +32,17 @@ def _env_year_from_str(env_str: str) -> int:
     if m:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
+
+@dataclass
+class LabelScaler:
+    mean: float
+    std: float
+
+    def transform(self, x: np.ndarray | float) -> np.ndarray | float:
+        return (x - self.mean) / self.std
+    
+    def inverse_transform(self, z: np.ndarray | float) -> np.ndarray | float:
+        return z * (self.std + 1e-8) + self.mean
 
 # rolling GxE dataset
 class GxE_Dataset(Dataset):
@@ -38,7 +54,9 @@ class GxE_Dataset(Dataset):
                  residual: bool = False,
                  scaler: StandardScaler | None = None,
                  train_year_max: int | None = None,
-                 val_year: int | None = None
+                 val_year: int | None = None,
+                 y_scalers: Optional[Dict[str, LabelScaler]] = None,
+                 scale_targets: bool = True
                  ):
         
         """
@@ -48,21 +66,19 @@ class GxE_Dataset(Dataset):
             index_map_path (str): path to the INDEX -> Env mapping file
             scaler (StandardScaler|None): if None and split=='train', fit here; otherwise reuse passed scaler
         """
-
+        super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
+        self.scale_targets = scale_targets
 
-        # load data depending on split
+        ### LOAD DATA ###
         if split == 'train':
             x_path = data_path + 'X_train.csv'
             y_path = data_path + 'y_train.csv'
         elif split == 'val':
             x_path = data_path + 'X_train.csv'
             y_path = data_path + 'y_train.csv'
-        elif split == 'sub':
-            x_path = data_path + 'X_test.csv'
-            y_path = data_path + 'X_test.csv'
         else:
             x_path = data_path + 'X_test.csv'
             y_path = data_path + 'y_test.csv'
@@ -74,7 +90,7 @@ class GxE_Dataset(Dataset):
             raise ValueError(f"index_map_path must contain INDEX, Env columns")
         idx_map['Year'] = idx_map['Env'].apply(_env_year_from_str)
 
-        # get data for rolling max
+        ### SPLIT DATA (ROLLING TRAIN) ###
         if split == "train":
             if train_year_max is not None:
                 keep_mask = idx_map['Year'] <= train_year_max
@@ -90,11 +106,12 @@ class GxE_Dataset(Dataset):
         else:
             raise ValueError(f"Invalid split='{split}'")
 
-        # load data
+        ### READ X/Y, ALIGN ###
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
         if split == "sub":
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
+
         # for explicit test, remove non-feature cols from X
         if split == "test":
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
@@ -106,11 +123,12 @@ class GxE_Dataset(Dataset):
         # align lengths (sanity check)
         if len(idx_map) != len(self.x_data):
             raise ValueError(f"Length mismatch: idx_map={len(idx_map)}, x_data={len(self.x_data)}") 
+        # mask per split
         self.x_data = self.x_data.loc[keep_mask.values].reset_index(drop=True)
         self.y_data = self.y_data.loc[keep_mask.values].reset_index(drop=True)
         self.idx_map = idx_map.loc[keep_mask.values].reset_index(drop=True)
 
-        # feature partitioning and scaling
+        ### FEATURES ###
         # first 2240 are genotypes, last 374 are lat/lon and ECs
         self.scaler = scaler if scaler is not None else StandardScaler()
         # genotype features
@@ -126,19 +144,39 @@ class GxE_Dataset(Dataset):
         else:
             self.e_data = pd.DataFrame(self.scaler.transform(e_block), columns=self.e_cols)
 
-        # per-year mean yield as target for env head
-        # both train/val and test .csvs have Yield_Mg_ha column
-        if self.residual_flag:
+        ### TARGETS ###
+        if 'Yield_Mg_ha' not in self.y_data.columns:
+            raise ValueError("y_data must contain 'Yield_Mg_ha' column")
+        total = self.y_data['Yield_Mg_ha'].astype(float)
 
-            # get the yield in a series
-            self.y_series = self.y_data['Yield_Mg_ha']
+        # env-year key -> Env (contains year)
+        env_key = self.idx_map['Env'].astype(str).values
+        ymean = total.groupby(env_key).transform('mean')
+        resid = total - ymean
 
-            # group by environement year (env contains year info) 
-            self.env_series = self.idx_map['Env'].astype(str).str.strip()
+        ### TARGET SCALING ###
+        self.label_scalers: Dict[str, LabelScaler] = {}
+        if self.scale_targets:
+            if self.split == "train":
+                # fit scalers on train split ONLY
+                def fit_ls(series: pd.Series) -> LabelScaler:
+                    return LabelScaler(mean=float(series.mean()), std=float(series.std(ddof=0)))
+                self.label_scalers['total'] = fit_ls(total)
+                self.label_scalers['ymean'] = fit_ls(ymean)
+                self.label_scalers['resid'] = fit_ls(resid)
+            else:
+                if y_scalers is None:
+                    raise ValueError("For val/test/sub split you must pass y_scalers")
+                self.label_scalers = y_scalers
+            
+            # apply transform with train-fitted scalers
+            total = pd.Series(self.label_scalers['total'].transform(total.values))
+            ymean = pd.Series(self.label_scalers['ymean'].transform(ymean.values))
+            resid = pd.Series(self.label_scalers['resid'].transform(resid.values))
 
-            # compute per-year means using only rows in a certain split
-            self.env_mean = self.y_series.groupby(self.env_series).transform('mean')
-            self.residual = self.y_series - self.env_mean
+        self.total_series = total.reset_index(drop=True)
+        self.env_mean = ymean.reset_index(drop=True)
+        self.residual = resid.reset_index(drop=True)
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -152,14 +190,9 @@ class GxE_Dataset(Dataset):
         Returns:
             obs (dict): dict of 'g_data', 'e_data' (x values), and 'target' (y value)
         """
-
-        # get genotype data
         tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long)
-        # get env data
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
-
-        x = {'g_data': tokens,  
-             'e_data': env_data}
+        x = {'g_data': tokens, 'e_data': env_data}
         
         if self.split in ('sub', 'test'):
             y = {'Env': self.y_data.iloc[index, 0],
@@ -167,7 +200,7 @@ class GxE_Dataset(Dataset):
                  'Yield_Mg_ha': self.y_data.iloc[index, 2]}
             return x, y
 
-        # regression + residual target
+        # scaled targets if scale_targets=True or raw otherwise 
         y_total = torch.tensor([self.y_data.iloc[index, 0]], dtype=torch.float32)
 
         if not self.residual_flag:

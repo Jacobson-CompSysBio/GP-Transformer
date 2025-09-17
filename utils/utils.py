@@ -1,4 +1,15 @@
 import argparse
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class LabelScaler:
+    mean: float
+    std: float
+    def transform(self, x):
+        return (np.asarray(x) - self.mean) / (self.std + 1e-8)
+    def inverse(self, z):
+        return np.asarray(z) * (self.std + 1e-8) + self.mean
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -21,7 +32,7 @@ def parse_args():
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
-    p.add_argument("--lambda_resid", type=float, default=1.5)
+    p.add_argument("--lambda_resid", type=float, default=5.0)
 
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -38,6 +49,7 @@ def parse_args():
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
+    p.add_argument("--scale_targets", type=str2bool, default=True)
 
     p.add_argument("--loss", type=str, default="mse",
                    choices=["mse", "pcc", "both"])
@@ -60,9 +72,10 @@ def make_run_name(args) -> str:
     model_type = g + e + ld + gxe + moe + res
     model_type = model_type[:-1]
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
+    scale_targets = "scaled" if args.scale_targets else ""
     return (
         f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
         f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
-        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do"    
+        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do_{scale_targets}"    
     )

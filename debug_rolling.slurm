@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-rolling
+#SBATCH -J debug-rolling-scaled
 #SBATCH -N 2
 #SBATCH -t 01:30:00
 #SBATCH -p batch
@@ -37,14 +37,15 @@ export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=2
+export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=2
+export GXE_LAYERS=1
 
-export HEADS=4
+export HEADS=1
 export EMB_SIZE=256
 export LOSS="both"
 export ALPHA=1e-5 # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -95,4 +96,5 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --alpha $ALPHA \
+        --scale_targets $SCALE_TARGETS

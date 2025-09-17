@@ -44,6 +44,7 @@ export HEADS=4
 export EMB_SIZE=128
 export LOSS="pcc"
 export ALPHA=1e-5 # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -94,7 +95,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --alpha $ALPHA \
+        --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -133,4 +135,5 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA
+    --alpha $ALPHA \
+    --scale_targets $SCALE_TARGETS

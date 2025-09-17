@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-cnn
+#SBATCH -J debug-y-scaler
 #SBATCH -N 1
 #SBATCH -t 00:10:00
 #SBATCH -p batch
@@ -25,7 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export GXE_ENC=cnn  # options: "tf", "mlp", "cnn"
+export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 export BATCH_SIZE=256
@@ -42,6 +42,7 @@ export HEADS=4
 export EMB_SIZE=256
 export LOSS="both"
 export ALPHA=0.01  # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -90,7 +91,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --alpha $ALPHA \
+        --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -128,4 +130,5 @@ python -u scripts/eval.py \
     --emb_size $EMB_SIZE \
     --loss $LOSS \
     --alpha $ALPHA \
+    --scale_targets $SCALE_TARGETS \
     --checkpoint_dir "$CHECKPOINT_DIR"
