@@ -37,12 +37,14 @@ def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:
     scaler.scale_ = np.array(payload['scale'], dtype=float)
     scaler.var_ = np.array(payload['var'], dtype=float)
     scaler.n_features_in_ = int(payload['n_features_in'])
+    if 'feature_names_in' in payload:
+        scaler.feature_names_in_ = np.array(payload['feature_names_in'], dtype=object)
     return scaler
 
 def _rebuild_y_scalers(payload: dict) -> dict | None:
     if not payload:
         return None
-    return {k: LabelScaler(v.mean, v.std) for k, v in payload.items()}
+    return {k: LabelScaler(v['mean'], v['std']) for k, v in payload.items()}
 
 def load_data(args,
               split: str = "test",
@@ -55,7 +57,7 @@ def load_data(args,
         data_path=DATA_DIR,
         index_map_path=INDEX_MAP + 'location_2024.csv',
         scaler=env_scaler,
-        label_scaler=scaler,
+        y_scalers=scaler,
         scale_targets=args.scale_targets
 
     )
@@ -87,7 +89,7 @@ def evaluate(model,
             out = model(xb)
             if isinstance(out, dict):
                 out = out['total']
-
+            
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
 
@@ -244,11 +246,12 @@ def main():
     test_data, test_loader = load_data(args,
                                        env_scaler=env_scaler,
                                        scaler=y_scalers,
-                                       split="test")
+                                       split="test",
+                                       batch_size=32)
 
     # evaluate
     print("Evaluating model...")
-    actuals, preds = evaluate(model, test_loader, device)
+    actuals, preds = evaluate(model, test_loader, y_scalers, device)
     plot_path = plot_results(model_type, actuals, preds)
     #save_results(model_type, actuals, preds)
 

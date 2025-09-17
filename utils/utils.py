@@ -1,4 +1,5 @@
 import argparse
+import torch
 import numpy as np
 from dataclasses import dataclass
 
@@ -7,8 +8,12 @@ class LabelScaler:
     mean: float
     std: float
     def transform(self, x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
         return (np.asarray(x) - self.mean) / (self.std + 1e-8)
-    def inverse(self, z):
+    def inverse_transform(self, z):
+        if isinstance(z, torch.Tensor):
+            z = z.detach().cpu().numpy()
         return np.asarray(z) * (self.std + 1e-8) + self.mean
 
 def str2bool(v):

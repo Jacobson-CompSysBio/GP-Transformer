@@ -332,6 +332,7 @@ def main():
                     "scale": env_scaler.scale_.tolist(),
                     "var": env_scaler.var_.tolist(),
                     "n_features_in": int(train_ds.scaler.n_features_in_),
+                    "feature_names_in": list(train_ds.e_cols)
                 }
 
                 label_scalers_payload = None
@@ -363,7 +364,7 @@ def main():
                         "scale_targets": args.scale_targets,
                     },
                     "env_scaler": env_scaler_payload,
-                    "label_scalers": label_scalers_payload,
+                    "y_scalers": label_scalers_payload,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }
