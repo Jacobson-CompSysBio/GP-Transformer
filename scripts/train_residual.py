@@ -151,9 +151,9 @@ def main():
     batches_per_epoch = len(train_loader)
     batches_per_eval = len(val_loader)
     total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch  # warmup for 1 epoch - should be enough
-    lr_decay_iters = total_iters * .5 
-    max_lr, min_lr = (args.lr), (0.001 * args.lr) 
+    warmup_iters = batches_per_epoch * 10  # warmup for 10 epochs - should be enough
+    lr_decay_iters = total_iters * .5
+    max_lr, min_lr = (args.lr), (0.001 * args.lr)
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop

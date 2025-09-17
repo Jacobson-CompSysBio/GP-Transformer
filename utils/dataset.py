@@ -128,13 +128,17 @@ class GxE_Dataset(Dataset):
 
         # per-year mean yield as target for env head
         # both train/val and test .csvs have Yield_Mg_ha column
-        # TODO: this needs to be environment-year, not just year
         if self.residual_flag:
+
+            # get the yield in a series
             self.y_series = self.y_data['Yield_Mg_ha']
-            self.year_series = self.idx_map['Year']
+
+            # group by environement year (env contains year info) 
+            self.env_series = self.idx_map['Env'].astype(str).str.strip()
+
             # compute per-year means using only rows in a certain split
-            self.year_mean = self.y_series.groupby(self.year_series).transform('mean')
-            self.residual = self.y_series - self.year_mean
+            self.env_mean = self.y_series.groupby(self.env_series).transform('mean')
+            self.residual = self.y_series - self.env_mean
 
     def __len__(self):
         # return length (number of rows) in dataset
@@ -169,11 +173,11 @@ class GxE_Dataset(Dataset):
         if not self.residual_flag:
             return x, y_total
 
-        y_year_mean = torch.tensor([self.year_mean.iloc[index]], dtype=torch.float32)
+        y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
         y_residual = torch.tensor([self.residual.iloc[index]], dtype=torch.float32)
         targets = {
             'total': y_total,
-            'ymean': y_year_mean,
+            'ymean': y_env_mean,
             'resid': y_residual
         }
         return x, targets

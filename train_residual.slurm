@@ -30,20 +30,20 @@ export MOE=True
 export RES=True
 
 export BATCH_SIZE=256
-export NUM_EPOCHS=10_000
-export LR=1e-5
+export NUM_EPOCHS=5000
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=5000
+export EARLY_STOP=200
 
-export G_LAYERS=2
-export LD_LAYERS=4
-export MLP_LAYERS=2
-export GXE_LAYERS=4
+export G_LAYERS=1
+export LD_LAYERS=2
+export MLP_LAYERS=1
+export GXE_LAYERS=2
 
-export HEADS=8
-export EMB_SIZE=512
-export LOSS="both"
+export HEADS=4
+export EMB_SIZE=128
+export LOSS="pcc"
 export ALPHA=5e-4 # only used if LOSS is "both"
 
 ### wandb settings ###
