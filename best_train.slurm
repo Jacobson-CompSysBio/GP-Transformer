@@ -30,7 +30,7 @@ export MOE=True
 
 export BATCH_SIZE=256
 export NUM_EPOCHS=5000
-export LR=1e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
