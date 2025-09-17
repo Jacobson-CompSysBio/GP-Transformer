@@ -128,6 +128,7 @@ class GxE_Dataset(Dataset):
 
         # per-year mean yield as target for env head
         # both train/val and test .csvs have Yield_Mg_ha column
+        # TODO: this needs to be environment-year, not just year
         if self.residual_flag:
             self.y_series = self.y_data['Yield_Mg_ha']
             self.year_series = self.idx_map['Year']

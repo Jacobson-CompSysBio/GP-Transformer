@@ -20,8 +20,8 @@ def parse_args():
     p.add_argument("--residual", type=str2bool, default=False)
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
-    p.add_argument("--lambda_ymean", type=float, default=0.5)
-    p.add_argument("--lambda_resid", type=float, default=1.0)
+    p.add_argument("--lambda_ymean", type=float, default=1.0)
+    p.add_argument("--lambda_resid", type=float, default=10.0)
 
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
