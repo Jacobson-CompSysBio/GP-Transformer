@@ -109,7 +109,7 @@ def main():
         pin_memory=True)
 
     # set up config
-    config = Config(block_size=len(train_ds[0][0]['g_data']),
+    config = Config(block_size=train_ds.block_size,
                     n_head=args.heads,
                     n_g_layer=args.g_layers,
                     n_ld_layer=args.ld_layers,

@@ -43,7 +43,7 @@ export HEADS=1
 export EMB_SIZE=128
 export LOSS="both"
 export ALPHA=0.5  # only used if LOSS is "both"
-export SCALE_TARGETS=True  # whether to standardize the target values
+export SCALE_TARGETS=True # whether to standardize the target values
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

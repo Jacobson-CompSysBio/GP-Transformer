@@ -164,7 +164,7 @@ def load_model(device: torch.device,
     e_enc = config.get("e_enc", args.e_enc)
     ld_enc = config.get("ld_enc", args.ld_enc)
     gxe_enc = config.get("gxe_enc", args.gxe_enc)
-    blk = config.get("block_size", 2240)
+    blk = config.get("block_size", None)
     g_layer = config.get("g_layers", args.g_layers)
     ld_layer = config.get("ld_layers", args.ld_layers)
     mlp_layer = config.get("mlp_layers", args.mlp_layers)

@@ -33,17 +33,6 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
-@dataclass
-class LabelScaler:
-    mean: float
-    std: float
-
-    def transform(self, x: np.ndarray | float) -> np.ndarray | float:
-        return (x - self.mean) / self.std
-    
-    def inverse_transform(self, z: np.ndarray | float) -> np.ndarray | float:
-        return z * (self.std + 1e-8) + self.mean
-
 # rolling GxE dataset
 class GxE_Dataset(Dataset):
 
@@ -178,6 +167,9 @@ class GxE_Dataset(Dataset):
         self.env_mean = ymean.reset_index(drop=True)
         self.residual = resid.reset_index(drop=True)
 
+        # get block size for later use
+        self.block_size = self.g_data.shape[1]
+
     def __len__(self):
         # return length (number of rows) in dataset
         return len(self.x_data)
@@ -201,7 +193,7 @@ class GxE_Dataset(Dataset):
             return x, y
 
         # scaled targets if scale_targets=True or raw otherwise 
-        y_total = torch.tensor([self.y_data.iloc[index, 0]], dtype=torch.float32)
+        y_total = torch.tensor([self.total_series.iloc[index]], dtype=torch.float32)
 
         if not self.residual_flag:
             return x, y_total
