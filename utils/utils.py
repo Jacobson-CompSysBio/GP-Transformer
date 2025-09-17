@@ -37,7 +37,7 @@ def parse_args():
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
-    p.add_argument("--lambda_resid", type=float, default=5.0)
+    p.add_argument("--lambda_resid", type=float, default=1.0)
 
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -77,10 +77,10 @@ def make_run_name(args) -> str:
     model_type = g + e + ld + gxe + moe + res
     model_type = model_type[:-1]
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
-    scale_targets = "scaled" if args.scale_targets else ""
+    scale_targets = "_scaled" if args.scale_targets else ""
     return (
         f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
         f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
-        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do_{scale_targets}"    
+        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"    
     )
