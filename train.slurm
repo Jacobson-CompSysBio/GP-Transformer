@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J gp-transformer
+#SBATCH -J scaled-targets-pcc
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch

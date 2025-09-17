@@ -85,15 +85,13 @@ def evaluate(model,
             # get things on device
             for key, value in xb.items():
                 xb[key] = value.to(device, non_blocking=True)
-
             out = model(xb)
             if isinstance(out, dict):
-                out = out['total']
-            
+                out = out['total'] 
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
-
-            preds.extend(out.detach().tolist())
+            out = out.detach().tolist() if isinstance(out, torch.Tensor) else out.tolist()
+            preds.extend(out)
             actuals.extend(yb['Yield_Mg_ha'])
 
     return actuals, preds
