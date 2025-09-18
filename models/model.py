@@ -127,6 +127,15 @@ class GxE_Transformer(nn.Module):
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
         return self.final_layer(x)
+    
+    def print_trainable_parameters(self):
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        g_trainable_params = sum(p.numel() for p in self.g_encoder.parameters() if p.requires_grad) if self.g_encoder else 0
+        e_trainable_params = sum(p.numel() for p in self.e_encoder.parameters() if p.requires_grad) if self.e_encoder else 0
+        ld_trainable_params = sum(p.numel() for p in self.ld_encoder.parameters() if p.requires_grad) if self.ld_encoder else 0
+        gxe_trainable_params = trainable_params - g_trainable_params - e_trainable_params - ld_trainable_params
+        print(f"Trainable parameters: {trainable_params:,}"
+              f" (G: {g_trainable_params:,}, E: {e_trainable_params:,}, LD: {ld_trainable_params:,}, GxE: {gxe_trainable_params:,})")
 
 
 # create full GxE transformer for genomic prediction
@@ -265,4 +274,13 @@ class GxE_ResidualTransformer(nn.Module):
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
+    
+    def print_trainable_parameters(self):
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        g_trainable_params = sum(p.numel() for p in self.g_encoder.parameters() if p.requires_grad) if self.g_encoder else 0
+        e_trainable_params = sum(p.numel() for p in self.e_encoder.parameters() if p.requires_grad) if self.e_encoder else 0
+        ld_trainable_params = sum(p.numel() for p in self.ld_encoder.parameters() if p.requires_grad) if self.ld_encoder else 0
+        gxe_trainable_params = trainable_params - g_trainable_params - e_trainable_params - ld_trainable_params
+        print(f"Trainable parameters: {trainable_params:,}"
+              f" (G: {g_trainable_params:,}, E: {e_trainable_params:,}, LD: {ld_trainable_params:,}, GxE: {gxe_trainable_params:,})")
     

@@ -123,6 +123,8 @@ def main():
                             gxe_enc=args.gxe_enc,
                             moe=args.moe,
                             config=config).to(device)
+    if is_main(rank):
+        model.print_trainable_parameters()
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank)
