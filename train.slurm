@@ -42,9 +42,9 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=128
-export LOSS="pcc"
-export ALPHA=0.5 # only used if LOSS is "both"
-export SCALE_TARGETS=False
+export LOSS="mse"
+export ALPHA=0.1 # only used if LOSS is "both"
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

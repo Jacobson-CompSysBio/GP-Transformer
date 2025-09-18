@@ -216,10 +216,10 @@ def main():
             run.define_metric("pcc_loss", step_metric="iter_num")
 
             # epoch level
-            run.define_metric("mse_epoch", step_metric="epoch")
-            run.define_metric("pcc_loss_epoch", step_metric="epoch")
-            run.define_metric("mse_epoch", step_metric="epoch")
-            run.define_metric("pcc_loss_epoch", step_metric="epoch")
+            run.define_metric("val_mse_epoch", step_metric="epoch")
+            run.define_metric("val_pcc_loss_epoch", step_metric="epoch")
+            run.define_metric("train_mse_epoch", step_metric="epoch")
+            run.define_metric("train_pcc_loss_epoch", step_metric="epoch")
         
         # track residual losses 
         if args.residual:
@@ -405,10 +405,10 @@ def main():
             }
             if args.loss == "both":
                 log_epoch_payload.update({
-                    "train_mse": train_mse,
-                    "train_pcc_loss": train_pcc_loss,
-                    "val_mse": val_mse,
-                    "val_pcc_loss": val_pcc_loss,
+                    "train_mse_epoch": train_mse,
+                    "train_pcc_loss_epoch": train_pcc_loss,
+                    "val_mse_epoch": val_mse,
+                    "val_pcc_loss_epoch": val_pcc_loss,
                 })
             wandb.log(log_epoch_payload)
 

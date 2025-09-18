@@ -127,7 +127,7 @@ def main():
                 device_ids=[local_rank],
                 output_device=local_rank)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_function = build_loss(args.loss, args.alpha)
     mse_loss_log = nn.MSELoss(reduction="mean")
     pcc_loss_log = GlobalPearsonCorrLoss(reduction="mean")
