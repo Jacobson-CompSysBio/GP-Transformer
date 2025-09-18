@@ -42,7 +42,7 @@ export HEADS=4
 export EMB_SIZE=256
 export LOSS="both"  # options: "mse", "mae", "both"
 export ALPHA=0.5  # only used if LOSS is "both"
-export SCALE_TARGETS=False
+export SCALE_TARGETS=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

@@ -263,35 +263,27 @@ def main():
         ### evaluation ###
         with torch.no_grad():
             model.eval()
-            train_loss_accum = 0
-            val_loss_accum = 0
 
-            # for wandb logging
-            train_mse_accum = torch.tensor(0.0, device=device)
-            train_pcc_loss_accum = torch.tensor(0.0, device=device)
-            val_mse_accum = torch.tensor(0.0, device=device)
-            val_pcc_loss_accum = torch.tensor(0.0, device=device)
+            def eval_loader(loader):
+                total_loss = torch.tensor(0.0, device=device)
+                mse_acc = torch.tensor(0.0, device=device)
+                pcc_acc = torch.tensor(0.0, device=device)
+                n_batches = 0
 
-            for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
-                for k, v in xbt.items():
-                    xbt[k] = v.to(device, non_blocking=True)
-                ybt = ybt.to(device, non_blocking=True).float()
-                for k, v in xbv.items():
-                    xbv[k] = v.to(device, non_blocking=True)
-                ybv = ybv.to(device, non_blocking=True).float()
+                for xb, yb in loader:
+                    xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
+                    yb = yb.to(device, non_blocking=True).float()
+                    preds = model(xb)
+                    total_loss += loss_function(preds, yb)
+                    if args.loss == "both":
+                        mse_acc += mse_loss_log(preds, yb)
+                        pcc_acc += pcc_loss_log(preds, yb)
+                    n_batches += 1
+                return total_loss, mse_acc, pcc_acc, n_batches
 
-                train_loss_accum += loss_function(model(xbt), ybt)
-                val_loss_accum += loss_function(model(xbv), ybv)
+            train_loss_accum, train_mse_accum, train_pcc_loss_accum, n_train = eval_loader(train_loader)
+            val_loss_accum, val_mse_accum, val_pcc_loss_accum, n_val = eval_loader(val_loader)
 
-                if args.loss == "both":
-                    train_mse_accum += mse_loss_log(model(xbt), ybt)
-                    train_pcc_loss_accum += pcc_loss_log(model(xbt), ybt)
-                    val_mse_accum += mse_loss_log(model(xbv), ybv)
-                    val_pcc_loss_accum += pcc_loss_log(model(xbv), ybv)
-
-                if train_loss_accum.isnan() or val_loss_accum.isnan():
-                    raise RuntimeError("Loss is NaN during evaluation, stopping training.")
-        
         # aggregate losses over all ranks
         dist.all_reduce(train_loss_accum)
         dist.all_reduce(val_loss_accum)
@@ -299,13 +291,13 @@ def main():
             for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
                 dist.all_reduce(t)
 
-        train_loss = (train_loss_accum / batches_per_eval / world_size).item()
-        val_loss = (val_loss_accum / batches_per_eval / world_size).item()
+        train_loss = (train_loss_accum / max(1, n_train) / world_size).item()
+        val_loss = (val_loss_accum / max(1, n_val) / world_size).item()
         if args.loss == "both":
-            train_mse = (train_mse_accum / batches_per_eval / world_size).item()
-            train_pcc_loss = (train_pcc_loss_accum / batches_per_eval / world_size).item()
-            val_mse = (val_mse_accum / batches_per_eval / world_size).item()
-            val_pcc_loss = (val_pcc_loss_accum / batches_per_eval / world_size).item()
+            train_mse = (train_mse_accum / max(1, n_train) / world_size).item()
+            train_pcc_loss = (train_pcc_loss_accum / max(1, n_train) / world_size).item()
+            val_mse = (val_mse_accum / max(1, n_val) / world_size).item()
+            val_pcc_loss = (val_pcc_loss_accum / max(1, n_val) / world_size).item()
 
         # log eval / early stop (only rank 0)
         if is_main(rank):

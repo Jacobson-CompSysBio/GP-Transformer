@@ -327,83 +327,72 @@ def main():
         ### evaluation ###
         with torch.no_grad():
             model.eval()
-            train_loss_accum = 0
-            val_loss_accum = 0
 
-            # for wandb logging
-            train_mse_accum = torch.tensor(0.0, device=device)
-            train_pcc_loss_accum = torch.tensor(0.0, device=device)
-            val_mse_accum = torch.tensor(0.0, device=device)
-            val_pcc_loss_accum = torch.tensor(0.0, device=device)
+            def eval_split(loader):
+                total_loss_acc = torch.tensor(0.0, device=device)
+                mse_acc = torch.tensor(0.0, device=device)
+                pcc_acc = torch.tensor(0.0, device=device)
+                aux_ymean_acc = torch.tensor(0.0, device=device)
+                aux_resid_acc = torch.tensor(0.0, device=device)
+                n_batches = 0
 
-            aux_train_ymean_accum = torch.tensor(0.0, device=device)
-            aux_train_resid_accum = torch.tensor(0.0, device=device)
-            aux_val_ymean_accum = torch.tensor(0.0, device=device)
-            aux_val_resid_accum = torch.tensor(0.0, device=device)
+                for xb, yb in loader:
+                    xb = _move_to_device(xb, device)
+                    yb = _move_to_device(yb, device)
 
-            for (xbt, ybt), (xbv, ybv) in zip(train_loader, val_loader):
-                for k, v in xbt.items():
-                    xbt[k] = v.to(device, non_blocking=True)
-                ybt = _move_to_device(ybt, device) 
-                for k, v in xbv.items():
-                    xbv[k] = v.to(device, non_blocking=True)
-                ybv = _move_to_device(ybv, device)
+                    out = model(xb)
+                    if args.residual:
+                        # main loss on 'total'
+                        total_loss_acc += loss_function(out['total'], yb['total'])
+                        # aux heads
+                        aux_ymean_acc += F.mse_loss(out['ymean'], yb['ymean'])
+                        aux_resid_acc += F.mse_loss(out['resid'], yb['resid'])
+                        if args.loss == "both":
+                            mse_acc += mse_loss_log(out['total'], yb['total'])
+                            pcc_acc += pcc_loss_log(out['total'], yb['total'])
+                    else:
+                        total_loss_acc += loss_function(out, yb)
+                        if args.loss == "both":
+                            mse_acc += mse_loss_log(out, yb)
+                            pcc_acc += pcc_loss_log(out, yb)
+                    n_batches += 1
 
-                out_train = model(xbt)
-                out_val = model(xbv)
-
-                if args.residual:
-                    loss_train = loss_function(out_train['total'], ybt['total'])
-                    loss_val = loss_function(out_val['total'], ybv['total'])
-                    train_loss_accum += loss_train
-                    val_loss_accum += loss_val
-
-                    # aux accumulation (for monitoring)
-                    aux_train_ymean_accum += F.mse_loss(out_train['ymean'], ybt['ymean'])
-                    aux_train_resid_accum += F.mse_loss(out_train['resid'], ybt['resid'])
-                    aux_val_ymean_accum += F.mse_loss(out_val['ymean'], ybv['ymean'])
-                    aux_val_resid_accum += F.mse_loss(out_val['resid'], ybv['resid'])
-
-                    if args.loss == "both":
-                        train_mse_accum += mse_loss_log(out_train['total'], ybt['total'])
-                        train_pcc_loss_accum += pcc_loss_log(out_train['total'], ybt['total'])
-                        val_mse_accum += mse_loss_log(out_val['total'], ybv['total'])
-                        val_pcc_loss_accum += pcc_loss_log(out_val['total'], ybv['total'])
-                else:
-                    loss_train = loss_function(out_train, ybt)
-                    loss_val = loss_function(out_val, ybv)
-                    train_loss_accum += loss_train
-                    val_loss_accum += loss_val
-
-                    if args.loss == "both":
-                        train_mse_accum += mse_loss_log(out_train, ybt)
-                        train_pcc_loss_accum += pcc_loss_log(out_train, ybt)
-                        val_mse_accum += mse_loss_log(out_val, ybv)
-                        val_pcc_loss_accum += pcc_loss_log(out_val, ybv)
+                return {
+                    "total_loss_acc": total_loss_acc,
+                    "mse_acc": mse_acc,
+                    "pcc_acc": pcc_acc,
+                    "aux_ymean_acc": aux_ymean_acc,
+                    "aux_resid_acc": aux_resid_acc,
+                    "n_batches": n_batches
+                }
                 
-                if train_loss_accum.isnan() or val_loss_accum.isnan():
-                    raise RuntimeError("Loss is NaN during evaluation, stopping training.")
-        
-        # aggregate losses over all ranks
-        for t in (train_loss_accum, val_loss_accum,
-                  train_mse_accum, train_pcc_loss_accum,
-                  val_mse_accum, val_pcc_loss_accum,
-                  aux_train_ymean_accum, aux_train_resid_accum,
-                  aux_val_ymean_accum, aux_val_resid_accum): 
+            train_stats = eval_split(train_loader)
+            val_stats = eval_split(val_loader)
+
+        to_reduce = [
+            train_stats["total_loss_acc"], val_stats["total_loss_acc"],
+            train_stats["mse_acc"], val_stats["mse_acc"],
+            train_stats["pcc_acc"], val_stats["pcc_acc"],
+            train_stats["aux_ymean_acc"], train_stats["aux_resid_acc"],
+            val_stats["aux_ymean_acc"], val_stats["aux_resid_acc"],
+        ]
+        for t in to_reduce:
             dist.all_reduce(t)
+        n_train = train_stats["n_batches"]
+        n_val = val_stats["n_batches"]
 
-        train_loss = (train_loss_accum / batches_per_eval / world_size).item()
-        val_loss = (val_loss_accum / batches_per_eval / world_size).item()
+        train_loss = (train_stats["total_loss_acc"] / n_train / world_size).item()
+        val_loss = (val_stats["total_loss_acc"] / n_val / world_size).item()
         if args.loss == "both":
-            train_mse = (train_mse_accum / batches_per_eval / world_size).item()
-            train_pcc_loss = (train_pcc_loss_accum / batches_per_eval / world_size).item()
-            val_mse = (val_mse_accum / batches_per_eval / world_size).item()
-            val_pcc_loss = (val_pcc_loss_accum / batches_per_eval / world_size).item()
+            train_mse = (train_stats["mse_acc"] / n_train / world_size).item()
+            train_pcc_loss = (train_stats["pcc_acc"] / n_train / world_size).item()
+            val_mse = (val_stats["mse_acc"] / n_val / world_size).item()
+            val_pcc_loss = (val_stats["pcc_acc"] / n_val / world_size).item()
 
-        aux_train_ymean = (aux_train_ymean_accum / batches_per_eval / world_size).item()
-        aux_train_resid = (aux_train_resid_accum / batches_per_eval / world_size).item()
-        aux_val_ymean = (aux_val_ymean_accum / batches_per_eval / world_size).item()
-        aux_val_resid = (aux_val_resid_accum / batches_per_eval / world_size).item()
+        aux_train_ymean = (train_stats["aux_ymean_acc"] / n_train / world_size).item()
+        aux_train_resid = (train_stats["aux_resid_acc"] / n_train / world_size).item()
+        aux_val_ymean = (val_stats["aux_ymean_acc"] / n_val / world_size).item()
+        aux_val_resid = (val_stats["aux_resid_acc"] / n_val / world_size).item()
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
