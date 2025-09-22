@@ -33,7 +33,7 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
-# rolling GxE dataset
+# can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
     def __init__(self,
@@ -53,7 +53,12 @@ class GxE_Dataset(Dataset):
             split (str): 'train' (2014-2022), 'val' (2023), 'test' (2024), or 'sub'
             data_path (str): path to data directory
             index_map_path (str): path to the INDEX -> Env mapping file
+            residual (bool): if True, return residual targets; else return total targets
             scaler (StandardScaler|None): if None and split=='train', fit here; otherwise reuse passed scaler
+            train_year_max (int|None): if not None and split=='train', filter to years <= this value
+            val_year (int|None): if not None and split=='val', filter to this year
+            y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
+            scale_targets (bool): if True, scale targets using y_scalers
         """
         super().__init__()
         self.split = split
@@ -97,13 +102,10 @@ class GxE_Dataset(Dataset):
 
         ### READ X/Y, ALIGN ###
         self.x_data = pd.read_csv(x_path, index_col=0).reset_index(drop=True) # reset index col
-        if split == "sub":
+        if split in ('sub', 'test'):
             self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
         self.y_data = pd.read_csv(y_path, index_col=0).reset_index(drop=True)
 
-        # for explicit test, remove non-feature cols from X
-        if split == "test":
-            self.x_data = self.x_data.drop(columns=['Env', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
         if split == "sub":
             # keep metadata for submission
             self.y_data = self.y_data[['Env', 'Hybrid', 'Yield_Mg_ha']]
@@ -121,26 +123,23 @@ class GxE_Dataset(Dataset):
         # first 2240 are genotypes, last 374 are lat/lon and ECs
         self.scaler = scaler if scaler is not None else StandardScaler()
         # genotype features
-        self.g_data = (self.x_data.iloc[:, :-374] * 2).astype('int64')
+        self.g_data = (self.x_data.iloc[:, :-374] * 2).astype('int64') # multiply by to make the scale 0,1,2 from 0,0.5,1
         # env features
         self.e_cols = list(self.x_data.columns[-374:])
         e_block = self.x_data[self.e_cols].copy()
         # fit scaler ONLY on train to avoid data leakage
-        if scaler is None:
-            if split != 'train':
-                raise ValueError("For val/test/sub split you must pass a scaler")
-            self.e_data = pd.DataFrame(self.scaler.fit_transform(e_block), columns=self.e_cols)
-        else:
-            self.e_data = pd.DataFrame(self.scaler.transform(e_block), columns=self.e_cols)
+        if split != 'train' and scaler is None:
+            raise ValueError("For val/test/sub split you must pass a scaler")
+        self.e_data = pd.DataFrame(self.scaler.transform(e_block), columns=self.e_cols)
 
         ### TARGETS ###
         if 'Yield_Mg_ha' not in self.y_data.columns:
             raise ValueError("y_data must contain 'Yield_Mg_ha' column")
         total = self.y_data['Yield_Mg_ha'].astype(float)
 
-        # env-year key -> Env (contains year)
+        # env-year key -> Env (contains year) DEH1_2014, etc.
         env_key = self.idx_map['Env'].astype(str).values
-        ymean = total.groupby(env_key).transform('mean')
+        ymean = total.groupby(env_key).transform('mean') # mean per env-year, but retain the same length as total
         resid = total - ymean
 
         ### TARGET SCALING ###

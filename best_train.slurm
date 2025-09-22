@@ -41,7 +41,7 @@ export MLP_LAYERS=1
 export GXE_LAYERS=2
 
 export HEADS=4
-export EMB_SIZE=128
+export EMB_SIZE=256
 export LOSS="pcc"
 export ALPHA=1e-5 # only used if LOSS is "both"
 

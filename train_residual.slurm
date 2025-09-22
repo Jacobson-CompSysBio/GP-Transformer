@@ -42,9 +42,9 @@ export MLP_LAYERS=1
 export GXE_LAYERS=2
 
 export HEADS=4
-export EMB_SIZE=128
-export LOSS="pcc"
-export ALPHA=0.1 # only used if LOSS is "both"
+export EMB_SIZE=256
+export LOSS="both"
+export ALPHA=0.01 # only used if LOSS is "both"
 export SCALE_TARGETS=True
 
 ### wandb settings ###
