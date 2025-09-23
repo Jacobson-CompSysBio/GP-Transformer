@@ -40,6 +40,8 @@ def parse_args():
     p.add_argument("--lambda_resid", type=float, default=1.0)
 
     p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--gbs", type=int, default=2048)
+
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=1000)
@@ -79,7 +81,7 @@ def make_run_name(args) -> str:
     loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
     scale_targets = "_scaled" if args.scale_targets else ""
     return (
-        f"{model_type}_{loss_tag}_{args.batch_size}bs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
         f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"    

@@ -84,6 +84,7 @@ srun -N ${SLURM_NNODES} \
     --kill-on-bad-exit=1 \
     python -u scripts/train.py \
         --batch_size $BATCH_SIZE \
+        --gbs $GBS \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
@@ -124,6 +125,7 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
+    --gbs $GBS \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
