@@ -32,8 +32,9 @@ export MOE=True
 export GBS=2048
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
-
 export BATCH_SIZE=$MBS
+echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
+
 export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
