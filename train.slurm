@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J smallbatch_train
-#SBATCH -N 8
+#SBATCH -N 2
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -29,7 +29,7 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 # calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=2048
+export GBS=1024
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -48,7 +48,7 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="mse"
+export LOSS="both"
 export ALPHA=0.5 # only used if LOSS is "both"
 export SCALE_TARGETS=True
 
@@ -125,7 +125,7 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
-    --gbs $GBS \
+    --gbs $GBS \    
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \

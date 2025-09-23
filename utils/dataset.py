@@ -127,10 +127,11 @@ class GxE_Dataset(Dataset):
         # env features
         self.e_cols = list(self.x_data.columns[-374:])
         e_block = self.x_data[self.e_cols].copy()
-        # fit scaler ONLY on train to avoid data leakage
         if split != 'train' and scaler is None:
             raise ValueError("For val/test/sub split you must pass a scaler")
-        self.e_data = pd.DataFrame(self.scaler.transform(e_block), columns=self.e_cols)
+        # if split is train, fit scaler, otherwise reuse
+        e_block = self.scaler.fit_transform(e_block) if split == 'train' else self.scaler.transform(e_block)
+        self.e_data = pd.DataFrame(e_block, columns=self.e_cols)
 
         ### TARGETS ###
         if 'Yield_Mg_ha' not in self.y_data.columns:

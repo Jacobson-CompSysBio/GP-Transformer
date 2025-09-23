@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J train_residual_scaled
-#SBATCH -N 8
+#SBATCH -N 2
 #SBATCH -t 02:00:00
 #SBATCH -p batch 
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -29,7 +29,13 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export RES=True
 
-export BATCH_SIZE=256
+# calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
+export GBS=2048
+NGPUS=$(($SLURM_NNODES * 8))
+MBS=$(($GBS / $NGPUS))
+export BATCH_SIZE=$MBS
+echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
+
 export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
@@ -79,6 +85,7 @@ srun -N ${SLURM_NNODES} \
     --kill-on-bad-exit=1 \
     python -u scripts/train_residual.py \
         --batch_size $BATCH_SIZE \
+        --gbs $GBS \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
@@ -120,6 +127,7 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
+    --gbs $GBS \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
