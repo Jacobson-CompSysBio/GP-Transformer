@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J reproducibility-run
+#SBATCH -J smallbatch_train
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -28,11 +28,11 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-export BATCH_SIZE=256
+export BATCH_SIZE=32
 export NUM_EPOCHS=5000
-export LR=1e-5
-export WEIGHT_DECAY=1e-3
-export DROPOUT=0.25
+export LR=1e-4
+export WEIGHT_DECAY=1e-5
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -42,8 +42,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="both"
-export ALPHA=0.01 # only used if LOSS is "both"
+export LOSS="mse"
+export ALPHA=0.5 # only used if LOSS is "both"
 export SCALE_TARGETS=True
 
 ### wandb settings ###
