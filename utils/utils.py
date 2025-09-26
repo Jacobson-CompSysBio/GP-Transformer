@@ -56,7 +56,7 @@ def parse_args():
     p.add_argument("--emb_size", type=int, default=768)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
-    p.add_argument("--scale_targets", type=str2bool, default=True)
+    p.add_argument("--scale_targets", type=str2bool, default=False)
 
     p.add_argument("--loss", type=str, default="mse",
                    choices=["mse", "pcc", "both"])

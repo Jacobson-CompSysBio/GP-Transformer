@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J smallbatch_train
-#SBATCH -N 2
+#SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -29,14 +29,14 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 # calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=1024
+export GBS=2048
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=5000
-export LR=1e-4
+export LR=1e-3
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -48,7 +48,7 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="both"
+export LOSS="mse"
 export ALPHA=0.5 # only used if LOSS is "both"
 export SCALE_TARGETS=True
 

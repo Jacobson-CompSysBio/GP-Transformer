@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J best_train
-#SBATCH -N 2
+#SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -28,8 +28,8 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-# calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=2048
+# calculate microbatch size given global batch size of GBS and N nodes * 8 gpus/node = 64 gpus
+export GBS=16384  # global batch size
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
