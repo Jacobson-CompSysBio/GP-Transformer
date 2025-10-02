@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J smallbatch_train
+#SBATCH -J best-train-
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -22,22 +22,22 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### train hyperparameters ###
-export G_ENC=True
+export G_ENC=False
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-# calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=2048
+# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 64 gpus
+export GBS=16384
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=5000
-export LR=1e-3
-export WEIGHT_DECAY=1e-5
+export LR=1e-4
+export WEIGHT_DECAY=1e-3
 export DROPOUT=0.15
 export EARLY_STOP=200
 
@@ -48,9 +48,9 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="mse"
+export LOSS="pcc"
 export ALPHA=0.5 # only used if LOSS is "both"
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -125,7 +125,7 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
-    --gbs $GBS \    
+    --gbs $GBS \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
