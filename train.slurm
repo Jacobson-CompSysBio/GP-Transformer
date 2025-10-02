@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-train-
+#SBATCH -J best-train-wd1e-7
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -37,7 +37,7 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=5000
 export LR=1e-4
-export WEIGHT_DECAY=1e-3
+export WEIGHT_DECAY=1e-7
 export DROPOUT=0.15
 export EARLY_STOP=200
 

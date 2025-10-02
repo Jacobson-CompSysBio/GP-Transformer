@@ -1,5 +1,6 @@
 import argparse
 import torch
+import random
 import numpy as np
 from dataclasses import dataclass
 
@@ -86,3 +87,22 @@ def make_run_name(args) -> str:
         f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"    
     )
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # make cudnn deterministic
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # optional, but slower
+    # torch.use_deterministic_algorithms(True)
+
+# need a seed function for dataloader workers
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32  # each worker gets a distinct initial seed
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)

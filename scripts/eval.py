@@ -19,10 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.config import *
 from models.model import *
-from utils.utils import parse_args, make_run_name, LabelScaler
-
-import random
-random.seed(0); np.random.seed(0); torch.manual_seed(0)
+from utils.utils import *
 
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -236,6 +233,7 @@ def main():
     # load model
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(0)
+    set_seed(args.seed)
     print("Loading model...")
     model, y_scalers, env_scaler = load_model(device, args)    
     

@@ -71,8 +71,9 @@ def main():
     device, local_rank, rank, world_size = setup_ddp()
 
     # reproducibility 
-    torch.manual_seed(args.seed + rank)
-    random.seed(args.seed + rank)
+    set_seed(args.seed + rank)  # different seed for each rank
+    g = torch.Generator()
+    g.manual_seed(args.seed + rank)
 
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
@@ -101,12 +102,15 @@ def main():
         batch_size=args.batch_size,
         sampler=train_sampler,
         pin_memory=True,
+        worker_init_fn=seed_worker,
     )
     val_loader = DataLoader(
         val_ds, 
         batch_size=args.batch_size, 
         sampler=val_sampler,
-        pin_memory=True)
+        pin_memory=True,
+        worker_init_fn=seed_worker,
+    )
 
     # set up config
     config = Config(block_size=train_ds.block_size,
