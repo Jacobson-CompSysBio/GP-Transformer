@@ -26,6 +26,16 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = 'data/maize_data_2014-2023_vs_2024/'
 INDEX_MAP = 'data/maize_data_2014-2023_vs_2024/'
 
+# safer pcc to avoid nans
+def _safe_pcc(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size < 2:
+        return np.nan
+    # if our data is constant, return nan
+    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
+        return np.nan
+    return pearsonr(a, b).statistic
+
+
 def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:
     if not payload:
         return None
@@ -72,26 +82,63 @@ def evaluate(model,
              y_scalers: dict | None,
              device: torch.device):
 
-    preds = []
-    actuals = []
     model.eval()
+    rows = []
 
     with torch.no_grad():
-    # loop through
         for xb, yb in tqdm(test_loader):
             # get things on device
             for key, value in xb.items():
                 xb[key] = value.to(device, non_blocking=True)
+
+            # forward pass
             out = model(xb)
             if isinstance(out, dict):
                 out = out['total'] 
+
+            # inverse transform if we have scalers
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
-            out = out.detach().tolist() if isinstance(out, torch.Tensor) else out.tolist()
-            preds.extend(out)
-            actuals.extend(yb['Yield_Mg_ha'])
+            
+            pred = out.detach().cpu().numpy().squeeze(-1)
+            actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
+            
+            # track env for location-avg 
+            env = np.asarray(yb['Env']).astype(str)
 
-    return actuals, preds
+            # zip env, actual, and pred, append to rows
+            rows.extend(zip(env.tolist(), actual.tolist(), pred.tolist()))
+    
+    # convert our multi-dimensional list to a dataframe
+    df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred'])
+
+    # global results
+    y_true = df['Actual'].to_numpy()
+    y_pred = df['Pred'].to_numpy()
+    global_pcc = _safe_pcc(y_true, y_pred)
+    global_mse = float(mean_squared_error(y_true, y_pred))
+
+    # env-avg results
+    grp = df.groupby('Env', sort=False)
+    pcc_by_env = grp.apply(lambda g: _safe_pcc(g['Actual'].values, g['Pred'].values)).dropna()
+    macro_env_pcc = float(pcc_by_env.mean()) if len(pcc_by_env) else np.nan
+
+    # also take a sample-weighted mean for good measure
+    counts = grp.size().loc[pcc_by_env.index]
+    weighted_env_pcc = float(np.nansum(pcc_by_env.values * counts.values) / counts.values.sum()) if len (pcc_by_env) else np.nan
+
+    mse_by_env = grp.apply(lambda g: float(mean_squared_error(g['Actual'].values, g['Pred'].values)))
+    macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
+
+    results = {
+        'global_pcc': float(global_pcc) if not np.isnan(global_pcc) else None,
+        'global_mse': global_mse,
+        'env_pcc': macro_env_pcc,
+        'env_mse': macro_env_mse,
+        'env_pcc_weighted': weighted_env_pcc,
+    }
+
+    return results, df
 
 def plot_results(model_type: str,
                  actuals: list,
@@ -247,27 +294,31 @@ def main():
 
     # evaluate
     print("Evaluating model...")
-    actuals, preds = evaluate(model, test_loader, y_scalers, device)
-    plot_path = plot_results(model_type, actuals, preds)
+    results, df = evaluate(model, test_loader, y_scalers, device)
+    plot_path = plot_results(model_type, df['Actual'], df['Pred'])
     #save_results(model_type, actuals, preds)
 
-    actuals = np.array(actuals)
-    preds = np.array(preds).squeeze(-1)
-
-    # TODO: log these to wandb
-    pcc = pearsonr(actuals, preds).statistic
-    mse = mean_squared_error(actuals, preds)
-    print("Pearson Correlation:", pcc)
-    print("Mean Squared Error:", mse)
+    # print results
+    print("Pearson Correlation:", results['global_pcc'])
+    print("Mean Squared Error:", results['global_mse'])
+    print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
+    print("Environment-Averaged MSE:", results['env_mse'])
+    print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
 
     # log metrics
-    run.summary["test/pearson"] = float(pcc)
-    run.summary["test/mse"] = float(mse)
+    run.summary["test/pearson"] = float(results['global_pcc'])
+    run.summary["test/mse"] = float(results['global_mse'])
+    run.summary["test/env_avg_pearson"] = float(results['env_pcc'])
+    run.summary["test/env_avg_mse"] = float(results['env_mse'])
+    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
     run.summary["test/model_type"] = model_type
     
     run.log({
-        "test/pearson": float(pcc),
-        "test/mse": float(mse),
+        "test/pearson": float(results['global_pcc']),
+        "test/env_avg_pearson": float(results['env_pcc']),
+        "test/env_avg_pearson_weighted": float(results['env_pcc_weighted']),
+        "test/mse": float(results['global_mse']),
+        "test/env_avg_mse": float(results['env_mse']),
     })
 
     # plot image

@@ -146,7 +146,7 @@ def main():
     #warmup_iters = batches_per_epoch * 2  # warmup for 2 epochs
     lr_decay_iters = total_iters * .5 
     #lr_decay_iters = total_iters * .35
-    max_lr, min_lr = (args.lr), (0.001 * args.lr) 
+    max_lr, min_lr = (args.lr), (0.001 * args.lr)
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
@@ -200,10 +200,10 @@ def main():
             run.define_metric("pcc_loss", step_metric="iter_num")
 
             # epoch level
-            run.define_metric("mse_epoch", step_metric="epoch")
-            run.define_metric("pcc_loss_epoch", step_metric="epoch")
-            run.define_metric("mse_epoch", step_metric="epoch")
-            run.define_metric("pcc_loss_epoch", step_metric="epoch")
+            run.define_metric("train_mse_epoch", step_metric="epoch")
+            run.define_metric("train_pcc_loss_epoch", step_metric="epoch")
+            run.define_metric("val_mse_epoch", step_metric="epoch")
+            run.define_metric("val_pcc_loss_epoch", step_metric="epoch")
 
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -293,6 +293,7 @@ def main():
             val_loss_accum, val_mse_accum, val_pcc_loss_accum, n_val = eval_loader(val_loader)
 
         # aggregate losses over all ranks
+        # note: dist.all_reduce defaults to SUM operation
         dist.all_reduce(train_loss_accum)
         dist.all_reduce(val_loss_accum)
         if args.loss == "both":

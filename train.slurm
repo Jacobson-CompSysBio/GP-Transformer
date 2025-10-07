@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-train-wd1e-7
+#SBATCH -J best-train-g
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -22,7 +22,7 @@ source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.s
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### train hyperparameters ###
-export G_ENC=False
+export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
@@ -37,9 +37,9 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=5000
 export LR=1e-4
-export WEIGHT_DECAY=1e-7
+export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=200
+export EARLY_STOP=50
 
 export G_LAYERS=1
 export LD_LAYERS=2
