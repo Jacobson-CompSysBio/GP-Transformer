@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-train-g
+#SBATCH -J best_train_recreate 
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
