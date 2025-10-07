@@ -99,8 +99,9 @@ def evaluate(model,
             # inverse transform if we have scalers
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
-            
-            pred = out.detach().cpu().numpy().squeeze(-1)
+                pred = np.array(out, dtype=float).ravel()
+            else:
+                pred = out.detach().cpu().numpy().ravel()
             actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
             
             # track env for location-avg 
@@ -119,15 +120,21 @@ def evaluate(model,
     global_mse = float(mean_squared_error(y_true, y_pred))
 
     # env-avg results
-    grp = df.groupby('Env', sort=False)
-    pcc_by_env = grp.apply(lambda g: _safe_pcc(g['Actual'].values, g['Pred'].values)).dropna()
+    grp = df.groupby('Env', sort=False)[['Actual', 'Pred']]
+    pcc_by_env = grp.apply(
+        lambda g: _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy()),
+        include_groups=False
+    ).dropna()
     macro_env_pcc = float(pcc_by_env.mean()) if len(pcc_by_env) else np.nan
 
     # also take a sample-weighted mean for good measure
     counts = grp.size().loc[pcc_by_env.index]
     weighted_env_pcc = float(np.nansum(pcc_by_env.values * counts.values) / counts.values.sum()) if len (pcc_by_env) else np.nan
 
-    mse_by_env = grp.apply(lambda g: float(mean_squared_error(g['Actual'].values, g['Pred'].values)))
+    mse_by_env = grp.apply(
+        lambda g: float(mean_squared_error(g['Actual'].to_numpy(), g['Pred'].to_numpy())),
+        include_groups=False
+    ).dropna()
     macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
 
     results = {
@@ -145,8 +152,15 @@ def plot_results(model_type: str,
                  preds: list):
 
     #find line of best fit
-    actuals = np.array(actuals)
-    preds = np.array(preds).squeeze(-1)
+    actuals = np.array(actuals, dtype=float).ravel()
+    preds = np.array(preds, dtype=float)
+
+    # if preds is 2d, take first col, else, flatten
+    if preds.ndim > 1:
+        preds = preds.reshape(len(preds), -1)[:, 0]
+    else:
+        preds = preds.ravel()
+
     a, b = np.polyfit(actuals, preds, 1)
 
     #add points to plot
