@@ -104,6 +104,48 @@ class BothLoss(nn.Module):
 
     def forward(self, pred, target):
         return (self.alpha * self.mse(pred, target)) + ((1-self.alpha) * self.pcc(pred, target))
+    
+class KTauLoss(nn.Module):
+    "Kendall's Tau Correlation"
+
+    def __init__(self, reduction="mean"):
+        super().__init_()
+        self.reduction = reduction
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor):
+        pred = pred.float()
+        target = target.float()
+        idx = torch.argsort(pred)
+        target_a = torch.gather(target, dim=2, index=idx) # sort targets based on ranking of preds
+
+        B, T, N = target_a.shape
+        M = N - 1
+        refs = target_a[:, :, :-1].unsqueeze(2) # B, T, M, 1
+        mask = torch.triu(
+            torch.ones(M, N, dtype=torch.bool),
+            diagonal=1
+        ).view(1, 1, M, N)
+        target_a_ex = target_a.unsqueeze(2).expand(B, T, M, N)
+        greater = (target_a_ex > refs) & mask
+        lesser = (target_a_ex < refs) & mask
+
+        conc = greater.sum(dim=-1).sum(dim=-1, keepdim=True)
+        disc = lesser.sum(dim=-1).sum(dim=-1, keepdim=True)
+        tau = (conc - disc) / (conc + disc)
+        loss = 1.0 - tau
+        if self.reduction == "mean": return loss.mean()
+        if self.reduction == "sum":  return loss.sum()
+        return loss
+
+class XiLoss(nn.Module):
+    "Xi Correlation"
+
+    def __init__(self, reduction="mean"):
+        super().__init_()
+        self.reduction = reduction
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor):
+        pass
 
 # ---- tiny factory: only two options (global PCC, MSE) ----
 def build_loss(name: str,
@@ -119,4 +161,8 @@ def build_loss(name: str,
         return LocalPearsonCorrLoss()
     if n == "both":
         return BothLoss(alpha=alpha)
-    raise ValueError(f"Unknown loss: {name} (expected 'mse', 'pcc', or 'both')")
+    if n == "tau":
+        return KTauLoss()
+    if n == "xi":
+        return XiLoss()
+    raise ValueError(f"Unknown loss: {name} (expected 'mse', 'pcc', 'both', 'tau', or 'xi')")
