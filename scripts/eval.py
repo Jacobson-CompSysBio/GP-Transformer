@@ -331,7 +331,12 @@ def main():
     run.summary["test/model_type"] = model_type
     
     # table for pcc by env
-    pcc_table = wandb.Table(dataframe=results['pcc_by_env'].reset_index())
+    pcc_series = results['pcc_by_env']
+    pcc_df = pcc_series.rename("PCC").reset_index()
+    pcc_df["Env"] = pcc_df["Env"].astype(str)
+    pcc_df = pcc_df.replace({np.nan: None})
+
+    pcc_table = wandb.Table(dataframe=pcc_df)
     run.log({"test/pcc_by_env": pcc_table})
 
     run.log({
