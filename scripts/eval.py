@@ -143,6 +143,7 @@ def evaluate(model,
         'env_pcc': macro_env_pcc,
         'env_mse': macro_env_mse,
         'env_pcc_weighted': weighted_env_pcc,
+        'pcc_by_env': pcc_by_env
     }
 
     return results, df
@@ -318,6 +319,8 @@ def main():
     print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
     print("Environment-Averaged MSE:", results['env_mse'])
     print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
+    for pcc in results['pcc_by_env'].items():
+        print(f"Env PCC: {pcc}")
 
     # log metrics
     run.summary["test/pearson"] = float(results['global_pcc'])
@@ -327,6 +330,10 @@ def main():
     run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
     run.summary["test/model_type"] = model_type
     
+    # table for pcc by env
+    pcc_table = wandb.Table(dataframe=results['pcc_by_env'].reset_index())
+    run.log({"test/pcc_by_env": pcc_table})
+
     run.log({
         "test/pearson": float(results['global_pcc']),
         "test/env_avg_pearson": float(results['env_pcc']),
