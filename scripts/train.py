@@ -134,7 +134,7 @@ def main():
                 output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    loss_function = build_loss(args.loss, args.alpha)
+    loss_function = build_loss(args.loss, args.loss_weights)
     mse_loss_log = nn.MSELoss(reduction="mean")
     pcc_loss_log = GlobalPearsonCorrLoss(reduction="mean")
 
@@ -191,8 +191,7 @@ def main():
         run.define_metric("val_loss", step_metric="epoch")
 
         # loss tracking
-        wandb.config.update({"loss": args.loss,
-                             "alpha": args.alpha},
+        wandb.config.update({"loss": args.loss},
                              allow_val_change=True)
         if args.loss == "both":
             # batch level            

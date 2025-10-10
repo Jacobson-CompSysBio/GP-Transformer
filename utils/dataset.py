@@ -84,6 +84,10 @@ class GxE_Dataset(Dataset):
             raise ValueError(f"index_map_path must contain INDEX, Env columns")
         idx_map['Year'] = idx_map['Env'].apply(_env_year_from_str)
 
+        # get envs for envwise pcc
+        self.env_codes = pd.Categorical(idx_map['Env'].astype(str))
+        self.env_id_tensor = torch.tensor(self.env_codes.codes, dtype=torch.long)
+
         ### SPLIT DATA (ROLLING TRAIN) ###
         if split == "train":
             if train_year_max is not None:
@@ -194,16 +198,19 @@ class GxE_Dataset(Dataset):
 
         # scaled targets if scale_targets=True or raw otherwise 
         y_total = torch.tensor([self.total_series.iloc[index]], dtype=torch.float32)
+        env_id = self.env_id_tensor[index]
 
         if not self.residual_flag:
-            return x, y_total
+            return x, {"y": y_total, "env_id": env_id}
 
+        # residual out
         y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
         y_residual = torch.tensor([self.residual.iloc[index]], dtype=torch.float32)
         targets = {
             'total': y_total,
             'ymean': y_env_mean,
-            'resid': y_residual
+            'resid': y_residual,
+            'env_id': env_id
         }
         return x, targets
 
