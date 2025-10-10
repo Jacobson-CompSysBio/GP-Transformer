@@ -272,41 +272,58 @@ def main():
         with torch.no_grad():
             model.eval()
 
-            def eval_loader(loader):
+            def eval_loader(loader, max_batches=None):
+                """
+                evaluates on a given loader, returns mean loss, mse, pcc, and number of batches
+
+                loader: DataLoader obj
+                max_batches: int or None, if int, will only eval on this many batches *per rank*
+                """
+
+                # accumulate as tensors to allow dist.all_reduce
                 total_loss = torch.tensor(0.0, device=device)
                 mse_acc = torch.tensor(0.0, device=device)
                 pcc_acc = torch.tensor(0.0, device=device)
-                n_batches = 0
+                n_batches = torch.tensor(0.0, device=device) 
 
-                for xb, yb in loader:
+                for i, (xb, yb) in enumerate(loader):
+                    # if we hit eval_iters limit, break
+                    if (max_batches is not None) and (i >= max_batches):
+                        break
+                    
+                    # send to device
                     xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
                     yb = yb.to(device, non_blocking=True).float()
+
+                    # fwd
                     preds = model(xb)
                     total_loss += loss_function(preds, yb)
                     if args.loss == "both":
                         mse_acc += mse_loss_log(preds, yb)
                         pcc_acc += pcc_loss_log(preds, yb)
-                    n_batches += 1
-                return total_loss, mse_acc, pcc_acc, n_batches
+                    n_batches += 1.0
 
-            train_loss_accum, train_mse_accum, train_pcc_loss_accum, n_train = eval_loader(train_loader)
-            val_loss_accum, val_mse_accum, val_pcc_loss_accum, n_val = eval_loader(val_loader)
+                # reduce across ranks w/ SUM
+                for t in (total_loss, mse_acc, pcc_acc, n_batches):
+                    dist.all_reduce(t)
+                
+                # convert to global means with zero div guard
+                nb = max(1.0, float(n_batches.item()))
+                mean_loss = total_loss / nb
+                if args.loss == "both":
+                    mean_mse = (mse_acc / nb).item()
+                    mean_pcc = (pcc_acc / nb).item()
+                else:
+                    mean_mse = mean_pcc = None
 
-        # aggregate losses over all ranks
-        # note: dist.all_reduce defaults to SUM operation
-        dist.all_reduce(train_loss_accum)
-        dist.all_reduce(val_loss_accum)
-        if args.loss == "both":
-            for t in (train_mse_accum, train_pcc_loss_accum, val_mse_accum, val_pcc_loss_accum):
-                dist.all_reduce(t)
-
-        train_loss = (train_loss_accum / max(1, n_train) / world_size).item()
-        val_loss = (val_loss_accum / max(1, n_val) / world_size).item()
-        if args.loss == "both":
-            train_mse = (train_mse_accum / max(1, n_train) / world_size).item()
-            train_pcc_loss = (train_pcc_loss_accum / max(1, n_train) / world_size).item()
-            val_mse = (val_mse_accum / max(1, n_val) / world_size).item()
-            val_pcc_loss = (val_pcc_loss_accum / max(1, n_val) / world_size).item()
+                return mean_loss, mean_mse, mean_pcc, nb
+            
+            # reshuffle train sampler s.t. sampled subset is different each epoch
+            if isinstance(train_sampler, DistributedSampler):
+                train_sampler.set_epoch(10_000 + epoch_num)
+            # eval on subset of train for speed, full val
+            train_loss, train_mse, train_pcc_loss, _ = eval_loader(train_loader, max_batches=int(math.ceil(batches_per_epoch / world_size / 5)))
+            val_loss, val_mse, val_pcc_loss, _ = eval_loader(val_loader, max_batches=None)
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
