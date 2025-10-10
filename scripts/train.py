@@ -322,7 +322,7 @@ def main():
             if isinstance(train_sampler, DistributedSampler):
                 train_sampler.set_epoch(10_000 + epoch_num)
             # eval on subset of train for speed, full val
-            train_loss, train_mse, train_pcc_loss, _ = eval_loader(train_loader, max_batches=int(math.ceil(batches_per_epoch / world_size / 5)))
+            train_loss, train_mse, train_pcc_loss, _ = eval_loader(train_loader, max_batches=int(math.ceil(len(val_loader)/ world_size)))
             val_loss, val_mse, val_pcc_loss, _ = eval_loader(val_loader, max_batches=None)
 
         # log eval / early stop (only rank 0)
