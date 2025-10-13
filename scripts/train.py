@@ -356,7 +356,7 @@ def main():
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
                         "loss": args.loss,
-                        "alpha": args.alpha,
+                        "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
                     },
                     "env_scaler": env_scaler_payload,

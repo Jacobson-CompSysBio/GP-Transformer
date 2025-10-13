@@ -59,27 +59,49 @@ def parse_args():
     p.add_argument("--dropout", type=float, default=0.25)
     p.add_argument("--scale_targets", type=str2bool, default=False)
 
-    p.add_argument("--loss", type=str, default="mse",
-                   choices=["mse", "pcc", "both"])
-    p.add_argument("--alpha", type=float, default=0.5,
-                   help="weight for MSE when --loss both (loss = alpha*MSE + (1-alpha)*(1-PCC))")
+    p.add_argument("--loss", type=str, default="pcc",
+                   help="composite loss string, e.g. 'mse+envpcc'")
+    p.add_argument("--loss_weights", type=str, default="1.0",
+                   help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     return p.parse_args()
 
 def make_run_name(args) -> str:
+    # helper to shorten float
+    def short(x):
+        try:
+            return f"{float(x):g}"
+        except Exception:
+            return str(x)
+    
     g = "g+" if args.g_enc else ""
     e = "e+" if args.e_enc else ""
     ld = "ld+" if args.ld_enc else ""
     moe = "moe+" if args.moe else ""
     res = "res+" if args.residual else ""
+    
     if args.gxe_enc in ["tf", "mlp", "cnn"]:
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
-    model_type = g + e + ld + gxe + moe + res
-    model_type = model_type[:-1]
-    loss_tag = args.loss if args.loss != "both" else f"both{args.alpha}"
+
+    model_type = (g + e + ld + gxe + moe + res).rstrip("+")
+
+    # loss tag
+    terms = [t.strip().lower() for t in args.loss.split("+")]
+    if args.loss_weights is not None:
+        weights = [short(w) for w in args.loss_weights.split(",")]
+    else:
+        weights = ["1"] * len(terms)
+    
+    # prettier tags: omit weights if single-term with weight 1
+    if len(terms) == 1 and weights[0] == "1":
+        loss_tag = terms[0]
+    else:
+        weight_tag = "-".join(weights)
+        loss_tag = f"{weight_tag}w_" + "-".join(terms)
+    
     scale_targets = "_scaled" if args.scale_targets else ""
     return (
         f"{model_type}_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"

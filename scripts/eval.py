@@ -233,7 +233,7 @@ def load_model(device: torch.device,
     n_embd = config.get("n_embd", args.emb_size)
     moe = config.get("moe", args.moe)
     loss = config.get("loss", args.loss)
-    alpha = config.get("alpha", args.alpha)
+    loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)
 
     # build scalers
