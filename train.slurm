@@ -48,9 +48,10 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="pcc"
-export ALPHA=0.5 # only used if LOSS is "both"
 export SCALE_TARGETS=False
+
+export LOSS="mse+envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -102,7 +103,7 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA \
+        --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
@@ -143,5 +144,5 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA \
+    --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS

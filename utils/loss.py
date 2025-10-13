@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from typing import Callable, Union, Tuple, Dict, List
 
+### per-env losses ###
 def envwise_mse(pred, target, env_id):
     """
     pred: [B, 1] or [B] (float)
@@ -33,7 +35,7 @@ def envwise_mse(pred, target, env_id):
         return torch.zeros((), device = pred.device, dtype=pred.dtype, requires_grad=True)
     return loss_acc / count
 
-def envwise_pcc(pred, target, env_id, eps: float = 1e-8):
+def envwise_pcc(pred, target, env_id):
     """
     pred: [B, 1] or [B] (float)
     target: [B, 1] or [B] (float)
@@ -81,7 +83,8 @@ def envwise_pcc(pred, target, env_id, eps: float = 1e-8):
         return torch.zeros((), device=pred.device, dtype=pred.dtype, requires_grad=True)
     
     return 1.0 - torch.stack(pccs).mean()
-    
+
+### other losses ### 
 def torch_pearsonr(pred: torch.Tensor, target: torch.Tensor, dim=0, eps=1e-8):
     """
     pred, target: [N] or [N, D]; set dim=0 for batch-wise correlation.
@@ -172,9 +175,7 @@ class GlobalPearsonCorrLoss(nn.Module):
         if self.reduction == "mean": return loss.mean()
         if self.reduction == "sum":  return loss.sum()
         return loss
-    
-
-    
+     
 class KTauLoss(nn.Module):
     "Kendall's Tau Correlation"
 
@@ -217,6 +218,21 @@ class XiLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
         pass
 
+### composite utilities ###
+class _CallableLoss(nn.Module):
+    """Wrapper to unify nn.Module and callable losses functions"""
+    def __init__(self, fn: Union[nn.Module, Callable], expects_env: bool, name: str):
+        super().__init__()
+        self.fn = fn
+        self.expects_env = expects_env
+        self.name = name
+
+    def forward(self, pred, target, env_id=None):
+        if self.expects_env:
+            return self.fn(pred, target, env_id)
+        else:
+            return self.fn(pred, target)
+
 class CompositeLoss(nn.Module):
     """Combine any number of loss terms.
     Each term has a callable (fn) and a weight (lambda_i).
@@ -225,75 +241,58 @@ class CompositeLoss(nn.Module):
         ("pcc", LocalPearsonCorrLoss(), 0.5))
     """
 
-    def __init__(self, losses):
+    def __init__(self, losses: List[Tuple[str, _CallableLoss, float]]):
         super().__init__()
         self.losses = nn.ModuleList([l for _, l, _ in losses])
         self.names = [n for n, _, _ in losses]
         self.weights = [w for _, _, w in losses]
 
     def forward(self, pred, target, env_id=None):
-        total = 0.0
+        total = torch.zeros((), device=pred.device, dtype=pred.dtype)
         parts = {}
-        for (name, fn, w) in zip(self.names, self.losses, self.weights):
-            # choose call signature based on loss 
-            if name in ["envmse", "envpcc"]:
-                val = fn(pred, target, env_id)
-            else:
-                val = fn(pred, target)
-            parts[name] = val.item() if torch.is_tensor(val) else val
-            total = total + w * val
+        for name, fn, w in zip(self.names, self.losses, self.weights):
+            val = fn(pred, target, env_id)
+            if not torch.is_tensor(val):
+                val = torch.tensor(val, device=pred.device, dtype=pred.dtype)
+            total = total + (w * val)
+            parts[name] = float(val.detach().item())
         return total, parts
 
 # loss builder
-def build_loss(name: str,
-               weights: str = None):
+def build_loss(name: str, weights: str = None) -> CompositeLoss:
     """
     name: string like "mse", "pcc", "mse+pcc", "envmse+tau+xi", etc.
     weights: comma-separated weights for each loss term, in order (e.g. "1.0,0.5,0.1")
+    returns a CompositeLoss instance
     """
-    n = name.lower().split("+")
-    if len(n) == 1:
-        # single loss - backwards compatible
-        if n[0] == "mse":
-            return nn.MSELoss()
-        if n[0] == "pcc":
-            return LocalPearsonCorrLoss()
-        if n[0] == "envpcc":
-            return envwise_pcc()
-        if n[0] == "envmse":
-            return envwise_mse()
-        if n[0] == "ktau":
-            return KTauLoss()
-        if n[0] == "xi":
-            return XiLoss()
-        raise ValueError(f"Unknown loss name {n[0]}")
+    terms = [s.strip().lower() for s in name.split("+")]
+    if weights is not None:
+        ws = [float(x) for x in weights.split(",")]
+        if len(ws) != len(terms):
+            raise ValueError(f"Number of weights ({len(ws)}) does not match number of loss terms ({len(terms)})")
     else:
-        # parse weights
-        if weights is not None:
-            w = [float(x) for x in weights.split(",")]
-            if len(w) != len(n):
-                raise ValueError(f"Number of weights {len(w)} does not match number of loss terms {len(n)}")
-        else:
-            w = [1.0] * len(n) 
+        ws = [1.0] * len(terms)
+    
+    def make_one(term: str) -> Tuple[str, _CallableLoss, float]:
+        if term == "mse":
+            return term, _CallableLoss(nn.MSELoss(), expects_env=False, name=term)
+        if term == "pcc":
+            return term, _CallableLoss(LocalPearsonCorrLoss(dim=0), expects_env=False, name=term)
+        if term == "envmse":
+            return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
+        if term == "envpcc":
+            return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
+        if term == "ktau":
+            return term, _CallableLoss(KTauLoss(), expects_env=False, name=term)
+        if term == "xi":
+            return term, _CallableLoss(XiLoss(), expects_env=False, name=term)
+        raise ValueError(f"Unknown loss term: {term}")
+    
+    loss_list = []
+    for t, w in zip(terms, ws):
+        name_t, fn_t = make_one(t)
+        loss_list.append((name_t, fn_t, w))
+    return CompositeLoss(loss_list)
+        
 
-        # build composite loss
-        loss_list = []
-        for loss_name, weight in zip(n, w):
-            loss_name = loss_name.strip()
-            if loss_name == "mse":
-                fn = nn.MSELoss()
-            elif loss_name == "pcc":
-                fn = LocalPearsonCorrLoss()
-            elif loss_name == "envmse":
-                fn = envwise_mse()
-            elif loss_name == "envpcc":
-                fn = envwise_pcc()
-            elif loss_name == "ktau":
-                fn = KTauLoss()
-            elif loss_name == "xi":
-                fn = XiLoss()
-            else:
-                raise ValueError(f"Unknown loss name {loss_name}")
-            loss_list.append((loss_name, fn, weight))
-        return CompositeLoss(loss_list)
 

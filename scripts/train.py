@@ -134,13 +134,12 @@ def main():
                 output_device=local_rank)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    
+    # build loss
     loss_function = build_loss(args.loss, args.loss_weights)
-    mse_loss_log = nn.MSELoss(reduction="mean")
-    pcc_loss_log = GlobalPearsonCorrLoss(reduction="mean")
 
     # other options
     batches_per_epoch = len(train_loader)
-    batches_per_eval = len(val_loader)
     total_iters = args.num_epochs * batches_per_epoch
     warmup_iters = batches_per_epoch * 10  # warmup for 10 epoch - should be enough
     #warmup_iters = batches_per_epoch * 2  # warmup for 2 epochs
@@ -191,18 +190,13 @@ def main():
         run.define_metric("val_loss", step_metric="epoch")
 
         # loss tracking
-        wandb.config.update({"loss": args.loss},
+        wandb.config.update({"loss": args.loss,
+                             "loss_weights": args.loss_weights},
                              allow_val_change=True)
-        if args.loss == "both":
-            # batch level            
-            run.define_metric("mse", step_metric="iter_num")
-            run.define_metric("pcc_loss", step_metric="iter_num")
-
-            # epoch level
-            run.define_metric("train_mse_epoch", step_metric="epoch")
-            run.define_metric("train_pcc_loss_epoch", step_metric="epoch")
-            run.define_metric("val_mse_epoch", step_metric="epoch")
-            run.define_metric("val_pcc_loss_epoch", step_metric="epoch")
+        for name in loss_function.names:
+            run.define_metric(f"train_loss/{name}", step_metric="iter_num")
+            run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
+            run.define_metric(f"val_loss/{name}", step_metric="epoch")
 
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -222,21 +216,15 @@ def main():
         for xb, yb in train_loader:
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True).float()
+            y_true = yb["y"].to(device, non_blocking=True).float()
+            env_id = yb["env_id"].to(device, non_blocking=True).long()
 
             # fwd/bwd pass
-            logits = model(xb)
-            loss = loss_function(logits, yb)
-            if torch.isnan(loss):
-                raise RuntimeError("Loss is NaN, stopping training.")
+            preds = model(xb)
 
-            # compute losses for wandb logging 
-            train_mse_val = None
-            train_pcc_loss_val = None
-            if args.loss == "both":
-                with torch.no_grad():
-                    train_mse_val = mse_loss_log(logits, yb)
-                    train_pcc_loss_val = pcc_loss_log(logits, yb)
+            loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+            if torch.isnan(loss_total):
+                raise RuntimeError("Loss is NaN, stopping training.")
 
             # apply learning rate schedule              
             lr = get_lr(iter_num,
@@ -248,20 +236,19 @@ def main():
                 pg['lr'] = lr
 
             # double check that ddp accumulates gradients 
-            loss.backward()
+            loss_total.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
             # log wandb
             if is_main(rank):
                 log_payload = {
-                    "train_loss": loss.item(),
+                    "train_loss": loss_total.item(),
                     "learning_rate": lr,
                     "iter_num": iter_num,
                 }
-                if args.loss == "both":
-                    log_payload["mse"] = float(train_mse_val.item())
-                    log_payload["pcc_loss"] = float(train_pcc_loss_val.item())
+                for k, v in loss_parts.items():
+                    log_payload[f"train_loss/{k}"] = float(v)
                 wandb.log(log_payload)
             iter_num += 1
             pbar.update(1)
@@ -273,16 +260,13 @@ def main():
 
             def eval_loader(loader, max_batches=None):
                 """
-                evaluates on a given loader, returns mean loss, mse, pcc, and number of batches
-
-                loader: DataLoader obj
-                max_batches: int or None, if int, will only eval on this many batches *per rank*
+                evaluates loader, returns:
+                    mean_total_loss, parts_mean_dict, nbatches
                 """
 
                 # accumulate as tensors to allow dist.all_reduce
                 total_loss = torch.tensor(0.0, device=device)
-                mse_acc = torch.tensor(0.0, device=device)
-                pcc_acc = torch.tensor(0.0, device=device)
+                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_function.names}
                 n_batches = torch.tensor(0.0, device=device) 
 
                 for i, (xb, yb) in enumerate(loader):
@@ -292,57 +276,52 @@ def main():
                     
                     # send to device
                     xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
-                    yb = yb.to(device, non_blocking=True).float()
+                    y_true = yb["y"].to(device, non_blocking=True).float()
+                    env_id = yb["env_id"].to(device, non_blocking=True).long()
 
                     # fwd
                     preds = model(xb)
-                    total_loss += loss_function(preds, yb)
-                    if args.loss == "both":
-                        mse_acc += mse_loss_log(preds, yb)
-                        pcc_acc += pcc_loss_log(preds, yb)
+                    ltot, lparts = loss_function(preds, y_true, env_id=env_id)
+                    total_loss += ltot
+                    for k in parts_acc:
+                        parts_acc[k] += torch.tensor(lparts[k], device=device)
                     n_batches += 1.0
 
-                # reduce across ranks w/ SUM
-                for t in (total_loss, mse_acc, pcc_acc, n_batches):
+                # allreduce w/ sum
+                dist.all_reduce(total_loss)
+                for t in parts_acc.values():
                     dist.all_reduce(t)
+                dist.all_reduce(n_batches)
                 
                 # convert to global means with zero div guard
                 nb = max(1.0, float(n_batches.item()))
-                mean_loss = total_loss / nb
-                if args.loss == "both":
-                    mean_mse = (mse_acc / nb).item()
-                    mean_pcc = (pcc_acc / nb).item()
-                else:
-                    mean_mse = mean_pcc = None
+                mean_total = total_loss / nb
+                mean_parts = {k: (v / nb).item() for k, v in parts_acc.items()}
 
-                return mean_loss, mean_mse, mean_pcc, nb
+                return mean_total, mean_parts, nb
             
             # reshuffle train sampler s.t. sampled subset is different each epoch
             if isinstance(train_sampler, DistributedSampler):
                 train_sampler.set_epoch(10_000 + epoch_num)
             # eval on subset of train for speed, full val
-            train_loss, train_mse, train_pcc_loss, _ = eval_loader(train_loader, max_batches=int(math.ceil(len(val_loader)/ world_size)))
-            val_loss, val_mse, val_pcc_loss, _ = eval_loader(val_loader, max_batches=None)
+            train_total, train_parts, _ = eval_loader(train_loader, max_batches=int(math.ceil(len(val_loader) / world_size))) 
+            val_total, val_parts, _ = eval_loader(val_loader, max_batches=None)
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
-                "val_loss": val_loss,
-                "train_loss_epoch": train_loss,
+                "val_loss": val_total.item(),
+                "train_loss_epoch": train_total.item(),
                 "epoch": epoch_num,
             }
-            if args.loss == "both":
-                log_epoch_payload.update({
-                    "train_mse": train_mse,
-                    "train_pcc_loss": train_pcc_loss,
-                    "val_mse": val_mse,
-                    "val_pcc_loss": val_pcc_loss,
-                })
+            for k, v in train_parts.items():
+                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
+            for k, v in val_parts.items():
+                log_epoch_payload[f"val_loss/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
-            if val_loss < best_val_loss:
-                best_val_loss, last_improved = val_loss, 0
-
+            if val_total < best_val_loss:
+                best_val_loss, last_improved = val_total, 0
                 # collect env scaler and y scalers
                 env_scaler_payload = {
                     "mean": env_scaler.mean_.tolist(),
