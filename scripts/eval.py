@@ -34,7 +34,7 @@ def _safe_pcc(a: np.ndarray, b: np.ndarray) -> float:
     if np.allclose(a, a[0]) or np.allclose(b, b[0]):
         return np.nan
     r = pearsonr(a, b)[0]
-    return getattr(r, "statistic", r[0]) # robust to old/new scipy versions
+    return r # robust to old/new scipy versions
 
 
 def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:

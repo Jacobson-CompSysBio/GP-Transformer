@@ -342,7 +342,7 @@ def main():
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch_num,
-                    "val_loss": val_loss,
+                    "val_loss": val_total,
                     "config": {
                         "g_enc": args.g_enc,
                         "e_enc": args.e_enc,
@@ -384,8 +384,8 @@ def main():
                  
         if is_main(rank):
             elapsed = (time.time() - t0) / 60
-            print(f"[Epoch {epoch_num}] train={train_loss:.4e} | "
-                  f"val={val_loss:.4e} | best_val={best_val_loss:.4e} | "
+            print(f"[Epoch {epoch_num}] train={train_total:.4e} | "
+                  f"val={val_total:.4e} | best_val={best_val_loss:.4e} | "
                   f"elapsed={elapsed:.2f}m")
 
     dist.barrier()

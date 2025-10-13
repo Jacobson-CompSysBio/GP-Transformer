@@ -78,10 +78,11 @@ def envwise_pcc(pred, target, env_id):
         pcc = (x * y).sum() / denom
         pccs.append(pcc)
 
-    # no vaild groups in batch; return 0 loss contribution 
+    # no vaild groups in batch; return 1.0 loss contribution 
     if len(pccs) == 0:
-        return torch.zeros((), device=pred.device, dtype=pred.dtype, requires_grad=True)
-    
+        dummy_loss = (pred - pred.detach()).pow(2).mean()
+        return dummy_loss * 0.0 + 1.0 # returns no correlation
+         
     return 1.0 - torch.stack(pccs).mean()
 
 ### other losses ### 
