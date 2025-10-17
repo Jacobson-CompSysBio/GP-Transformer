@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envpcc
+#SBATCH -J all-loss-scaled
 #SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -48,10 +48,10 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export SCALE_TARGETS=False
+export SCALE_TARGETS=True
 
-export LOSS="envpcc" # + separated list of losses
-export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
+export LOSS="envpcc+pcc+envmse+mse" # + separated list of losses
+export LOSS_WEIGHTS="1.0,1.0,1.0,1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
