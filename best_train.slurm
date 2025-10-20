@@ -48,8 +48,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="pcc"
-export ALPHA=1e-5 # only used if LOSS is "both"
+export LOSS="envpcc+pcc"
+export LOSS_WEIGHTS="1.0,1.0"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -101,7 +101,7 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA
+        --loss_weights $LOSS_WEIGHTS
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -141,4 +141,4 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA
+    --loss_weights $LOSS_WEIGHTS 
