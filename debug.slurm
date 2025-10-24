@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-composite
+#SBATCH -J debug-spearman
 #SBATCH -N 1
-#SBATCH -t 00:10:00
-#SBATCH -p batch
+#SBATCH -t 00:30:00
+#SBATCH -p batch 
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -42,7 +43,7 @@ export HEADS=4
 export EMB_SIZE=256
 export SCALE_TARGETS=False
 
-export LOSS="envpcc" # + separated list of losses
+export LOSS="spearman" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###

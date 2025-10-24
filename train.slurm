@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envpcc+mse-scaled
-#SBATCH -N 8
+#SBATCH -J envspearman+envpcc+pcc
+#SBATCH -N 16 
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -39,19 +39,19 @@ export NUM_EPOCHS=5000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=50
+export EARLY_STOP=200
 
-export G_LAYERS=1
+export G_LAYERS=2
 export LD_LAYERS=2
-export MLP_LAYERS=1
-export GXE_LAYERS=2
+export MLP_LAYERS=2
+export GXE_LAYERS=4
 
-export HEADS=4
-export EMB_SIZE=256
-export SCALE_TARGETS=True
+export HEADS=16
+export EMB_SIZE=512
+export SCALE_TARGETS=False
 
-export LOSS="envpcc+mse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

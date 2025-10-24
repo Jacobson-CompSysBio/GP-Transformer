@@ -1,9 +1,71 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torchsort import soft_rank
 from typing import Callable, Union, Tuple, Dict, List
 
+### helpers ###
+def soft_rank_1d(x: torch.Tensor, rs: float = 1.0):
+    """
+    1d wrapper for torchsort.soft_rank
+    """
+    x2 = x.unsqueeze(0)
+    r2 = soft_rank(x2, regularization_strength=rs)
+    return r2.squeeze(0)
+
 ### per-env losses ###
+def envwise_spearman(pred, target, env_id):
+    """
+    pred: [B, 1] or [B] (float)
+    target: [B, 1] or [B] (float)
+    env_id: [B] (long) 
+
+    returns a scalar loss (mean(spearman over envs in batch))
+    """
+    if pred.ndim > 1:
+        pred = pred.squeeze(-1)
+    if target.ndim > 1:
+        target = target.squeeze(-1)
+    
+    device = pred.device
+    env_id = env_id.to(device) 
+
+    # counters for accum loss, count 
+    spearmans = []
+
+    # loop through env
+    for env in torch.unique(env_id):
+        mask = (env_id == env)
+        
+        # if < 2 obs, don't use 
+        if int(mask.sum()) < 2:
+            continue
+
+        px = pred[mask]
+        tx = target[mask]
+
+        # if variances are 0, skip env
+        if px.var(unbiased=False) == 0 or tx.var(unbiased=False) == 0:
+            continue
+       
+        px_rank = soft_rank_1d(px)
+        tx_rank = soft_rank_1d(tx)
+        n = px_rank.numel()
+
+        d2_sum = (px_rank - tx_rank).pow(2).sum()
+        denom = torch.tensor(n * (n ** 2 - 1), dtype=torch.float32)
+
+        rho = 1.0 - ((6.0 * d2_sum) / denom)
+        spearmans.append(rho)
+
+    # no valid groups in batch; return 1.0 loss contribution 
+    if len(spearmans) == 0:
+        dummy_loss = (pred - pred.detach()).pow(2).mean()
+        return dummy_loss * 0.0 + 1.0 # returns no correlation
+
+    # get 1.0 - avg spearman as loss 
+    return 1.0 - torch.stack(spearmans).mean() 
+
 def envwise_mse(pred, target, env_id):
     """
     pred: [B, 1] or [B] (float)
@@ -29,7 +91,7 @@ def envwise_mse(pred, target, env_id):
         tx = target[mask]
         px = px - px.mean()
         tx = tx - tx.mean()
-        loss_acc = loss_acc + torch.mean((px - tx) ** 2)
+        loss_acc += torch.mean((px - tx) ** 2)
         count += 1
     if count == 0:
         return torch.zeros((), device = pred.device, dtype=pred.dtype, requires_grad=True)
@@ -78,7 +140,7 @@ def envwise_pcc(pred, target, env_id):
         pcc = (x * y).sum() / denom
         pccs.append(pcc)
 
-    # no vaild groups in batch; return 1.0 loss contribution 
+    # no valid groups in batch; return 1.0 loss contribution 
     if len(pccs) == 0:
         dummy_loss = (pred - pred.detach()).pow(2).mean()
         return dummy_loss * 0.0 + 1.0 # returns no correlation
@@ -86,11 +148,43 @@ def envwise_pcc(pred, target, env_id):
     return 1.0 - torch.stack(pccs).mean()
 
 ### other losses ### 
+def torch_spearmanr(pred: torch.Tensor,
+                    target: torch.Tensor,
+                    dim: int = -1,
+                    eps: float = 1e-8) -> torch.Tensor:
+    """
+    Differentiable Spearman: Pearson correlation of soft ranks along `dim`.
+    Returns rho with the same shape as pred/target with `dim` removed (i.e., reduced).
+    """
+    # move the ranking dimension to the end
+    if dim != -1:
+        pred = pred.transpose(dim, -1)
+        target = target.transpose(dim, -1)
+
+    n = pred.size(-1)
+    if n < 2:
+        # not enough elements to define a rank correlation
+        rho = torch.zeros(pred.shape[:-1], device=pred.device, dtype=pred.dtype)
+        return rho if dim == -1 else rho.transpose(dim, -1)
+
+    r_pred = soft_rank(pred, regularization_strength=1.0)
+    r_targ = soft_rank(target, regularization_strength=1.0)
+
+    # center ranks
+    r_pred = r_pred - r_pred.mean(dim=-1, keepdim=True)
+    r_targ = r_targ - r_targ.mean(dim=-1, keepdim=True)
+
+    # norms; clamp to avoid division by zero when either side is constant
+    denom = (r_pred.norm(dim=-1) * r_targ.norm(dim=-1)).clamp_min(eps)
+    rho = (r_pred * r_targ).sum(dim=-1) / denom  # shape: pred.shape[:-1]
+
+    return rho if dim == -1 else rho.transpose(dim, -1)
+
 def torch_pearsonr(pred: torch.Tensor, target: torch.Tensor, dim=0, eps=1e-8):
     """
     pred, target: [N] or [N, D]; set dim=0 for batch-wise correlation.
     Returns r with shape [] if vectors, or [D] if multi-dim features.
-    Non-DDP helper (local only). Kept for completeness.
+    Non-DDP helper (local only).
     """
     pred = pred.float()
     target = target.float()
@@ -107,6 +201,21 @@ def torch_pearsonr(pred: torch.Tensor, target: torch.Tensor, dim=0, eps=1e-8):
     r = cov / (v_pred.clamp_min(eps).sqrt() * v_target.clamp_min(eps).sqrt())
     return r.clamp(-1.0, 1.0)
 
+class LocalSpearmanCorrLoss(nn.Module):
+    """Loss = 1 - Spearman rho (averaged if reduction='mean')."""
+    def __init__(self, dim: int = -1, eps: float = 1e-8, reduction: str = "mean"):
+        super().__init__()
+        self.dim, self.eps, self.reduction = dim, eps, reduction
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor):
+        rho = torch_spearmanr(pred, target, dim=self.dim, eps=self.eps)
+        loss = 1.0 - rho
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
+
 class LocalPearsonCorrLoss(nn.Module):
     """
     Local (non-DDP) Pearson loss.
@@ -119,8 +228,10 @@ class LocalPearsonCorrLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
         r = torch_pearsonr(pred, target, dim=self.dim, eps=self.eps)
         loss = 1.0 - r
-        if self.reduction == "mean": return loss.mean()
-        if self.reduction == "sum":  return loss.sum()
+        if self.reduction == "mean": 
+            return loss.mean()
+        if self.reduction == "sum":  
+            return loss.sum()
         return loss
 
 class GlobalPearsonCorrLoss(nn.Module):
@@ -279,10 +390,14 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(nn.MSELoss(), expects_env=False, name=term)
         if term == "pcc":
             return term, _CallableLoss(LocalPearsonCorrLoss(dim=0), expects_env=False, name=term)
+        if term == "spearman":
+            return term, _CallableLoss(LocalSpearmanCorrLoss(dim=0), expects_env=False, name=term)
         if term == "envmse":
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
         if term == "envpcc":
             return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
+        if term == "envspearman":
+            return term, _CallableLoss(envwise_spearman, expects_env=True, name=term)
         if term == "ktau":
             return term, _CallableLoss(KTauLoss(), expects_env=False, name=term)
         if term == "xi":
