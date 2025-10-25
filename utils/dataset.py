@@ -38,8 +38,8 @@ class GxE_Dataset(Dataset):
 
     def __init__(self,
                  split='train', # train <= 2022, val == 2023
-                 data_path='data/maize_data_2014-2023_vs_2024/', # need to go up one level and then down to data directory
-                 index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+                 data_path='data/maize_data_2014-2023_vs_2024_v2/', # need to go up one level and then down to data directory
+                 index_map_path='data/maize_data_2014-2023_vs_2024_v2/location_2014_2023.csv',
                  residual: bool = False,
                  scaler: StandardScaler | None = None,
                  train_year_max: int | None = None,
@@ -124,12 +124,12 @@ class GxE_Dataset(Dataset):
         self.idx_map = idx_map.loc[keep_mask.values].reset_index(drop=True)
 
         ### FEATURES ###
-        # first 2240 are genotypes, last 374 are lat/lon and ECs
+        # first 2224 are genotypes, last 705 are env
         self.scaler = scaler if scaler is not None else StandardScaler()
         # genotype features
-        self.g_data = (self.x_data.iloc[:, :-374] * 2).astype('int64') # multiply by to make the scale 0,1,2 from 0,0.5,1
+        self.g_data = (self.x_data.iloc[:, :705] * 2).astype('int64') # multiply by to make the scale 0,1,2 from 0,0.5,1
         # env features
-        self.e_cols = list(self.x_data.columns[-374:])
+        self.e_cols = list(self.x_data.columns[-705:])
         e_block = self.x_data[self.e_cols].copy()
         if split != 'train' and scaler is None:
             raise ValueError("For val/test/sub split you must pass a scaler")

@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-spearman
+#SBATCH -J debug-envdata
 #SBATCH -N 1
-#SBATCH -t 00:30:00
+#SBATCH -t 00:15:00
 #SBATCH -p batch 
-#SBATCH -q debug
+##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -43,8 +43,8 @@ export HEADS=4
 export EMB_SIZE=256
 export SCALE_TARGETS=False
 
-export LOSS="spearman" # + separated list of losses
-export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
+export LOSS="envpcc+pcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

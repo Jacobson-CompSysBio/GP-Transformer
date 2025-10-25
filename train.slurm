@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envspearman+envpcc+pcc
+#SBATCH -J envpcc-moreparams
 #SBATCH -N 16 
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -41,10 +41,10 @@ export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
 
-export G_LAYERS=2
-export LD_LAYERS=2
-export MLP_LAYERS=2
-export GXE_LAYERS=4
+export G_LAYERS=1
+export LD_LAYERS=1
+export MLP_LAYERS=1
+export GXE_LAYERS=8
 
 export HEADS=16
 export EMB_SIZE=512
