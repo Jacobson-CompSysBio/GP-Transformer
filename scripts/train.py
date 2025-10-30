@@ -78,8 +78,7 @@ def main():
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
         split="train",
-        data_path='data/maize_data_2014-2023_vs_2024/',
-        index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+        data_path='data/maize_data_2014-2023_vs_2024_v2/',
         scaler=None,
         y_scalers=None, # train will fit the scalers
         scale_targets=args.scale_targets
@@ -88,8 +87,7 @@ def main():
     y_scalers = train_ds.label_scalers
     val_ds = GxE_Dataset(
         split="val",
-        data_path="data/maize_data_2014-2023_vs_2024/",
-        index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
+        data_path="data/maize_data_2014-2023_vs_2024_v2/",
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets

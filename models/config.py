@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    block_size: int = 2240 # max sequence length
+    block_size: int = 2024 # max sequence length
     vocab_size: int = 3 # 0, 0.5, 1
     n_g_layer: int = 1 # number of g_tf layers
     n_ld_layer: int = 1 # number of ld layers

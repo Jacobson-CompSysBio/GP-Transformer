@@ -23,8 +23,7 @@ from utils.utils import *
 
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-DATA_DIR = 'data/maize_data_2014-2023_vs_2024/'
-INDEX_MAP = 'data/maize_data_2014-2023_vs_2024/'
+DATA_DIR = 'data/maize_data_2014-2023_vs_2024_v2/'
 
 # safer pcc to avoid nans
 def _safe_pcc(a: np.ndarray, b: np.ndarray) -> float:
@@ -58,25 +57,17 @@ def load_data(args,
               split: str = "test",
               batch_size: int = 32,
               env_scaler: StandardScaler | None = None,
-              scaler: LabelScaler | None = None):
-    # get scaler 
+              y_scalers: dict | None = None):           # <— rename & type
+
     ds = GxE_Dataset(
         split=split,
         data_path=DATA_DIR,
-        index_map_path=INDEX_MAP + 'location_2024.csv',
         scaler=env_scaler,
-        y_scalers=scaler,
+        y_scalers=y_scalers,                           # <— pass dict here
         scale_targets=args.scale_targets
-
     )
-    loader = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        pin_memory=True
-    )
-
-    return ds, loader 
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
+    return ds, loader
 
 def evaluate(model,
              test_loader: DataLoader,
@@ -108,7 +99,13 @@ def evaluate(model,
             # track env for location-avg 
             env = np.asarray(yb['Env']).astype(str)
 
-            # zip env, actual, and pred, append to rows
+            has_y = ('Yield_Mg_ha' in yb)
+            if has_y:
+                actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
+            else:
+                actual = np.full_like(pred, fill_value=np.nan, dtype=float)
+
+            env = np.asarray(yb['Env']).astype(str) if 'Env' in yb else np.array(['UNK'] * len(pred))
             rows.extend(zip(env.tolist(), actual.tolist(), pred.tolist()))
     
     # convert our multi-dimensional list to a dataframe
@@ -182,26 +179,24 @@ def plot_results(model_type: str,
     return out_path
 
 
-def save_results(
-        model_type: str,
-        actuals: list,
-        preds: list):
+def save_results(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_DIR):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # df must have ['Env','Actual','Pred']
+    if not set(['Env','Actual','Pred']).issubset(df.columns):
+        raise ValueError("save_results expects a dataframe with columns: Env, Actual, Pred")
 
-    # get locations
-    locations = pd.read_csv('data/maize_data_2014-2023_vs_2024/location_2024.csv')
-    location_names = list(np.unique(locations['Env']))
-    locations['actual'] = actuals
-    locations['pred'] = preds
+    def _safe(g):
+        return _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy())
 
-    location_results_df = pd.DataFrame({'location':[],
-                                        'pearson':[]})
-    for location in location_names:
-        subset = locations[locations['Env'] == location]
-        pcc = pearsonr(subset['actual'], subset['pred'])[0]
-        new_result = pd.DataFrame({'location': [location], 'pearson': [pcc]})
-        location_results_df = pd.concat([location_results_df, new_result])
-    location_results_df = location_results_df.reset_index(drop=True)
-    location_results_df.to_csv(f'data/results/{model_type}_location_results.csv')
+    by_env = (df.groupby('Env', sort=False)
+                .apply(lambda g: _safe(g))
+                .dropna()
+                .rename('pearson')
+                .reset_index())
+    by_env = by_env.sort_values('pearson', ascending=False).reset_index(drop=True)
+    out_path = out_dir / f"{model_type}_location_results.csv"
+    by_env.to_csv(out_path, index=False)
+    return out_path
 
 def load_model(device: torch.device,
                args):
@@ -303,10 +298,10 @@ def main():
     # load data
     print("Loading data...")
     test_data, test_loader = load_data(args,
-                                       env_scaler=env_scaler,
-                                       scaler=y_scalers,
-                                       split="test",
-                                       batch_size=32)
+                                    env_scaler=env_scaler,
+                                    y_scalers=y_scalers,   # <— name matches
+                                    split="test",
+                                    batch_size=32)
 
     # evaluate
     print("Evaluating model...")

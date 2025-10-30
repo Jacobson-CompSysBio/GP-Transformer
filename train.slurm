@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J envpcc-moreparams
-#SBATCH -N 16 
+#SBATCH -N 8 
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -42,16 +42,16 @@ export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=1
+export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=8
+export GXE_LAYERS=2
 
-export HEADS=16
-export EMB_SIZE=512
+export HEADS=4
+export EMB_SIZE=256
 export SCALE_TARGETS=False
 
-export LOSS="envpcc" # + separated list of losses
-export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
+export LOSS="envpcc+pcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

@@ -41,7 +41,7 @@ class Block(nn.Module):
 class E_Encoder(nn.Module):
 
     def __init__(self,
-                 input_dim: int = 705,
+                 input_dim: int = 702,
                  output_dim: int = 128,
                  hidden_dim: int = 128,
                  n_hidden: int = 2,
