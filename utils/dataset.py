@@ -110,7 +110,7 @@ class GxE_Dataset(Dataset):
             keep_mask = x_raw['Year'] <= cutoff
         elif split == "val":
             which = 2023 if val_year is None else val_year
-            keep_mask = x_raw['Year']
+            keep_mask = x_raw['Year'] == which
         else: # 'test', 'sub'
             keep_mask = x_raw['Year'] >= 2024
         
