@@ -118,7 +118,8 @@ def main():
                     n_mlp_layer=args.mlp_layers,
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
-                    dropout=args.dropout)
+                    dropout=args.dropout,
+                    n_env_fts=train_ds.n_env_fts)
     model = GxE_Transformer(g_enc=args.g_enc,
                             e_enc=args.e_enc,
                             ld_enc=args.ld_enc,

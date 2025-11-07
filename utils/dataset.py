@@ -200,6 +200,7 @@ class GxE_Dataset(Dataset):
 
         # block size for tokenizers, etc.
         self.block_size = self.g_data.shape[1]
+        self.n_env_fts = len(self.e_cols)
 
         # final sanity check 
         assert len(self.env_id_tensor) == len(self.g_data) == len(self.e_data) == len(self.y_data), \

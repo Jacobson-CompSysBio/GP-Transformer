@@ -16,3 +16,4 @@ class Config:
     n_head: int = 8 # number of heads
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
+    n_env_fts: int = 705 # number of environmental features
