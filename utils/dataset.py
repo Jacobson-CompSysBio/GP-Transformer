@@ -64,7 +64,9 @@ class GxE_Dataset(Dataset):
         self.residual_flag = residual
         self.scale_targets = scale_targets
 
-        # number of environmental features
+        ############################################
+        ### N_ENV FEATURES IN ORIGINAL DATA HERE ###
+        ############################################ 
         N_ENV = 705
 
         ### LOAD DATA ###
@@ -142,8 +144,12 @@ class GxE_Dataset(Dataset):
         g_block = feature_df.iloc[:, :-N_ENV]
         e_block = feature_df.iloc[:, -N_ENV:]
 
-        # process categorical cols (DROP FOR NOW)
+        ######################
+        ### DROP COLS HERE ###
+        ######################        
         e_block = e_block.drop(columns=["Irrigated", "Treatment", "Previous_Crop"])
+        e_block = e_block.iloc[:, :2] # select only first two cols, lat/lon
+        
 
         # store for __getitem__
         self.g_data = (g_block * 2).astype('int64') # 0, 0.5, 1 --> 0, 1, 2

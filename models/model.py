@@ -32,9 +32,10 @@ class GxE_Transformer(nn.Module):
 
         # set attributes
         self.g_encoder = G_Encoder(config) if g_enc else None
-        self.e_encoder = E_Encoder(output_dim=config.n_embd,
+        self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
+                                   output_dim=config.n_embd,
                                    n_hidden=config.n_mlp_layer,
-                                   dropout=config.dropout) if e_enc else None # hardcoded large dropout to prevent env overfitting
+                                   dropout=config.dropout) if e_enc else None
         self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
                                      output_dim=config.n_embd,
                                      num_blocks=config.n_ld_layer,

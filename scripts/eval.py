@@ -220,6 +220,7 @@ def load_model(device: torch.device,
     ld_enc = config.get("ld_enc", args.ld_enc)
     gxe_enc = config.get("gxe_enc", args.gxe_enc)
     blk = config.get("block_size", None)
+    n_env_fts = config.get("n_env_fts", None)
     g_layer = config.get("g_layers", args.g_layers)
     ld_layer = config.get("ld_layers", args.ld_layers)
     mlp_layer = config.get("mlp_layers", args.mlp_layers)
@@ -241,7 +242,8 @@ def load_model(device: torch.device,
                     n_mlp_layer=mlp_layer,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
-                    n_embd=n_embd)
+                    n_embd=n_embd,
+                    n_env_fts=n_env_fts)
     if args.residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,

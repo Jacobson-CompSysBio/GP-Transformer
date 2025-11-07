@@ -348,6 +348,7 @@ def main():
                         "ld_enc": args.ld_enc,
                         "gxe_enc": args.gxe_enc,
                         "block_size": config.block_size,
+                        "n_env_fts": config.n_env_fts,
                         "g_layers": args.g_layers,
                         "ld_layers": args.ld_layers,
                         "mlp_layers": args.mlp_layers,
