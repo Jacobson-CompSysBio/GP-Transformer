@@ -4,6 +4,17 @@ import torch.distributed as dist
 from torchsort import soft_rank
 from typing import Callable, Union, Tuple, Dict, List
 
+# small helper for optional DDP all-reduce
+def _all_reduce_if_needed(*tensors, op=dist.ReduceOp.SUM):
+    if not (dist.is_available() and dist.is_initialized()):
+        return tensors
+    reduced = []
+    for t in tensors:
+        buf = t.clone()
+        dist.all_reduce(buf, op=op)
+        reduced.append(buf)
+    return tuple(reduced)
+
 ### helpers ###
 def soft_rank_1d(x: torch.Tensor, rs: float = 1.0):
     """
@@ -66,71 +77,91 @@ def envwise_spearman(pred, target, env_id):
     # get 1.0 - avg spearman as loss 
     return 1.0 - torch.stack(spearmans).mean() 
 
-def envwise_mse(pred, target, env_id):
+def envwise_mse(pred, target, env_id, eps: float = 1e-8):
     """
-    pred: [B, 1] or [B] (float)
-    target: [B, 1] or [B] (float)
-    env_id: [B] (long) -> same envs share same id
-
-    returns a scalar loss (mean(MSE over envs in batch)) 
+    Mean of per-environment MSE (with per-env centering), using global
+    sufficient stats when DDP is active.
     """
-
-    #  squeeze preds, targets if they are [B, 1]
+    # squeeze preds, targets if they are [B, 1]
     if pred.ndim > 1:
         pred = pred.squeeze(-1)
     if target.ndim > 1:
         target = target.squeeze(-1)
-    
-    loss_acc = torch.zeros((), device=pred.device)
-    count = 0
-    for env in torch.unique(env_id):
-        mask = (env_id == env)
-        if int(mask.sum()) < 2:
-            continue
-        px = pred[mask]
-        tx = target[mask]
-        px = px - px.mean()
-        tx = tx - tx.mean()
-        loss_acc += torch.mean((px - tx) ** 2)
-        count += 1
-    if count == 0:
-        return torch.zeros((), device = pred.device, dtype=pred.dtype, requires_grad=True)
-    return loss_acc / count
+
+    device = pred.device
+    env_id = env_id.to(device)
+    pred = pred.float()
+    target = target.float()
+
+    max_env = env_id.max()
+    max_env, = _all_reduce_if_needed(max_env, op=dist.ReduceOp.MAX)
+    n_env = int(max_env.item()) + 1
+
+    def _accumulate(vec: torch.Tensor) -> torch.Tensor:
+        buf = pred.new_zeros(n_env)
+        return buf.scatter_add(0, env_id, vec)
+
+    count = _accumulate(torch.ones_like(pred))
+    sx = _accumulate(pred)
+    sy = _accumulate(target)
+    sxx = _accumulate(pred * pred)
+    syy = _accumulate(target * target)
+    sxy = _accumulate(pred * target)
+
+    count, sx, sy, sxx, syy, sxy = _all_reduce_if_needed(count, sx, sy, sxx, syy, sxy)
+
+    valid = count > 1
+    if not valid.any():
+        return torch.mean((pred - target) ** 2)
+
+    mean_x = sx / count.clamp_min(1.0)
+    mean_y = sy / count.clamp_min(1.0)
+    var_x = sxx / count.clamp_min(1.0) - mean_x.pow(2)
+    var_y = syy / count.clamp_min(1.0) - mean_y.pow(2)
+    cov_xy = sxy / count.clamp_min(1.0) - (mean_x * mean_y)
+
+    mse_centered = var_x + var_y - 2 * cov_xy
+    return mse_centered[valid].mean()
 
 def envwise_pcc(pred, target, env_id, eps=1e-8):
+    """
+    Compute Pearson r independently for each environment (using global
+    sufficient statistics in DDP) and return 1 - mean(r) across envs.
+    """
     pred = pred.squeeze(-1).float()
     target = target.squeeze(-1).float()
     env_id = env_id.to(pred.device)
 
-    # cover envs present on any rank this step
+    # figure out how many env ids are present globally
     max_env = env_id.max()
-    if dist.is_initialized():
-        dist.all_reduce(max_env, op=dist.ReduceOp.MAX)
+    max_env, = _all_reduce_if_needed(max_env, op=dist.ReduceOp.MAX)
     n_env = int(max_env.item()) + 1
 
-    def agg(vec):
-        out = pred.new_zeros(n_env)
-        return out.scatter_add(0, env_id, vec)
+    def _accumulate(vec: torch.Tensor) -> torch.Tensor:
+        buf = pred.new_zeros(n_env)
+        return buf.scatter_add(0, env_id, vec)
 
-    count = agg(torch.ones_like(pred))
-    sx, sy = agg(pred), agg(target)
-    sxx, syy = agg(pred * pred), agg(target * target)
-    sxy = agg(pred * target)
+    count = _accumulate(torch.ones_like(pred))
+    sx = _accumulate(pred)
+    sy = _accumulate(target)
+    sxx = _accumulate(pred * pred)
+    syy = _accumulate(target * target)
+    sxy = _accumulate(pred * target)
 
-    # add all-reduce across ranks to see more environments 
-    if dist.is_initialized():
-        for t in (count, sx, sy, sxx, syy, sxy):
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    count, sx, sy, sxx, syy, sxy = _all_reduce_if_needed(count, sx, sy, sxx, syy, sxy)
 
-    valid = count > 1
+    # per-env Pearson r
+    cov = sxy - (sx * sy) / count.clamp_min(1.0)
+    varx = sxx - (sx * sx) / count.clamp_min(1.0)
+    vary = syy - (sy * sy) / count.clamp_min(1.0)
+    denom = (varx.clamp_min(eps).sqrt() * vary.clamp_min(eps).sqrt())
+
+    valid = (count > 1) & (varx > eps) & (vary > eps)
     if not valid.any():
-        # fall back to a differentiable surrogate instead of a constant
+        # fallback keeps gradients flowing when a step has no valid envs
         return 1.0 - torch_pearsonr(pred, target)
 
-    cov = sxy - (sx * sy) / count.clamp_min(1)
-    varx = sxx - (sx * sx) / count.clamp_min(1)
-    vary = syy - (sy * sy) / count.clamp_min(1)
-    r = cov / (varx.clamp_min(eps).sqrt() * vary.clamp_min(eps).sqrt())
+    r = cov / denom
     return 1.0 - r[valid].mean()
 
 
@@ -397,5 +428,3 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
         loss_list.append((name_t, fn_t, w))
     return CompositeLoss(loss_list)
         
-
-
