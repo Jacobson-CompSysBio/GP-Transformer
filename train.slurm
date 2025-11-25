@@ -29,7 +29,7 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
 # calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 64 gpus
-export GBS=16384
+export GBS=4096
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
