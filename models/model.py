@@ -79,20 +79,27 @@ class GxE_Transformer(nn.Module):
         return g_enc + e_enc + ld_enc
 
     def _forward_tf(self, g_enc, e_enc, ld_enc):
-        if isinstance(e_enc, torch.Tensor): 
+        if isinstance(e_enc, torch.Tensor):
+            # broadcast env embedding to token length (including CLS)
             e_enc = e_enc.unsqueeze(dim=1)
+            if isinstance(g_enc, torch.Tensor):
+                e_enc = e_enc.expand(-1, g_enc.size(1), -1)
         x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
             x = layer(x)
-        x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
-        return x
+        # take CLS (first token) as summary if present; else mean
+        if isinstance(x, torch.Tensor) and x.size(1) > 0:
+            return x[:, 0]  # (B, C)
+        return x.mean(dim=1)
 
     def _forward_mlp(self, g_enc, e_enc, ld_enc):
         # convert [B, T, C] -> [B, C]
         if isinstance(g_enc, torch.Tensor):
-            g_enc = g_enc.mean(dim=1)
+            g_main = g_enc[:, 1:] if g_enc.size(1) > 1 else g_enc
+            g_enc = g_main.mean(dim=1)
         if isinstance(ld_enc, torch.Tensor):
-            ld_enc = ld_enc.mean(dim=1)
+            ld_main = ld_enc[:, 1:] if ld_enc.size(1) > 1 else ld_enc
+            ld_enc = ld_main.mean(dim=1)
         x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
             x = x + layer(x)
@@ -100,14 +107,18 @@ class GxE_Transformer(nn.Module):
     
     def _forward_cnn(self, g_enc, e_enc, ld_enc):
         #unsqueeze e to concat properly
-        if isinstance(e_enc, torch.Tensor): 
+        if isinstance(e_enc, torch.Tensor):
             e_enc = e_enc.unsqueeze(dim=1)
+            if isinstance(g_enc, torch.Tensor):
+                e_enc = e_enc.expand(-1, g_enc.size(1), -1)
         x = self._concat(g_enc, e_enc, ld_enc)
 
         x = x.transpose(1, 2) # (B, T, C) -> (B, C, T)
         for layer in self.hidden_layers:
             x = layer(x)
         x = x.transpose(1, 2) # (B, C, T) -> (B, T, C)
+        # drop CLS for pooling if present
+        x = x[:, 1:] if x.size(1) > 1 else x
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd) 
         return x
     
@@ -118,6 +129,10 @@ class GxE_Transformer(nn.Module):
         if self.ld_encoder:
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
+            # pad CLS for ld_enc to match g_enc length if needed
+            if isinstance(g_enc, torch.Tensor) and ld_enc.dim() == 3 and ld_enc.size(1) + 1 == g_enc.size(1):
+                pad = torch.zeros(ld_enc.size(0), 1, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
+                ld_enc = torch.cat([pad, ld_enc], dim=1)
         
         if self.gxe_enc == "tf":
             x = self._forward_tf(g_enc, e_enc, ld_enc)

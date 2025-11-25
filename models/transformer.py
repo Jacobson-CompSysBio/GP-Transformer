@@ -121,6 +121,11 @@ class G_Encoder(nn.Module):
         # config
         self.config = config
 
+        # learned CLS embedding (summary token)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        # optional positional bias for CLS (keeps length alignment without resizing PE)
+        self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+
         self.transformer = nn.ModuleDict(
             dict(
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -143,7 +148,12 @@ class G_Encoder(nn.Module):
         B, T = idx.shape
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}; block size is {self.config.block_size}"
 
-        x = self.transformer.wpe(self.transformer.wte(idx)) # add pos emb to token embedding input since it's static
+        # token + positional embeddings
+        x = self.transformer.wpe(self.transformer.wte(idx)) # (B, T, C)
+
+        # prepend CLS token (add small positional bias so it isn't identical to data tokens)
+        cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)  # (B, 1, C)
+        x = torch.cat([cls, x], dim=1)  # (B, T+1, C)
 
         # forward through blocks
         for block in self.transformer.h:
