@@ -148,7 +148,7 @@ class GxE_Dataset(Dataset):
         ### DROP COLS HERE ###
         ######################        
         e_block = e_block.drop(columns=["Irrigated", "Treatment", "Previous_Crop"])
-        e_block = e_block.iloc[:, :2] # select only first two cols, lat/lon
+        #e_block = e_block.iloc[:, :2] # select only first two cols, lat/lon
         
 
         # store for __getitem__
@@ -197,7 +197,7 @@ class GxE_Dataset(Dataset):
                 self.label_scalers = y_scalers
             
             total = pd.Series(self.label_scalers['total'].transform(total.values))
-            ymean = pd.Series(self.label_scaler['ymean'].transform(ymean.values))
+            ymean = pd.Series(self.label_scalers['ymean'].transform(ymean.values))
             resid = pd.Series(self.label_scalers['resid'].transform(resid.values))
 
         self.total_series = total.reset_index(drop=True)

@@ -34,6 +34,7 @@ class GxE_Transformer(nn.Module):
         self.g_encoder = G_Encoder(config) if g_enc else None
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
+                                   hidden_dim=config.n_embd,
                                    n_hidden=config.n_mlp_layer,
                                    dropout=config.dropout) if e_enc else None
         self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,

@@ -140,7 +140,7 @@ def main():
     # other options
     batches_per_epoch = len(train_loader)
     total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch * 10  # warmup for 10 epoch - should be enough
+    warmup_iters = batches_per_epoch * 0.1  # warmup for 10 epoch - should be enough
     #warmup_iters = batches_per_epoch * 2  # warmup for 2 epochs
     lr_decay_iters = total_iters * .5 
     #lr_decay_iters = total_iters * .35

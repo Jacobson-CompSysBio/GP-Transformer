@@ -97,55 +97,42 @@ def envwise_mse(pred, target, env_id):
         return torch.zeros((), device = pred.device, dtype=pred.dtype, requires_grad=True)
     return loss_acc / count
 
-def envwise_pcc(pred, target, env_id):
-    """
-    pred: [B, 1] or [B] (float)
-    target: [B, 1] or [B] (float)
-    env_id: [B] (long) -> same envs share same id
+def envwise_pcc(pred, target, env_id, eps=1e-8):
+    pred = pred.squeeze(-1).float()
+    target = target.squeeze(-1).float()
+    env_id = env_id.to(pred.device)
 
-    returns a scalar loss (1 - mean(PCC over envs in batch)) 
-    """
+    # cover envs present on any rank this step
+    max_env = env_id.max()
+    if dist.is_initialized():
+        dist.all_reduce(max_env, op=dist.ReduceOp.MAX)
+    n_env = int(max_env.item()) + 1
 
-    #  squeeze preds, targets if they are [B, 1]
-    if pred.ndim > 1:
-        pred = pred.squeeze(-1)
-    if target.ndim > 1:
-        target = target.squeeze(-1)
+    def agg(vec):
+        out = pred.new_zeros(n_env)
+        return out.scatter_add(0, env_id, vec)
 
-    unique_envs = torch.unique(env_id)
-    pccs = []
-    for env in unique_envs:
-        mask = (env_id == env)
-        
-        # don't compute pcc if only one sample in env
-        n = int(mask.sum())
-        if n < 2:
-            continue
-        
-        # only keep samples from this env
-        x = pred[mask]
-        y = target[mask]
+    count = agg(torch.ones_like(pred))
+    sx, sy = agg(pred), agg(target)
+    sxx, syy = agg(pred * pred), agg(target * target)
+    sxy = agg(pred * target)
 
-        # calculate pcc
-        x = x - x.mean()
-        y = y - y.mean()
-        sx = torch.sqrt((x * x).sum())
-        sy = torch.sqrt((y * y).sum())
-        denom = sx * sy
+    # add all-reduce across ranks to see more environments 
+    if dist.is_initialized():
+        for t in (count, sx, sy, sxx, syy, sxy):
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
-        # if denom ~ 0, skip (constant group)
-        if torch.any(torch.isclose(denom, torch.zeros_like(denom))):
-            continue
-        
-        pcc = (x * y).sum() / denom
-        pccs.append(pcc)
+    valid = count > 1
+    if not valid.any():
+        # fall back to a differentiable surrogate instead of a constant
+        return 1.0 - torch_pearsonr(pred, target)
 
-    # no valid groups in batch; return 1.0 loss contribution 
-    if len(pccs) == 0:
-        dummy_loss = (pred - pred.detach()).pow(2).mean()
-        return dummy_loss * 0.0 + 1.0 # returns no correlation
-         
-    return 1.0 - torch.stack(pccs).mean()
+    cov = sxy - (sx * sy) / count.clamp_min(1)
+    varx = sxx - (sx * sx) / count.clamp_min(1)
+    vary = syy - (sy * sy) / count.clamp_min(1)
+    r = cov / (varx.clamp_min(eps).sqrt() * vary.clamp_min(eps).sqrt())
+    return 1.0 - r[valid].mean()
+
 
 ### other losses ### 
 def torch_spearmanr(pred: torch.Tensor,

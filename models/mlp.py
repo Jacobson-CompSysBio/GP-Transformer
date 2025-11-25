@@ -18,7 +18,7 @@ class Block(nn.Module):
                  input_dim: int,
                  output_dim: int,
                  activation: nn.Module = nn.GELU(),
-                 dropout: float = 0.25,
+                 dropout: float = 0.15,
                  layernorm: bool = True,
                  ):
         super().__init__()
