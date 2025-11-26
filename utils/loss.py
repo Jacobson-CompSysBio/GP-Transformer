@@ -161,8 +161,11 @@ def envwise_pcc(pred, target, env_id, eps=1e-8):
         # fallback keeps gradients flowing when a step has no valid envs
         return 1.0 - torch_pearsonr(pred, target)
 
-    r = cov / denom
-    return 1.0 - r[valid].mean()
+    # use fisher z-transform to stabilize mean of rs
+    r = (cov / denom).clamp(-0.99999, 0.99999)
+    z = 0.5 * torch.log((1 + r[valid])) / (1 - r[valid])
+    r_bar = torch.tanh(z.mean())
+    return 1.0 - r_bar
 
 
 ### other losses ### 

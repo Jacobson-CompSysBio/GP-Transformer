@@ -41,7 +41,12 @@ class GxE_Transformer(nn.Module):
                                      output_dim=config.n_embd,
                                      num_blocks=config.n_ld_layer,
                                      dropout=config.dropout) if ld_enc else None
-        self.moe_w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0])) if moe else None
+
+        self.moe_w = nn.Parameter(torch.zeros(3)) if moe else None # logits
+        self.fuse_ln = nn.LayerNorm(config.n_embd) # add ln for moe fusion
+
+        # append env as a token to final tf layer instead of adding to all reprs
+        self.env_as_token = True # set to false for old behavior
         if gxe_enc == "tf":
             self.gxe_enc = "tf"
             self.hidden_layers = nn.ModuleList(
@@ -70,21 +75,37 @@ class GxE_Transformer(nn.Module):
 
         # init final layer
         self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
-    
+
+    # concat now uses softmax to augment moe weights proportionally 
     def _concat(self, g_enc, e_enc, ld_enc):
-        if self.moe_w is not None:
-            g_enc = self.moe_w[0] * g_enc
-            e_enc = self.moe_w[1] * e_enc
-            ld_enc = self.moe_w[2] * ld_enc
-        return g_enc + e_enc + ld_enc
+        w = torch.softmax(self.moe_w, dim=0) if self.moe_w is not None else None
+        x = 0
+        if isinstance(g_enc, torch.Tensor):
+            x = x + (w[0] * g_enc if w is not None else g_enc)
+        if isinstance(e_enc, torch.Tensor):
+            x = x + (w[1] * e_enc if w is not None else e_enc)
+        if isinstance(ld_enc, torch.Tensor):
+            x = x + (w[2] * ld_enc if w is not None else ld_enc)
+        return self.fuse_ln(x)
 
     def _forward_tf(self, g_enc, e_enc, ld_enc):
         if isinstance(e_enc, torch.Tensor):
-            # broadcast env embedding to token length (including CLS)
-            e_enc = e_enc.unsqueeze(dim=1)
-            if isinstance(g_enc, torch.Tensor):
-                e_enc = e_enc.expand(-1, g_enc.size(1), -1)
-        x = self._concat(g_enc, e_enc, ld_enc)
+            if self.env_as_token:
+                # append single env token
+                e_tok = e_enc.unsqueeze(dim=1) # [B, 1, C]
+                x = torch.cat([g_enc, e_tok], dim=1) if isinstance(g_enc, torch.Tensor) else e_tok
+
+                # align ld_enc by padding one zero token if present
+                if isinstance(ld_enc, torch.Tensor) and ld_enc.size(1) == x.size(1) - 2:
+                    pad = torch.zeros(ld_enc.size(0), 1, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
+                    ld_enc = torch.cat([ld_enc, pad], dim=1)
+                if isinstance(ld_enc, torch.Tensor):
+                    x = self.fuse_ln(x + ld_enc)
+            else:
+                e_map = e_enc.unsqueeze(dim=1).expand(-1, g_enc.size(1), -1)
+                x = self._concet(g_enc, e_map, ld_enc)
+        else:
+            x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
             x = layer(x)
         # take CLS (first token) as summary if present; else mean

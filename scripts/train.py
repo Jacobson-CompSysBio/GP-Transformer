@@ -140,11 +140,9 @@ def main():
     # other options
     batches_per_epoch = len(train_loader)
     total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch * 0.1  # warmup for 10 epoch - should be enough
-    #warmup_iters = batches_per_epoch * 2  # warmup for 2 epochs
-    lr_decay_iters = total_iters * .5 
-    #lr_decay_iters = total_iters * .35
-    max_lr, min_lr = (args.lr), (0.001 * args.lr)
+    warmup_iters = batches_per_epoch * 1  # warmup for ~1 epoch
+    lr_decay_iters = int(total_iters * 0.6)  # decay over ~60% of training
+    max_lr, min_lr = (args.lr), (0.1 * args.lr)  # keep a higher floor for stability
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
@@ -219,9 +217,9 @@ def main():
             env_id = yb["env_id"].to(device, non_blocking=True).long()
 
             # fwd/bwd pass
-            preds = model(xb)
-
-            loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                preds = model(xb)
+                loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
@@ -234,8 +232,9 @@ def main():
             for pg in optimizer.param_groups:
                 pg['lr'] = lr
 
-            # double check that ddp accumulates gradients 
+            # clip gradients on bwd to avoid unstable training 
             loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J newdata
-#SBATCH -N 8 
+#SBATCH -N 16 
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -28,8 +28,8 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 64 gpus
-export GBS=4096
+# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
+export GBS=16384
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -39,15 +39,15 @@ export NUM_EPOCHS=1500
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=200
+export EARLY_STOP=20
 
 export G_LAYERS=1
 export LD_LAYERS=2
 export MLP_LAYERS=1
 export GXE_LAYERS=2
 
-export HEADS=8
-export EMB_SIZE=512
+export HEADS=4
+export EMB_SIZE=256
 export SCALE_TARGETS=False
 
 export LOSS="envpcc+envmse" # + separated list of losses
