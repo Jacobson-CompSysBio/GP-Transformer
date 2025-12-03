@@ -46,7 +46,8 @@ class GxE_Transformer(nn.Module):
         self.fuse_ln = nn.LayerNorm(config.n_embd) # add ln for moe fusion
 
         # append env as a token to final tf layer instead of adding to all reprs
-        self.env_as_token = True # set to false for old behavior
+        self.env_as_token = True  # set to false for old behavior
+        self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
         if gxe_enc == "tf":
             self.gxe_enc = "tf"
             self.hidden_layers = nn.ModuleList(
@@ -92,18 +93,19 @@ class GxE_Transformer(nn.Module):
         if isinstance(e_enc, torch.Tensor):
             if self.env_as_token:
                 # append single env token
-                e_tok = e_enc.unsqueeze(dim=1) # [B, 1, C]
+                e_tok = e_enc.unsqueeze(dim=1)  # [B, 1, C]
                 x = torch.cat([g_enc, e_tok], dim=1) if isinstance(g_enc, torch.Tensor) else e_tok
 
-                # align ld_enc by padding one zero token if present
-                if isinstance(ld_enc, torch.Tensor) and ld_enc.size(1) == x.size(1) - 2:
-                    pad = torch.zeros(ld_enc.size(0), 1, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
-                    ld_enc = torch.cat([ld_enc, pad], dim=1)
+                # align ld_enc by padding to match x's sequence length
                 if isinstance(ld_enc, torch.Tensor):
+                    seq_diff = x.size(1) - ld_enc.size(1)
+                    if seq_diff > 0:
+                        pad = torch.zeros(ld_enc.size(0), seq_diff, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
+                        ld_enc = torch.cat([ld_enc, pad], dim=1)
                     x = self.fuse_ln(x + ld_enc)
             else:
                 e_map = e_enc.unsqueeze(dim=1).expand(-1, g_enc.size(1), -1)
-                x = self._concet(g_enc, e_map, ld_enc)
+                x = self._concat(g_enc, e_map, ld_enc)
         else:
             x = self._concat(g_enc, e_enc, ld_enc)
         for layer in self.hidden_layers:
@@ -195,11 +197,13 @@ class GxE_ResidualTransformer(nn.Module):
 
         self.config = config
         self.residual = residual
+        self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
 
         # set attributes
         self.g_encoder = G_Encoder(config) if g_enc else None
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
+                                   hidden_dim=config.n_embd,
                                    n_hidden=config.n_mlp_layer,
                                    dropout=config.dropout) if e_enc else None
         self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
