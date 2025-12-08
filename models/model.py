@@ -327,6 +327,8 @@ class GxE_ResidualTransformer(nn.Module):
         print(f"Trainable parameters: {trainable_params:,}"
               f" (G: {g_trainable_params:,}, E: {e_trainable_params:,}, LD: {ld_trainable_params:,}, GxE: {gxe_trainable_params:,})")
 
+# ----------------------------------------------------------------
+
 # create full transformer with mixture of experts
 class FullTransformerMoE(nn.Module):
     """
