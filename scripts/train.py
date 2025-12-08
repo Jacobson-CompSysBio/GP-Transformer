@@ -130,7 +130,8 @@ def main():
         model.print_trainable_parameters()
     model = DDP(model,
                 device_ids=[local_rank],
-                output_device=local_rank)
+                output_device=local_rank,
+                find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     

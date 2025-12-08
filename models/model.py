@@ -326,4 +326,19 @@ class GxE_ResidualTransformer(nn.Module):
         gxe_trainable_params = trainable_params - g_trainable_params - e_trainable_params - ld_trainable_params
         print(f"Trainable parameters: {trainable_params:,}"
               f" (G: {g_trainable_params:,}, E: {e_trainable_params:,}, LD: {ld_trainable_params:,}, GxE: {gxe_trainable_params:,})")
+
+# create full transformer with mixture of experts
+class FullTransformerMoE(nn.Module):
+    """
+    Full Transformer with Mixture of Experts architecture.
+    Uses attention mechanism across all variables, G and E.
+    CLS token used for final yield prediction.
+    """
+    def __init__(self, config):
+        super().__init__()
     
+    def forward(self, x):
+        pass
+
+    def print_trainable_parameters(self):
+        pass
