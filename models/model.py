@@ -48,10 +48,15 @@ class GxE_Transformer(nn.Module):
         # append env as a token to final tf layer instead of adding to all reprs
         self.env_as_token = True  # set to false for old behavior
         self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
+        
+        # stochastic depth: linearly increase drop rate from 0 to max
+        drop_path_rate = config.dropout * 0.5  # max drop path rate
+        
         if gxe_enc == "tf":
             self.gxe_enc = "tf"
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, config.n_gxe_layer)]
             self.hidden_layers = nn.ModuleList(
-            [TransformerBlock(config) for _ in range(config.n_gxe_layer)]
+            [TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_gxe_layer)]
             + [nn.LayerNorm(config.n_embd)]
             )
         elif gxe_enc == "mlp":
@@ -74,8 +79,13 @@ class GxE_Transformer(nn.Module):
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
-        # init final layer
-        self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
+        # init final layer with dropout for regularization
+        self.final_dropout = nn.Dropout(config.dropout)
+        self.final_layer = nn.Linear(config.n_embd, 1)
+        
+        # initialize final layer with small weights for stable training
+        nn.init.normal_(self.final_layer.weight, std=0.01)
+        nn.init.zeros_(self.final_layer.bias)
 
     # concat now uses softmax to augment moe weights proportionally 
     def _concat(self, g_enc, e_enc, ld_enc):
@@ -166,7 +176,7 @@ class GxE_Transformer(nn.Module):
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
-        return self.final_layer(x)
+        return self.final_layer(self.final_dropout(x))
     
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)

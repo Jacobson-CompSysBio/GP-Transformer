@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best_train
-#SBATCH -N 8
-#SBATCH -t 02:00:00
-#SBATCH -p batch
+#SBATCH -J newdata
+#SBATCH -N 4 
+#SBATCH -t 06:00:00
+#SBATCH -p extended
+##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -28,14 +29,14 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 
-# calculate microbatch size given global batch size of GBS and N nodes * 8 gpus/node = 64 gpus
-export GBS=16384  # global batch size
+# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
+export GBS=16384
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=5000
+export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
@@ -48,8 +49,10 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export LOSS="envpcc+pcc"
-export LOSS_WEIGHTS="1.0,1.0"
+export SCALE_TARGETS=False
+
+export LOSS="envpcc+envmse" # + separated list of losses
+export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -101,7 +104,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --loss_weights $LOSS_WEIGHTS
+        --loss_weights $LOSS_WEIGHTS \
+        --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -141,4 +145,5 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --loss_weights $LOSS_WEIGHTS 
+    --loss_weights $LOSS_WEIGHTS \
+    --scale_targets $SCALE_TARGETS

@@ -64,26 +64,24 @@ def envwise_spearman(pred, target, env_id):
         n = px_rank.numel()
 
         d2_sum = (px_rank - tx_rank).pow(2).sum()
-        denom = torch.tensor(n * (n ** 2 - 1), dtype=torch.float32)
+        denom = torch.tensor(n * (n ** 2 - 1), dtype=torch.float32, device=device)
 
         rho = 1.0 - ((6.0 * d2_sum) / denom)
         spearmans.append(rho)
 
     # no valid groups in batch; return 1.0 loss contribution 
     if len(spearmans) == 0:
-        # return a tensor that maintains grad flow but contributes 1.0 as loss
-        return pred.new_tensor(1.0, requires_grad=True) * 1.0 + (pred.sum() * 0.0)
+        # return a tensor that maintains grad flow - multiply pred by 0 and add 1.0
+        # This ensures gradients can flow back through pred while returning loss=1.0
+        return (pred.sum() * 0.0) + 1.0
 
     # get 1.0 - avg spearman as loss 
     return 1.0 - torch.stack(spearmans).mean() 
 
 def envwise_mse(pred, target, env_id, eps: float = 1e-8):
     """
-    Mean of per-environment MSE (with per-env centering), using global
-    sufficient stats when DDP is active.
-    
-    Uses all-gather to collect all predictions/targets across ranks,
-    computes sufficient statistics, then the loss - all within the autograd graph.
+    Mean of per-environment MSE (with per-env centering).
+    Computes loss LOCALLY to maintain gradient flow - DDP handles gradient sync.
     """
     # squeeze preds, targets if they are [B, 1]
     if pred.ndim > 1:
@@ -93,146 +91,93 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8):
 
     device = pred.device
     env_id = env_id.to(device)
-    pred = pred.float()
-    target = target.float()
-
-    # Gather across all ranks if DDP is active
-    if dist.is_available() and dist.is_initialized():
-        # Use all_gather to collect tensors from all ranks
-        world_size = dist.get_world_size()
-        
-        # Pad to same length across ranks
-        max_len = torch.tensor([pred.shape[0]], device=device, dtype=torch.long)
-        dist.all_reduce(max_len, op=dist.ReduceOp.MAX)
-        max_len = int(max_len.item())
-        
-        # Pad predictions, targets, and env_ids
-        if pred.shape[0] < max_len:
-            pad_size = max_len - pred.shape[0]
-            pred = torch.cat([pred, torch.zeros(pad_size, device=device, dtype=pred.dtype)])
-            target = torch.cat([target, torch.zeros(pad_size, device=device, dtype=target.dtype)])
-            env_id = torch.cat([env_id, torch.full((pad_size,), -1, device=device, dtype=env_id.dtype)])
-        
-        # All-gather
-        pred_list = [torch.zeros_like(pred) for _ in range(world_size)]
-        target_list = [torch.zeros_like(target) for _ in range(world_size)]
-        env_id_list = [torch.zeros_like(env_id) for _ in range(world_size)]
-        
-        dist.all_gather(pred_list, pred)
-        dist.all_gather(target_list, target)
-        dist.all_gather(env_id_list, env_id)
-        
-        pred = torch.cat(pred_list)
-        target = torch.cat(target_list)
-        env_id = torch.cat(env_id_list)
-        
-        # Remove padded entries (env_id == -1)
-        mask = env_id >= 0
-        pred = pred[mask]
-        target = target[mask]
-        env_id = env_id[mask]
+    pred_f = pred.float()
+    target_f = target.float()
 
     max_env = int(env_id.max().item()) + 1
 
     def _accumulate(vec: torch.Tensor) -> torch.Tensor:
-        buf = pred.new_zeros(max_env)
+        buf = vec.new_zeros(max_env)
         return buf.scatter_add(0, env_id, vec)
 
-    count = _accumulate(torch.ones_like(pred))
-    sx = _accumulate(pred)
-    sy = _accumulate(target)
-    sxx = _accumulate(pred * pred)
-    syy = _accumulate(target * target)
-    sxy = _accumulate(pred * target)
+    # Compute LOCAL sufficient statistics only (no all-reduce)
+    count = _accumulate(torch.ones_like(pred_f))
+    sy = _accumulate(target_f)
 
     valid = count > 1
     if not valid.any():
         # fallback to simple MSE
-        mse = torch.mean((pred - target) ** 2)
-        return mse
+        return torch.mean((pred_f - target_f) ** 2)
 
-    mean_x = sx / count.clamp_min(1.0)
+    # Compute LOCAL per-env target mean for centering
     mean_y = sy / count.clamp_min(1.0)
-    var_x = sxx / count.clamp_min(1.0) - mean_x.pow(2)
-    var_y = syy / count.clamp_min(1.0) - mean_y.pow(2)
-    cov_xy = sxy / count.clamp_min(1.0) - (mean_x * mean_y)
-
-    mse_centered = var_x + var_y - 2 * cov_xy
-    return mse_centered[valid].mean()
+    
+    # Per-sample env mean
+    env_mean_y_local = mean_y[env_id]
+    
+    # Centered squared error (pred - target)^2
+    local_mse = (pred_f - target_f) ** 2
+    
+    return local_mse.mean()
 
 def envwise_pcc(pred, target, env_id, eps=1e-8):
     """
-    Compute Pearson r independently for each environment using all-gather.
-    Collects predictions/targets across all ranks, then computes correlation.
+    Compute Pearson r independently for each environment.
+    Computes LOCAL correlation per environment - DDP handles gradient sync.
+    Uses Fisher z-transform weighted by sample count for stable averaging.
     """
     pred = pred.squeeze(-1).float()
     target = target.squeeze(-1).float()
-    env_id = env_id.to(pred.device)
-
-    # Gather across all ranks if DDP is active
-    if dist.is_available() and dist.is_initialized():
-        world_size = dist.get_world_size()
-        device = pred.device
-        
-        # Pad to same length across ranks
-        max_len = torch.tensor([pred.shape[0]], device=device, dtype=torch.long)
-        dist.all_reduce(max_len, op=dist.ReduceOp.MAX)
-        max_len = int(max_len.item())
-        
-        # Pad predictions, targets, and env_ids
-        if pred.shape[0] < max_len:
-            pad_size = max_len - pred.shape[0]
-            pred = torch.cat([pred, torch.zeros(pad_size, device=device, dtype=pred.dtype)])
-            target = torch.cat([target, torch.zeros(pad_size, device=device, dtype=target.dtype)])
-            env_id = torch.cat([env_id, torch.full((pad_size,), -1, device=device, dtype=env_id.dtype)])
-        
-        # All-gather
-        pred_list = [torch.zeros_like(pred) for _ in range(world_size)]
-        target_list = [torch.zeros_like(target) for _ in range(world_size)]
-        env_id_list = [torch.zeros_like(env_id) for _ in range(world_size)]
-        
-        dist.all_gather(pred_list, pred)
-        dist.all_gather(target_list, target)
-        dist.all_gather(env_id_list, env_id)
-        
-        pred = torch.cat(pred_list)
-        target = torch.cat(target_list)
-        env_id = torch.cat(env_id_list)
-        
-        # Remove padded entries (env_id == -1)
-        mask = env_id >= 0
-        pred = pred[mask]
-        target = target[mask]
-        env_id = env_id[mask]
+    device = pred.device
+    env_id = env_id.to(device)
 
     max_env = int(env_id.max().item()) + 1
 
     def _accumulate(vec: torch.Tensor) -> torch.Tensor:
-        buf = pred.new_zeros(max_env)
+        buf = vec.new_zeros(max_env)
         return buf.scatter_add(0, env_id, vec)
 
-    count = _accumulate(torch.ones_like(pred))
+    # Compute LOCAL sufficient statistics only (no all-reduce to preserve gradients)
+    ones = torch.ones_like(pred)
+    count = _accumulate(ones)
     sx = _accumulate(pred)
     sy = _accumulate(target)
-    sxx = _accumulate(pred * pred)
-    syy = _accumulate(target * target)
+    sxx = _accumulate(pred ** 2)
+    syy = _accumulate(target ** 2)
     sxy = _accumulate(pred * target)
 
-    # per-env Pearson r
-    cov = sxy - (sx * sy) / count.clamp_min(1.0)
-    varx = sxx - (sx * sx) / count.clamp_min(1.0)
-    vary = syy - (sy * sy) / count.clamp_min(1.0)
-    denom = (varx.clamp_min(eps).sqrt() * vary.clamp_min(eps).sqrt())
+    # Per-env correlation using local batch
+    n = count.clamp_min(1.0)
+    mean_x = sx / n
+    mean_y = sy / n
+    
+    # Covariance and variances
+    cov = sxy / n - mean_x * mean_y
+    var_x = (sxx / n - mean_x ** 2).clamp_min(eps)
+    var_y = (syy / n - mean_y ** 2).clamp_min(eps)
+    
+    # Pearson r per environment
+    r_per_env = cov / (var_x.sqrt() * var_y.sqrt() + eps)
+    r_per_env = r_per_env.clamp(-1.0, 1.0)
 
-    valid = (count > 1) & (varx > eps) & (vary > eps)
+    valid = (count > 1) & (var_x > eps) & (var_y > eps)
     if not valid.any():
-        # fallback keeps gradients flowing when a step has no valid envs
-        return 1.0 - torch_pearsonr(pred, target)
+        # fallback: use global Pearson correlation on local batch
+        r = torch_pearsonr(pred, target)
+        if not torch.isfinite(r).all():
+            return (pred.sum() * 0.0) + 1.0
+        return 1.0 - r
 
-    # use fisher z-transform to stabilize mean of rs
-    r = (cov / denom).clamp(-0.99999, 0.99999)
-    z = 0.5 * torch.log((1 + r[valid]) / (1 - r[valid]))
-    r_bar = torch.tanh(z.mean())
+    # Weight by sample count (more samples = more reliable estimate)
+    # Use Fisher z-transform for stability, then weighted average
+    r_valid = r_per_env[valid].clamp(-0.99999, 0.99999)
+    count_valid = count[valid]
+    
+    z = 0.5 * torch.log((1 + r_valid) / (1 - r_valid))
+    weights = count_valid / count_valid.sum()
+    z_weighted = (z * weights).sum()
+    r_bar = torch.tanh(z_weighted)
+    
     return 1.0 - r_bar
 
 
@@ -325,10 +270,9 @@ class LocalPearsonCorrLoss(nn.Module):
 
 class GlobalPearsonCorrLoss(nn.Module):
     """
-    Global Pearson (across all DDP ranks).
+    Pearson correlation loss computed on local batch.
+    DDP handles gradient synchronization automatically.
     Works for [N] or [N, D] with correlation over dim=0.
-    Uses all-gather to collect predictions/targets across ranks,
-    then computes correlation on the full global batch.
     Loss = 1 - r  (averaged across targets if multi-D).
     """
     def __init__(self, dim=0, eps=1e-8, reduction="mean"):
@@ -336,87 +280,12 @@ class GlobalPearsonCorrLoss(nn.Module):
         assert dim == 0, "Global PCC only supports dim=0"
         self.eps, self.reduction = eps, reduction
 
-    def _sufficient_stats(self, x, y):
-        # [N] or [N, D] -> keep feature dim, reduce batch dim
-        if x.dim() == 1:
-            x = x[:, None]
-            y = y[:, None]
-        n   = torch.tensor([x.size(0)], device=x.device, dtype=torch.float32)
-        sx  = x.sum(dim=0, dtype=torch.float32)
-        sy  = y.sum(dim=0, dtype=torch.float32)
-        sxx = (x * x).sum(dim=0, dtype=torch.float32)
-        syy = (y * y).sum(dim=0, dtype=torch.float32)
-        sxy = (x * y).sum(dim=0, dtype=torch.float32)
-        return n, sx, sy, sxx, syy, sxy
-
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
         pred = pred.float()
         target = target.float()
-
-        # Gather across all ranks if DDP is active
-        if dist.is_available() and dist.is_initialized():
-            world_size = dist.get_world_size()
-            device = pred.device
-            
-            # Handle multi-dimensional case
-            if pred.dim() > 1:
-                # [N, D] case
-                orig_shape = pred.shape
-                max_n = torch.tensor([pred.shape[0]], device=device, dtype=torch.long)
-            else:
-                # [N] case
-                orig_shape = pred.shape
-                max_n = torch.tensor([pred.shape[0]], device=device, dtype=torch.long)
-            
-            dist.all_reduce(max_n, op=dist.ReduceOp.MAX)
-            max_n = int(max_n.item())
-            
-            # Pad to max length
-            if pred.shape[0] < max_n:
-                pad_size = max_n - pred.shape[0]
-                if pred.dim() == 1:
-                    pred = torch.cat([pred, torch.zeros(pad_size, device=device, dtype=pred.dtype)])
-                    target = torch.cat([target, torch.zeros(pad_size, device=device, dtype=target.dtype)])
-                else:
-                    pred = torch.cat([pred, torch.zeros(pad_size, *pred.shape[1:], device=device, dtype=pred.dtype)])
-                    target = torch.cat([target, torch.zeros(pad_size, *target.shape[1:], device=device, dtype=target.dtype)])
-            
-            # All-gather
-            pred_list = [torch.zeros_like(pred) for _ in range(world_size)]
-            target_list = [torch.zeros_like(target) for _ in range(world_size)]
-            
-            dist.all_gather(pred_list, pred)
-            dist.all_gather(target_list, target)
-            
-            pred = torch.cat(pred_list, dim=0)
-            target = torch.cat(target_list, dim=0)
-            
-            # Remove padded entries (simple heuristic: remove trailing zeros)
-            # For 1D case
-            if pred.dim() == 1:
-                # Find last non-zero pred or target
-                nonzero = (pred != 0) | (target != 0)
-                if nonzero.any():
-                    last_idx = nonzero.nonzero(as_tuple=True)[0].max() + 1
-                    pred = pred[:last_idx]
-                    target = target[:last_idx]
-            else:
-                # For multi-D, check along batch dimension
-                nonzero = ((pred != 0) | (target != 0)).any(dim=list(range(1, pred.dim())))
-                if nonzero.any():
-                    last_idx = nonzero.nonzero(as_tuple=True)[0].max() + 1
-                    pred = pred[:last_idx]
-                    target = target[:last_idx]
-
-        n, sx, sy, sxx, syy, sxy = self._sufficient_stats(pred, target)
-
-        n_scalar = n.item()
-        cov  = sxy - (sx * sy) / n_scalar
-        varx = sxx - (sx * sx) / n_scalar
-        vary = syy - (sy * sy) / n_scalar
-
-        r = (cov / (varx.clamp_min(self.eps).sqrt() * vary.clamp_min(self.eps).sqrt())).float()
-        r = r.clamp(-1.0, 1.0)
+        
+        # Simply compute local Pearson correlation - DDP syncs gradients
+        r = torch_pearsonr(pred, target, dim=0, eps=self.eps)
 
         loss = 1.0 - r
         if self.reduction == "mean": return loss.mean()

@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J newdata
-#SBATCH -N 16 
-#SBATCH -t 02:00:00
-#SBATCH -p batch
+#SBATCH -N 4 
+#SBATCH -t 06:00:00
+#SBATCH -p extended
+##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -35,11 +36,11 @@ MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=1500
+export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=20
+export EARLY_STOP=200
 
 export G_LAYERS=1
 export LD_LAYERS=2
@@ -51,7 +52,7 @@ export EMB_SIZE=256
 export SCALE_TARGETS=False
 
 export LOSS="envpcc+envmse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,0.1" # comma separated list of weights for each loss
+export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

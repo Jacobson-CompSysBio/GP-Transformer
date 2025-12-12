@@ -51,6 +51,7 @@ class SelfAttention(nn.Module):
         # get attributes
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.dropout = config.dropout
         # init k, q, v linear layers (all in same layer)
         self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3)
         # output projection
@@ -77,8 +78,9 @@ class SelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, head).transpose(1, 2) # (B, num_heads, T, head_size)
         v = v.view(B, T, self.n_head, head).transpose(1, 2) # (B, num_heads, T, head_size)
 
-        # flash attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # no mask, so is_causal=False
+        # flash attention with dropout
+        dropout_p = self.dropout if self.training else 0.0
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=dropout_p)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # reassemble head outputs side-by-side
 
         # output projection
@@ -97,15 +99,21 @@ class TransformerMLP(nn.Sequential):
 
 class TransformerBlock(nn.Module):
     
-    def __init__(self,config):
+    def __init__(self, config, drop_path: float = 0.0):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = SelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = TransformerMLP(config)
         self.dropout = nn.Dropout(config.dropout)
+        self.drop_path = drop_path  # stochastic depth rate
 
     def forward(self, x):
+        # stochastic depth: randomly skip this block during training
+        if self.training and self.drop_path > 0.0:
+            if torch.rand(1).item() < self.drop_path:
+                return x  # skip entire block
+        
         # resid connections
         x = x + self.dropout(self.attn(self.ln_1(x)))
         x = x + self.dropout(self.mlp(self.ln_2(x)))
@@ -126,11 +134,15 @@ class G_Encoder(nn.Module):
         # optional positional bias for CLS (keeps length alignment without resizing PE)
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
 
+        # stochastic depth: linearly increase drop rate
+        drop_path_rate = config.dropout * 0.5
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, config.n_g_layer)]
+        
         self.transformer = nn.ModuleDict(
             dict(
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
                 wpe = PositionalEncoding(config),
-                h = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_g_layer)]),
+                h = nn.ModuleList([TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_g_layer)]),
                 ln_f = nn.LayerNorm(config.n_embd)
             )
         )
