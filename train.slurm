@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J newdata
+#SBATCH -J moe
 #SBATCH -N 8 
-#SBATCH -t 06:00:00
-#SBATCH -p extended
-##SBATCH -q debug
+#SBATCH -t 00:15:00
+#SBATCH -p batch
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -28,6 +28,13 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
+export MOE_NUM_EXPERTS=4
+export MOE_TOP_K=2
+export MOE_EXPERT_HIDDEN_DIM=
+export MOE_SHARED_EXPERT=True
+export MOE_SHARED_EXPERT_HIDDEN_DIM=
+export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
 export GBS=16384
@@ -51,8 +58,8 @@ export HEADS=4
 export EMB_SIZE=256
 export SCALE_TARGETS=True
 
-export LOSS="envpcc+envmse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

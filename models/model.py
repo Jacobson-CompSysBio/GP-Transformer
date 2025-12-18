@@ -24,14 +24,45 @@ class GxE_Transformer(nn.Module):
                  ld_enc: bool = True,
                  gxe_enc: str = "tf",
                  moe: bool = True,
+                 g_encoder_type: str = None,
+                 moe_num_experts: int = None,
+                 moe_top_k: int = None,
+                 moe_expert_hidden_dim: int = None,
+                 moe_shared_expert: bool = None,
+                 moe_shared_expert_hidden_dim: int = None,
+                 moe_loss_weight: float = None,
                  config = None
                  ):
         super().__init__()
 
         self.config = config
+        self.g_encoder_type = g_encoder_type if g_encoder_type is not None else getattr(config, "g_encoder_type", "dense")
+        if isinstance(self.g_encoder_type, str):
+            self.g_encoder_type = self.g_encoder_type.lower()
+        else:
+            self.g_encoder_type = "moe" if self.g_encoder_type else "dense"
+        self.moe_num_experts = moe_num_experts if moe_num_experts is not None else getattr(config, "moe_num_experts", 4)
+        self.moe_top_k = moe_top_k if moe_top_k is not None else getattr(config, "moe_top_k", 2)
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim if moe_expert_hidden_dim is not None else getattr(config, "moe_expert_hidden_dim", None)
+        self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
+        self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
+        self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
+        self.moe_aux_loss = None
 
         # set attributes
-        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.g_encoder = (
+            G_Encoder(
+                config,
+                encoder_type=self.g_encoder_type,
+                moe_num_experts=self.moe_num_experts,
+                moe_top_k=self.moe_top_k,
+                moe_expert_hidden_dim=self.moe_expert_hidden_dim,
+                moe_shared_expert=self.moe_shared_expert,
+                moe_shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+            )
+            if g_enc else None
+        )
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
                                    hidden_dim=config.n_embd,
@@ -156,7 +187,16 @@ class GxE_Transformer(nn.Module):
         return x
     
     def forward(self, x):
-        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        self.moe_aux_loss = None
+        if self.g_encoder:
+            if self.use_moe_encoder:
+                g_enc, moe_loss = self.g_encoder(x["g_data"], return_moe_loss=True)
+                if moe_loss is not None:
+                    self.moe_aux_loss = moe_loss * self.moe_loss_weight
+            else:
+                g_enc = self.g_encoder(x["g_data"])
+        else:
+            g_enc = 0
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
         ld_enc = 0
         if self.ld_encoder:
@@ -201,6 +241,13 @@ class GxE_ResidualTransformer(nn.Module):
                  gxe_enc: str = "tf",
                  moe: bool = True,
                  residual: bool = False,
+                 g_encoder_type: str = None,
+                 moe_num_experts: int = None,
+                 moe_top_k: int = None,
+                 moe_expert_hidden_dim: int = None,
+                 moe_shared_expert: bool = None,
+                 moe_shared_expert_hidden_dim: int = None,
+                 moe_loss_weight: float = None,
                  config = None
                  ):
         super().__init__()
@@ -208,9 +255,33 @@ class GxE_ResidualTransformer(nn.Module):
         self.config = config
         self.residual = residual
         self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
+        self.g_encoder_type = g_encoder_type if g_encoder_type is not None else getattr(config, "g_encoder_type", "dense")
+        if isinstance(self.g_encoder_type, str):
+            self.g_encoder_type = self.g_encoder_type.lower()
+        else:
+            self.g_encoder_type = "moe" if self.g_encoder_type else "dense"
+        self.moe_num_experts = moe_num_experts if moe_num_experts is not None else getattr(config, "moe_num_experts", 4)
+        self.moe_top_k = moe_top_k if moe_top_k is not None else getattr(config, "moe_top_k", 2)
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim if moe_expert_hidden_dim is not None else getattr(config, "moe_expert_hidden_dim", None)
+        self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
+        self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
+        self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
+        self.moe_aux_loss = None
 
         # set attributes
-        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.g_encoder = (
+            G_Encoder(
+                config,
+                encoder_type=self.g_encoder_type,
+                moe_num_experts=self.moe_num_experts,
+                moe_top_k=self.moe_top_k,
+                moe_expert_hidden_dim=self.moe_expert_hidden_dim,
+                moe_shared_expert=self.moe_shared_expert,
+                moe_shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+            )
+            if g_enc else None
+        )
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
                                    hidden_dim=config.n_embd,
@@ -294,7 +365,16 @@ class GxE_ResidualTransformer(nn.Module):
         return x
     
     def forward(self, x):
-        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        self.moe_aux_loss = None
+        if self.g_encoder:
+            if self.use_moe_encoder:
+                g_enc, moe_loss = self.g_encoder(x["g_data"], return_moe_loss=True)
+                if moe_loss is not None:
+                    self.moe_aux_loss = moe_loss * self.moe_loss_weight
+            else:
+                g_enc = self.g_encoder(x["g_data"])
+        else:
+            g_enc = 0
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
         ld_enc = 0
         if self.ld_encoder:

@@ -78,6 +78,15 @@ def main():
 
     device, local_rank, rank, world_size = setup_ddp()
 
+    def _get_arg_or_env(attr, env_key, default, cast=None):
+        val = getattr(args, attr, None)
+        if val is None:
+            env_val = os.getenv(env_key)
+            if env_val is None or env_val == "":
+                return default
+            return cast(env_val) if cast is not None else env_val
+        return val
+
     # reproducibility 
     torch.manual_seed(args.seed + rank)
     random.seed(args.seed + rank)
@@ -127,12 +136,28 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout)
+    g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
+    moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
+    moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
+    moe_expert_hidden_dim = _get_arg_or_env("moe_expert_hidden_dim", "MOE_EXPERT_HIDDEN_DIM", None, int)
+    moe_shared_expert = _get_arg_or_env("moe_shared_expert", "MOE_SHARED_EXPERT", False, str2bool)
+    moe_shared_expert_hidden_dim = _get_arg_or_env("moe_shared_expert_hidden_dim", "MOE_SHARED_EXPERT_HIDDEN_DIM", None, int)
+    moe_loss_weight = _get_arg_or_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
+    moe_encoder_enabled = bool(args.g_enc) and str(g_encoder_type).lower() == "moe"
+
     if args.residual:
         model = GxE_ResidualTransformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
                                 moe=args.moe,
+                                g_encoder_type=g_encoder_type,
+                                moe_num_experts=moe_num_experts,
+                                moe_top_k=moe_top_k,
+                                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                                moe_shared_expert=moe_shared_expert,
+                                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                                moe_loss_weight=moe_loss_weight,
                                 residual=args.residual,
                                 config=config).to(device)
         model.detach_ymean_in_sum = args.detach_ymean
@@ -142,12 +167,20 @@ def main():
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
                                 moe=args.moe,
+                                g_encoder_type=g_encoder_type,
+                                moe_num_experts=moe_num_experts,
+                                moe_top_k=moe_top_k,
+                                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                                moe_shared_expert=moe_shared_expert,
+                                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                                moe_loss_weight=moe_loss_weight,
                                 config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
     model = DDP(model,
                 device_ids=[local_rank],
-                output_device=local_rank)
+                output_device=local_rank,
+                find_unused_parameters=moe_encoder_enabled)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_function = build_loss(args.loss, args.alpha)
@@ -210,7 +243,14 @@ def main():
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
-                             "lambda_resid": args.lambda_resid},
+                             "lambda_resid": args.lambda_resid,
+                             "g_encoder_type": g_encoder_type,
+                             "moe_num_experts": moe_num_experts,
+                             "moe_top_k": moe_top_k,
+                             "moe_expert_hidden_dim": moe_expert_hidden_dim,
+                             "moe_shared_expert": moe_shared_expert,
+                             "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
+                             "moe_loss_weight": moe_loss_weight},
                              allow_val_change=True)
         if args.loss == "both":
             # batch level            
@@ -227,6 +267,9 @@ def main():
         if args.residual:
             run.define_metric("aux_ymean_loss", step_metric="iter_num")
             run.define_metric("aux_resid_loss", step_metric="iter_num")
+        if moe_encoder_enabled:
+            run.define_metric("moe_lb", step_metric="iter_num")
+            run.define_metric("moe_lb_epoch", step_metric="epoch")
             run.define_metric("aux_ymean_mse_epoch", step_metric="epoch")
             run.define_metric("aux_resid_mse_epoch", step_metric="epoch")
 
@@ -264,6 +307,9 @@ def main():
             # non-residual: just compute main loss
             else:
                 loss = loss_function(logits, yb)
+            moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
+            if moe_aux_loss is not None:
+                loss = loss + moe_aux_loss.detach()
 
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")
@@ -273,6 +319,7 @@ def main():
             train_pcc_loss_val = None
             aux_ymean_val = None
             aux_resid_val = None
+            moe_aux_val = None
 
             with torch.no_grad():
                 if args.residual:
@@ -292,6 +339,8 @@ def main():
                         with torch.no_grad():
                             train_mse_val = mse_loss_log(logits, yb)
                             train_pcc_loss_val = pcc_loss_log(logits, yb)
+                if moe_aux_loss is not None:
+                    moe_aux_val = moe_aux_loss.detach()
 
             # apply learning rate schedule              
             lr = get_lr(iter_num,
@@ -321,6 +370,8 @@ def main():
                     log_payload["aux_ymean_loss"] = float(aux_ymean_val.item())
                 if aux_resid_val is not None:
                     log_payload["aux_resid_loss"] = float(aux_resid_val.item())
+                if moe_aux_val is not None:
+                    log_payload["moe_lb"] = float(moe_aux_val.item())
                 wandb.log(log_payload)
             iter_num += 1
             pbar.update(1)
@@ -336,6 +387,7 @@ def main():
                 pcc_acc = torch.tensor(0.0, device=device)
                 aux_ymean_acc = torch.tensor(0.0, device=device)
                 aux_resid_acc = torch.tensor(0.0, device=device)
+                moe_acc = torch.tensor(0.0, device=device)
                 n_batches = 0
 
                 for xb, yb in loader:
@@ -343,6 +395,7 @@ def main():
                     yb = _move_to_device(yb, device)
 
                     out = model(xb)
+                    moe_aux = getattr(model.module, "moe_aux_loss", None)
                     if args.residual:
                         # main loss on 'total'
                         total_loss_acc += loss_function(out['total'], yb['total'])
@@ -357,6 +410,10 @@ def main():
                         if args.loss == "both":
                             mse_acc += mse_loss_log(out, yb)
                             pcc_acc += pcc_loss_log(out, yb)
+                    if moe_aux is not None:
+                        moe_aux_detached = moe_aux.detach()
+                        total_loss_acc += moe_aux_detached
+                        moe_acc += moe_aux_detached
                     n_batches += 1
 
                 return {
@@ -365,6 +422,7 @@ def main():
                     "pcc_acc": pcc_acc,
                     "aux_ymean_acc": aux_ymean_acc,
                     "aux_resid_acc": aux_resid_acc,
+                    "moe_acc": moe_acc,
                     "n_batches": n_batches
                 }
                 
@@ -377,6 +435,7 @@ def main():
             train_stats["pcc_acc"], val_stats["pcc_acc"],
             train_stats["aux_ymean_acc"], train_stats["aux_resid_acc"],
             val_stats["aux_ymean_acc"], val_stats["aux_resid_acc"],
+            train_stats["moe_acc"], val_stats["moe_acc"],
         ]
         for t in to_reduce:
             dist.all_reduce(t)
@@ -395,6 +454,7 @@ def main():
         aux_train_resid = (train_stats["aux_resid_acc"] / n_train / world_size).item()
         aux_val_ymean = (val_stats["aux_ymean_acc"] / n_val / world_size).item()
         aux_val_resid = (val_stats["aux_resid_acc"] / n_val / world_size).item()
+        moe_val = (val_stats["moe_acc"] / n_val / world_size).item()
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
@@ -403,8 +463,10 @@ def main():
                 "train_loss_epoch": train_loss,
                 "epoch": epoch_num,
                 "aux_ymean_mse_epoch": aux_val_ymean,
-                "aux_resid_mse_epoch": aux_val_resid
+                "aux_resid_mse_epoch": aux_val_resid,
             }
+            if moe_encoder_enabled:
+                log_epoch_payload["moe_lb_epoch"] = moe_val
             if args.loss == "both":
                 log_epoch_payload.update({
                     "train_mse_epoch": train_mse,
@@ -449,6 +511,13 @@ def main():
                         "gxe_layers": args.gxe_layers,
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
+                        "g_encoder_type": g_encoder_type,
+                        "moe_num_experts": moe_num_experts,
+                        "moe_top_k": moe_top_k,
+                        "moe_expert_hidden_dim": moe_expert_hidden_dim,
+                        "moe_shared_expert": moe_shared_expert,
+                        "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
+                        "moe_loss_weight": moe_loss_weight,
                         "loss": args.loss,
                         "alpha": args.alpha,
                         "residual": args.residual,

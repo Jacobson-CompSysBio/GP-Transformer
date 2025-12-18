@@ -70,6 +70,15 @@ def main():
 
     device, local_rank, rank, world_size = setup_ddp()
 
+    def _get_arg_or_env(attr, env_key, default, cast=None):
+        val = getattr(args, attr, None)
+        if val is None:
+            env_val = os.getenv(env_key)
+            if env_val is None or env_val == "":
+                return default
+            return cast(env_val) if cast is not None else env_val
+        return val
+
     # reproducibility 
     set_seed(args.seed + rank)  # different seed for each rank
     g = torch.Generator()
@@ -120,11 +129,27 @@ def main():
                     n_embd=args.emb_size,
                     dropout=args.dropout,
                     n_env_fts=train_ds.n_env_fts)
+    g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
+    moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
+    moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
+    moe_expert_hidden_dim = _get_arg_or_env("moe_expert_hidden_dim", "MOE_EXPERT_HIDDEN_DIM", None, int)
+    moe_shared_expert = _get_arg_or_env("moe_shared_expert", "MOE_SHARED_EXPERT", False, str2bool)
+    moe_shared_expert_hidden_dim = _get_arg_or_env("moe_shared_expert_hidden_dim", "MOE_SHARED_EXPERT_HIDDEN_DIM", None, int)
+    moe_loss_weight = _get_arg_or_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
+    moe_encoder_enabled = bool(args.g_enc) and str(g_encoder_type).lower() == "moe"
+
     model = GxE_Transformer(g_enc=args.g_enc,
                             e_enc=args.e_enc,
                             ld_enc=args.ld_enc,
                             gxe_enc=args.gxe_enc,
                             moe=args.moe,
+                            g_encoder_type=g_encoder_type,
+                            moe_num_experts=moe_num_experts,
+                            moe_top_k=moe_top_k,
+                            moe_expert_hidden_dim=moe_expert_hidden_dim,
+                            moe_shared_expert=moe_shared_expert,
+                            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                            moe_loss_weight=moe_loss_weight,
                             config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
@@ -189,12 +214,23 @@ def main():
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
-                             "loss_weights": args.loss_weights},
+                             "loss_weights": args.loss_weights,
+                             "g_encoder_type": g_encoder_type,
+                             "moe_num_experts": moe_num_experts,
+                             "moe_top_k": moe_top_k,
+                             "moe_expert_hidden_dim": moe_expert_hidden_dim,
+                             "moe_shared_expert": moe_shared_expert,
+                             "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
+                             "moe_loss_weight": moe_loss_weight},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if moe_encoder_enabled:
+            run.define_metric("train_loss/moe_lb", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/moe_lb", step_metric="epoch")
+            run.define_metric("val_loss/moe_lb", step_metric="epoch")
 
     # initialize training states
     best_val_loss, last_improved = float("inf"), 0
@@ -221,6 +257,12 @@ def main():
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 preds = model(xb)
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+                moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
+                if moe_aux_loss is not None:
+                    # Detach to avoid a second autograd edge on the gate params (DDP mark-ready error)
+                    moe_aux_loss_detached = moe_aux_loss.detach()
+                    loss_total = loss_total + moe_aux_loss_detached
+                    loss_parts["moe_lb"] = float(moe_aux_loss_detached.item())
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
@@ -265,7 +307,10 @@ def main():
 
                 # accumulate as tensors to allow dist.all_reduce
                 total_loss = torch.tensor(0.0, device=device)
-                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_function.names}
+                loss_names = list(loss_function.names)
+                if moe_encoder_enabled:
+                    loss_names.append("moe_lb")
+                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_names}
                 n_batches = torch.tensor(0.0, device=device) 
 
                 for i, (xb, yb) in enumerate(loader):
@@ -281,9 +326,13 @@ def main():
                     # fwd
                     preds = model(xb)
                     ltot, lparts = loss_function(preds, y_true, env_id=env_id)
+                    moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
+                    if moe_aux_loss is not None:
+                        ltot = ltot + moe_aux_loss.detach()
+                        lparts["moe_lb"] = float(moe_aux_loss.detach().item())
                     total_loss += ltot
                     for k in parts_acc:
-                        parts_acc[k] += torch.tensor(lparts[k], device=device)
+                        parts_acc[k] += torch.tensor(lparts.get(k, 0.0), device=device)
                     n_batches += 1.0
 
                 # allreduce w/ sum
@@ -347,6 +396,7 @@ def main():
                         "e_enc": args.e_enc,
                         "ld_enc": args.ld_enc,
                         "gxe_enc": args.gxe_enc,
+                        "g_encoder_type": g_encoder_type,
                         "block_size": config.block_size,
                         "n_env_fts": config.n_env_fts,
                         "g_layers": args.g_layers,
@@ -355,6 +405,12 @@ def main():
                         "gxe_layers": args.gxe_layers,
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
+                        "moe_num_experts": moe_num_experts,
+                        "moe_top_k": moe_top_k,
+                        "moe_expert_hidden_dim": moe_expert_hidden_dim,
+                        "moe_shared_expert": moe_shared_expert,
+                        "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
+                        "moe_loss_weight": moe_loss_weight,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,

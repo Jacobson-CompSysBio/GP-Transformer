@@ -231,6 +231,13 @@ def load_model(device: torch.device,
     loss = config.get("loss", args.loss)
     loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)
+    g_encoder_type = config.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
+    moe_num_experts = config.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
+    moe_top_k = config.get("moe_top_k", getattr(args, "moe_top_k", 2))
+    moe_expert_hidden_dim = config.get("moe_expert_hidden_dim", getattr(args, "moe_expert_hidden_dim", None))
+    moe_shared_expert = config.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
+    moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
+    moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
 
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
@@ -244,12 +251,27 @@ def load_model(device: torch.device,
                     n_head=n_head,
                     n_embd=n_embd,
                     n_env_fts=n_env_fts)
+    # stash MoE settings so downstream components can read from config if needed
+    config.g_encoder_type = g_encoder_type
+    config.moe_num_experts = moe_num_experts
+    config.moe_top_k = moe_top_k
+    config.moe_expert_hidden_dim = moe_expert_hidden_dim
+    config.moe_shared_expert = moe_shared_expert
+    config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
+    config.moe_loss_weight = moe_loss_weight
     if args.residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,
                                         ld_enc=ld_enc,
                                         gxe_enc=gxe_enc,
                                         moe=moe,
+                                        g_encoder_type=g_encoder_type,
+                                        moe_num_experts=moe_num_experts,
+                                        moe_top_k=moe_top_k,
+                                        moe_expert_hidden_dim=moe_expert_hidden_dim,
+                                        moe_shared_expert=moe_shared_expert,
+                                        moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                                        moe_loss_weight=moe_loss_weight,
                                         residual=residual,
                                         config=config).to(device)
         model.detach_ymean_in_sum = args.detach_ymean
@@ -259,6 +281,13 @@ def load_model(device: torch.device,
                                 ld_enc=ld_enc,
                                 gxe_enc=gxe_enc,
                                 moe=moe,
+                                g_encoder_type=g_encoder_type,
+                                moe_num_experts=moe_num_experts,
+                                moe_top_k=moe_top_k,
+                                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                                moe_shared_expert=moe_shared_expert,
+                                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                                moe_loss_weight=moe_loss_weight,
                                 config=config).to(device)
     model.load_state_dict(state, strict=False)
     model.eval()
