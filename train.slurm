@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J newdata
-#SBATCH -N 4 
+#SBATCH -N 8 
 #SBATCH -t 06:00:00
 #SBATCH -p extended
 ##SBATCH -q debug
@@ -42,14 +42,14 @@ export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
 
-export G_LAYERS=1
+export G_LAYERS=2
 export LD_LAYERS=2
-export MLP_LAYERS=1
+export MLP_LAYERS=2
 export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
-export SCALE_TARGETS=False
+export SCALE_TARGETS=True
 
 export LOSS="envpcc+envmse" # + separated list of losses
 export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
