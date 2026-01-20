@@ -138,19 +138,22 @@ def main():
     moe_loss_weight = _get_arg_or_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
     moe_encoder_enabled = bool(args.g_enc) and str(g_encoder_type).lower() == "moe"
 
-    model = GxE_Transformer(g_enc=args.g_enc,
-                            e_enc=args.e_enc,
-                            ld_enc=args.ld_enc,
-                            gxe_enc=args.gxe_enc,
-                            moe=args.moe,
-                            g_encoder_type=g_encoder_type,
-                            moe_num_experts=moe_num_experts,
-                            moe_top_k=moe_top_k,
-                            moe_expert_hidden_dim=moe_expert_hidden_dim,
-                            moe_shared_expert=moe_shared_expert,
-                            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
-                            moe_loss_weight=moe_loss_weight,
-                            config=config).to(device)
+    if args.full_transformer:
+        model = FullTransformer(config).to(device)
+    else:
+        model = GxE_Transformer(g_enc=args.g_enc,
+                                e_enc=args.e_enc,
+                                ld_enc=args.ld_enc,
+                                gxe_enc=args.gxe_enc,
+                                moe=args.moe,
+                                g_encoder_type=g_encoder_type,
+                                moe_num_experts=moe_num_experts,
+                                moe_top_k=moe_top_k,
+                                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                                moe_shared_expert=moe_shared_expert,
+                                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                                moe_loss_weight=moe_loss_weight,
+                                config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
     model = DDP(model,
@@ -221,7 +224,8 @@ def main():
                              "moe_expert_hidden_dim": moe_expert_hidden_dim,
                              "moe_shared_expert": moe_shared_expert,
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
-                             "moe_loss_weight": moe_loss_weight},
+                             "moe_loss_weight": moe_loss_weight,
+                             "full_transformer": args.full_transformer},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -397,6 +401,7 @@ def main():
                         "ld_enc": args.ld_enc,
                         "gxe_enc": args.gxe_enc,
                         "g_encoder_type": g_encoder_type,
+                        "full_transformer": args.full_transformer,
                         "block_size": config.block_size,
                         "n_env_fts": config.n_env_fts,
                         "g_layers": args.g_layers,

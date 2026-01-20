@@ -12,6 +12,60 @@ from models.mlp import *
 from models.transformer import * 
 
 # ----------------------------------------------------------------
+# Full transformer that treats markers + env covariates as tokens
+class FullTransformer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        # tokenizers
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
+        # project each scalar env feature to a token embedding
+        self.e_proj = nn.Linear(1, config.n_embd)
+
+        # positional encoding for combined marker + env + cls tokens
+        max_len = config.block_size + config.n_env_fts + 1
+        class _PE(nn.Module):
+            def __init__(self, n_embd, max_len, dropout):
+                super().__init__()
+                pe = torch.zeros(max_len, n_embd)
+                position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+                div_term = torch.exp(torch.arange(0, n_embd, 2).float() * (-math.log(10_000.0) / n_embd))
+                pe[:, 0::2] = torch.sin(position * div_term)
+                pe[:, 1::2] = torch.cos(position * div_term)
+                pe = pe.unsqueeze(0)
+                self.register_buffer('pe', pe, persistent=False)
+                self.dropout = nn.Dropout(dropout)
+            def forward(self, x):
+                x = x + self.pe[:, :x.shape[1], :].to(x.dtype)
+                return self.dropout(x)
+        self.wpe = _PE(config.n_embd, max_len, config.dropout)
+
+        # transformer body
+        dpr = [x.item() for x in torch.linspace(0, config.dropout * 0.5, config.n_gxe_layer)]
+        self.blocks = nn.ModuleList([TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_gxe_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.head = nn.Linear(config.n_embd, 1)
+        nn.init.normal_(self.head.weight, std=0.01)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, x):
+        g = x["g_data"]            # (B, Tm)
+        e = x["e_data"]            # (B, Feats)
+        B, Tm = g.shape
+        # embeddings
+        g_tok = self.g_embed(g)                        # (B, Tm, C)
+        e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
+        tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
+        tokens = self.wpe(tokens)
+        for blk in self.blocks:
+            tokens = blk(tokens)
+        tokens = self.ln_f(tokens)
+        return self.head(tokens[:, 0])
+
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
 

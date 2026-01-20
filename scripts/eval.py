@@ -231,6 +231,7 @@ def load_model(device: torch.device,
     loss = config.get("loss", args.loss)
     loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)
+    full_transformer = config.get("full_transformer", getattr(args, "full_transformer", False))
     g_encoder_type = config.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
     moe_num_experts = config.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
     moe_top_k = config.get("moe_top_k", getattr(args, "moe_top_k", 2))
@@ -259,7 +260,9 @@ def load_model(device: torch.device,
     config.moe_shared_expert = moe_shared_expert
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
-    if args.residual:
+    if full_transformer:
+        model = FullTransformer(config).to(device)
+    elif args.residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,
                                         ld_enc=ld_enc,

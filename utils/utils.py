@@ -34,6 +34,7 @@ def parse_args():
     p.add_argument("--ld_enc", type=str2bool, default=True)
     p.add_argument("--gxe_enc", type=str, default=True)
     p.add_argument("--moe", type=str2bool, default=True)
+    p.add_argument("--full_transformer", type=str2bool, default=False)
     p.add_argument("--residual", type=str2bool, default=False)
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
@@ -78,6 +79,7 @@ def make_run_name(args) -> str:
     g = "g+" if args.g_enc else ""
     e = "e+" if args.e_enc else ""
     ld = "ld+" if args.ld_enc else ""
+    full = "fulltf+" if getattr(args, "full_transformer", False) else ""
     moe = "moe+" if args.moe else ""
     res = "res+" if args.residual else ""
     
@@ -86,7 +88,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (g + e + ld + gxe + moe + res).rstrip("+")
+    model_type = (full + g + e + ld + gxe + moe + res).rstrip("+")
 
     # loss tag
     terms = [t.strip().lower() for t in args.loss.split("+")]
