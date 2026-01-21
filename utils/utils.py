@@ -43,6 +43,7 @@ def parse_args():
     p.add_argument("--moe_shared_expert_hidden_dim", type=int, default=None)
     p.add_argument("--moe_loss_weight", type=float, default=None)
     p.add_argument("--full_transformer", type=str2bool, default=False)
+    p.add_argument("--full_tf_mlp_type", type=str, default=None)
     p.add_argument("--residual", type=str2bool, default=False)
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
@@ -115,8 +116,18 @@ def make_run_name(args) -> str:
     else:
         g_encoder_type = "moe" if g_encoder_type else "dense"
 
+    full_tf_mlp_type = _get_arg_env("full_tf_mlp_type", "FULL_TF_MLP_TYPE", None, str)
+    if full_transformer:
+        if full_tf_mlp_type is None:
+            full_tf_mlp_type = g_encoder_type
+        if isinstance(full_tf_mlp_type, str):
+            full_tf_mlp_type = full_tf_mlp_type.lower()
+        else:
+            full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+
+    mlp_type_for_tag = full_tf_mlp_type if full_transformer else g_encoder_type
     moe_tag = ""
-    if g_encoder_type == "moe":
+    if mlp_type_for_tag == "moe":
         moe_num_experts = _get_arg_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
         moe_top_k = _get_arg_env("moe_top_k", "MOE_TOP_K", 2, int)
         moe_expert_hidden_dim = _get_arg_env("moe_expert_hidden_dim", "MOE_EXPERT_HIDDEN_DIM", None, int)

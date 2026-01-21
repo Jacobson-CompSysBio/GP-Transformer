@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Optional
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -14,9 +15,30 @@ from models.transformer import *
 # ----------------------------------------------------------------
 # Full transformer that treats markers + env covariates as tokens
 class FullTransformer(nn.Module):
-    def __init__(self, config):
+    def __init__(self,
+                 config,
+                 mlp_type: str = "dense",
+                 moe_num_experts: int = 4,
+                 moe_top_k: int = 2,
+                 moe_expert_hidden_dim: Optional[int] = None,
+                 moe_shared_expert: bool = False,
+                 moe_shared_expert_hidden_dim: Optional[int] = None,
+                 moe_loss_weight: float = 0.01):
         super().__init__()
         self.config = config
+        if isinstance(mlp_type, str):
+            self.mlp_type = mlp_type.lower()
+        else:
+            self.mlp_type = "moe" if mlp_type else "dense"
+        if self.mlp_type not in {"dense", "moe"}:
+            raise ValueError(f"mlp_type must be 'dense' or 'moe' (got {mlp_type})")
+        self.moe_num_experts = moe_num_experts
+        self.moe_top_k = moe_top_k
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim
+        self.moe_shared_expert = moe_shared_expert
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
+        self.moe_loss_weight = moe_loss_weight
+        self.moe_aux_loss = None
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -45,7 +67,21 @@ class FullTransformer(nn.Module):
 
         # transformer body
         dpr = [x.item() for x in torch.linspace(0, config.dropout * 0.5, config.n_gxe_layer)]
-        self.blocks = nn.ModuleList([TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_gxe_layer)])
+        if self.mlp_type == "moe":
+            def build_block(i):
+                return TransformerMoEBlock(
+                    config,
+                    num_experts=self.moe_num_experts,
+                    k=self.moe_top_k,
+                    expert_hidden_dim=self.moe_expert_hidden_dim,
+                    shared_expert=self.moe_shared_expert,
+                    shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+                    drop_path=dpr[i],
+                )
+        else:
+            def build_block(i):
+                return TransformerBlock(config, drop_path=dpr[i])
+        self.blocks = nn.ModuleList([build_block(i) for i in range(config.n_gxe_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
@@ -61,8 +97,23 @@ class FullTransformer(nn.Module):
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
-        for blk in self.blocks:
-            tokens = blk(tokens)
+        self.moe_aux_loss = None
+        if self.mlp_type == "moe":
+            moe_loss_sum = None
+            moe_loss_count = 0
+            if self.moe_loss_weight and self.moe_loss_weight != 0:
+                from utils.loss import moe_load_balance_loss
+            for blk in self.blocks:
+                tokens, gate_weights = blk(tokens)
+                if gate_weights is not None and self.moe_loss_weight and self.moe_loss_weight != 0:
+                    loss = moe_load_balance_loss(gate_weights, self.moe_num_experts)
+                    moe_loss_sum = loss if moe_loss_sum is None else (moe_loss_sum + loss)
+                    moe_loss_count += 1
+            if moe_loss_count > 0 and self.moe_loss_weight and self.moe_loss_weight != 0:
+                self.moe_aux_loss = (moe_loss_sum / moe_loss_count) * self.moe_loss_weight
+        else:
+            for blk in self.blocks:
+                tokens = blk(tokens)
         tokens = self.ln_f(tokens)
         return self.head(tokens[:, 0])
 

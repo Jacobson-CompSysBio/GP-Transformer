@@ -136,10 +136,29 @@ def main():
     moe_shared_expert = _get_arg_or_env("moe_shared_expert", "MOE_SHARED_EXPERT", False, str2bool)
     moe_shared_expert_hidden_dim = _get_arg_or_env("moe_shared_expert_hidden_dim", "MOE_SHARED_EXPERT_HIDDEN_DIM", None, int)
     moe_loss_weight = _get_arg_or_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
-    moe_encoder_enabled = bool(args.g_enc) and str(g_encoder_type).lower() == "moe"
+    full_tf_mlp_type = _get_arg_or_env("full_tf_mlp_type", "FULL_TF_MLP_TYPE", None, str)
+    if full_tf_mlp_type is None:
+        full_tf_mlp_type = g_encoder_type
+    if isinstance(full_tf_mlp_type, str):
+        full_tf_mlp_type = full_tf_mlp_type.lower()
+    else:
+        full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+    moe_encoder_enabled = (
+        (args.full_transformer and full_tf_mlp_type == "moe")
+        or (bool(args.g_enc) and str(g_encoder_type).lower() == "moe")
+    )
 
     if args.full_transformer:
-        model = FullTransformer(config).to(device)
+        model = FullTransformer(
+            config,
+            mlp_type=full_tf_mlp_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+        ).to(device)
     else:
         model = GxE_Transformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
@@ -225,7 +244,8 @@ def main():
                              "moe_shared_expert": moe_shared_expert,
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                              "moe_loss_weight": moe_loss_weight,
-                             "full_transformer": args.full_transformer},
+                             "full_transformer": args.full_transformer,
+                             "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -402,6 +422,7 @@ def main():
                         "gxe_enc": args.gxe_enc,
                         "g_encoder_type": g_encoder_type,
                         "full_transformer": args.full_transformer,
+                        "full_tf_mlp_type": full_tf_mlp_type,
                         "block_size": config.block_size,
                         "n_env_fts": config.n_env_fts,
                         "g_layers": args.g_layers,

@@ -239,6 +239,13 @@ def load_model(device: torch.device,
     moe_shared_expert = config.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
     moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
     moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
+    full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
+    if full_tf_mlp_type is None:
+        full_tf_mlp_type = g_encoder_type
+    if isinstance(full_tf_mlp_type, str):
+        full_tf_mlp_type = full_tf_mlp_type.lower()
+    else:
+        full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
 
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
@@ -260,8 +267,18 @@ def load_model(device: torch.device,
     config.moe_shared_expert = moe_shared_expert
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
+    config.full_tf_mlp_type = full_tf_mlp_type
     if full_transformer:
-        model = FullTransformer(config).to(device)
+        model = FullTransformer(
+            config,
+            mlp_type=full_tf_mlp_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+        ).to(device)
     elif args.residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,
