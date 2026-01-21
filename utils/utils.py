@@ -93,19 +93,20 @@ def make_run_name(args) -> str:
             return cast(env_val) if cast is not None else env_val
         return val
     
-    g = "g+" if args.g_enc else ""
-    e = "e+" if args.e_enc else ""
-    ld = "ld+" if args.ld_enc else ""
-    full = "fulltf+" if getattr(args, "full_transformer", False) else ""
-    moe = "moe+" if args.moe else ""
+    full_transformer = bool(getattr(args, "full_transformer", False))
+    g = "g+" if args.g_enc and not full_transformer else ""
+    e = "e+" if args.e_enc and not full_transformer else ""
+    ld = "ld+" if args.ld_enc and not full_transformer else ""
+    full = "fulltf+" if full_transformer else ""
+    wg = "wg+" if args.moe and not full_transformer else ""
     res = "res+" if args.residual else ""
     
-    if args.gxe_enc in ["tf", "mlp", "cnn"]:
+    if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + moe + res).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res).rstrip("+")
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
@@ -134,8 +135,6 @@ def make_run_name(args) -> str:
         moe_tag += f"_lb{short(moe_loss_weight)}"
 
     full_tag = ""
-    if getattr(args, "full_transformer", False):
-        full_tag = "fulltok"
 
     # loss tag
     terms = [t.strip().lower() for t in args.loss.split("+")]

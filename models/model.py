@@ -66,6 +66,10 @@ class FullTransformer(nn.Module):
         tokens = self.ln_f(tokens)
         return self.head(tokens[:, 0])
 
+    def print_trainable_parameters(self):
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,}")
+
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
 
