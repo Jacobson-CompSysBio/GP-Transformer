@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Optional
+
+from models.moe import MoELayer
 
 # ----------------------------------------------------------------
 # positional encoding (sine/cosine)
@@ -119,15 +122,69 @@ class TransformerBlock(nn.Module):
         x = x + self.dropout(self.mlp(self.ln_2(x)))
         return x
 
+class TransformerMoEBlock(nn.Module):
+
+    def __init__(self,
+                 config,
+                 num_experts: int,
+                 k: int = 2,
+                 expert_hidden_dim: Optional[int] = None,
+                 shared_expert: bool = False,
+                 shared_expert_hidden_dim: Optional[int] = None,
+                 drop_path: float = 0.0):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = SelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.moe = MoELayer(
+            input_dim=config.n_embd,
+            output_dim=config.n_embd,
+            num_experts=num_experts,
+            k=k,
+            expert_hidden_dim=expert_hidden_dim,
+            shared_expert=shared_expert,
+            shared_expert_hidden_dim=shared_expert_hidden_dim,
+        )
+        self.dropout = nn.Dropout(config.dropout)
+        self.drop_path = drop_path  # stochastic depth rate
+
+    def forward(self, x):
+        # stochastic depth: randomly skip this block during training
+        if self.training and self.drop_path > 0.0:
+            if torch.rand(1).item() < self.drop_path:
+                return x, None  # skip entire block
+
+        x = x + self.dropout(self.attn(self.ln_1(x)))
+        moe_out, gate_weights = self.moe(self.ln_2(x))
+        x = x + self.dropout(moe_out)
+        return x, gate_weights
+
 # create transformer encoder for genotype data
 class G_Encoder(nn.Module):
 
-    def __init__(self, config
-                 ):
+    def __init__(self,
+                 config,
+                 encoder_type: str = "dense",
+                 moe_num_experts: int = 4,
+                 moe_top_k: int = 2,
+                 moe_expert_hidden_dim: Optional[int] = None,
+                 moe_shared_expert: bool = False,
+                 moe_shared_expert_hidden_dim: Optional[int] = None):
         super().__init__()
 
         # config
         self.config = config
+        if isinstance(encoder_type, str):
+            self.encoder_type = encoder_type.lower()
+        else:
+            self.encoder_type = "moe" if encoder_type else "dense"
+        if self.encoder_type not in {"dense", "moe"}:
+            raise ValueError(f"encoder_type must be 'dense' or 'moe' (got {encoder_type})")
+        self.moe_num_experts = moe_num_experts
+        self.moe_top_k = moe_top_k
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim
+        self.moe_shared_expert = moe_shared_expert
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
 
         # learned CLS embedding (summary token)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -138,12 +195,27 @@ class G_Encoder(nn.Module):
         drop_path_rate = config.dropout * 0.5
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, config.n_g_layer)]
         
+        if self.encoder_type == "moe":
+            def build_block(i):
+                return TransformerMoEBlock(
+                    config,
+                    num_experts=self.moe_num_experts,
+                    k=self.moe_top_k,
+                    expert_hidden_dim=self.moe_expert_hidden_dim,
+                    shared_expert=self.moe_shared_expert,
+                    shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+                    drop_path=dpr[i],
+                )
+        else:
+            def build_block(i):
+                return TransformerBlock(config, drop_path=dpr[i])
+
         self.transformer = nn.ModuleDict(
             dict(
-                wte = nn.Embedding(config.vocab_size, config.n_embd),
-                wpe = PositionalEncoding(config),
-                h = nn.ModuleList([TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_g_layer)]),
-                ln_f = nn.LayerNorm(config.n_embd)
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wpe=PositionalEncoding(config),
+                h=nn.ModuleList([build_block(i) for i in range(config.n_g_layer)]),
+                ln_f=nn.LayerNorm(config.n_embd),
             )
         )
 
@@ -154,7 +226,7 @@ class G_Encoder(nn.Module):
         self.output_dim = config.n_embd
 
     # forward pass
-    def forward(self, idx):
+    def forward(self, idx, return_moe_loss: bool = False):
 
         # split idx into batch dim and sequence dim
         B, T = idx.shape
@@ -168,13 +240,33 @@ class G_Encoder(nn.Module):
         x = torch.cat([cls, x], dim=1)  # (B, T+1, C)
 
         # forward through blocks
-        for block in self.transformer.h:
-            x = block(x)
+        if self.encoder_type == "moe":
+            moe_loss_sum = None
+            moe_loss_count = 0
+            if return_moe_loss:
+                from utils.loss import moe_load_balance_loss
+            for block in self.transformer.h:
+                x, gate_weights = block(x)
+                if return_moe_loss and gate_weights is not None:
+                    loss = moe_load_balance_loss(gate_weights, self.moe_num_experts)
+                    moe_loss_sum = loss if moe_loss_sum is None else (moe_loss_sum + loss)
+                    moe_loss_count += 1
+        else:
+            for block in self.transformer.h:
+                x = block(x)
 
         # forward through final layer norm
         x = self.transformer.ln_f(x)
 
         # output
+        if return_moe_loss and self.encoder_type == "moe":
+            if moe_loss_count > 0:
+                moe_loss = moe_loss_sum / moe_loss_count
+            else:
+                moe_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+            return x, moe_loss
+        if return_moe_loss:
+            return x, None
         return x
 
     def _init_weights(self, m):

@@ -28,6 +28,11 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export RES=True
+export G_ENCODER_TYPE=dense  # options: "dense", "moe"
+export MOE_NUM_EXPERTS=4
+export MOE_TOP_K=2
+export MOE_SHARED_EXPERT=False            # set to True to enable shared expert
+export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
 export GBS=2048
@@ -49,6 +54,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
+export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
+export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export LOSS="both"
 export ALPHA=0.5 # only used if LOSS is "both"
 export SCALE_TARGETS=True

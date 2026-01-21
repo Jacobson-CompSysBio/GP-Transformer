@@ -24,6 +24,39 @@ def soft_rank_1d(x: torch.Tensor, rs: float = 1.0):
     r2 = soft_rank(x2, regularization_strength=rs)
     return r2.squeeze(0)
 
+### load-balancing loss for MoE ###
+def moe_load_balance_loss(gate_weights: torch.Tensor, num_experts: int):
+    """
+    Calculates load balancing loss; makes sure tokens are evenly distributed across experts.
+
+    Args:
+        gate_weights: Tensor of shape [batch_size * seq_len, num_experts]
+        num_experts: Total number of experts
+    
+    Returns:
+        scalar loss tensor
+    """
+
+    # gate weights is the output of the gate network (before top-k)
+    # need average routing probability per expert
+    # and fraction of tokens routed to each expert
+
+    num_tokens = gate_weights.shape[0]
+
+    # calculate fraction of tokens routed to each expert (f_i)
+    # use weights as a proxy for assignment count
+    # (sum of weights for each expert across all tokens)
+    tokens_per_expert = gate_weights.sum(dim=0) # shape: [num_experts]
+    f_i = tokens_per_expert / num_tokens 
+
+    # calculate average routing probability per expert (P_i)
+    # this is mean of the gate weights for each expert
+    P_i = torch.mean(gate_weights, dim=0) # shape: num_experts
+
+    # calculate the loss: alpha * num_experts * sum(f_i * P_i)
+    loss = num_experts * torch.sum(f_i * P_i)
+    return loss
+
 ### per-env losses ###
 def envwise_spearman(pred, target, env_id):
     """

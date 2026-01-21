@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Optional
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -12,6 +13,114 @@ from models.mlp import *
 from models.transformer import * 
 
 # ----------------------------------------------------------------
+# Full transformer that treats markers + env covariates as tokens
+class FullTransformer(nn.Module):
+    def __init__(self,
+                 config,
+                 mlp_type: str = "dense",
+                 moe_num_experts: int = 4,
+                 moe_top_k: int = 2,
+                 moe_expert_hidden_dim: Optional[int] = None,
+                 moe_shared_expert: bool = False,
+                 moe_shared_expert_hidden_dim: Optional[int] = None,
+                 moe_loss_weight: float = 0.01):
+        super().__init__()
+        self.config = config
+        if isinstance(mlp_type, str):
+            self.mlp_type = mlp_type.lower()
+        else:
+            self.mlp_type = "moe" if mlp_type else "dense"
+        if self.mlp_type not in {"dense", "moe"}:
+            raise ValueError(f"mlp_type must be 'dense' or 'moe' (got {mlp_type})")
+        self.moe_num_experts = moe_num_experts
+        self.moe_top_k = moe_top_k
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim
+        self.moe_shared_expert = moe_shared_expert
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
+        self.moe_loss_weight = moe_loss_weight
+        self.moe_aux_loss = None
+
+        # tokenizers
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
+        # project each scalar env feature to a token embedding
+        self.e_proj = nn.Linear(1, config.n_embd)
+
+        # positional encoding for combined marker + env + cls tokens
+        max_len = config.block_size + config.n_env_fts + 1
+        class _PE(nn.Module):
+            def __init__(self, n_embd, max_len, dropout):
+                super().__init__()
+                pe = torch.zeros(max_len, n_embd)
+                position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+                div_term = torch.exp(torch.arange(0, n_embd, 2).float() * (-math.log(10_000.0) / n_embd))
+                pe[:, 0::2] = torch.sin(position * div_term)
+                pe[:, 1::2] = torch.cos(position * div_term)
+                pe = pe.unsqueeze(0)
+                self.register_buffer('pe', pe, persistent=False)
+                self.dropout = nn.Dropout(dropout)
+            def forward(self, x):
+                x = x + self.pe[:, :x.shape[1], :].to(x.dtype)
+                return self.dropout(x)
+        self.wpe = _PE(config.n_embd, max_len, config.dropout)
+
+        # transformer body
+        dpr = [x.item() for x in torch.linspace(0, config.dropout * 0.5, config.n_gxe_layer)]
+        if self.mlp_type == "moe":
+            def build_block(i):
+                return TransformerMoEBlock(
+                    config,
+                    num_experts=self.moe_num_experts,
+                    k=self.moe_top_k,
+                    expert_hidden_dim=self.moe_expert_hidden_dim,
+                    shared_expert=self.moe_shared_expert,
+                    shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+                    drop_path=dpr[i],
+                )
+        else:
+            def build_block(i):
+                return TransformerBlock(config, drop_path=dpr[i])
+        self.blocks = nn.ModuleList([build_block(i) for i in range(config.n_gxe_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.head = nn.Linear(config.n_embd, 1)
+        nn.init.normal_(self.head.weight, std=0.01)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, x):
+        g = x["g_data"]            # (B, Tm)
+        e = x["e_data"]            # (B, Feats)
+        B, Tm = g.shape
+        # embeddings
+        g_tok = self.g_embed(g)                        # (B, Tm, C)
+        e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
+        tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
+        tokens = self.wpe(tokens)
+        self.moe_aux_loss = None
+        if self.mlp_type == "moe":
+            moe_loss_sum = None
+            moe_loss_count = 0
+            if self.moe_loss_weight and self.moe_loss_weight != 0:
+                from utils.loss import moe_load_balance_loss
+            for blk in self.blocks:
+                tokens, gate_weights = blk(tokens)
+                if gate_weights is not None and self.moe_loss_weight and self.moe_loss_weight != 0:
+                    loss = moe_load_balance_loss(gate_weights, self.moe_num_experts)
+                    moe_loss_sum = loss if moe_loss_sum is None else (moe_loss_sum + loss)
+                    moe_loss_count += 1
+            if moe_loss_count > 0 and self.moe_loss_weight and self.moe_loss_weight != 0:
+                self.moe_aux_loss = (moe_loss_sum / moe_loss_count) * self.moe_loss_weight
+        else:
+            for blk in self.blocks:
+                tokens = blk(tokens)
+        tokens = self.ln_f(tokens)
+        return self.head(tokens[:, 0])
+
+    def print_trainable_parameters(self):
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,}")
+
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
 
@@ -24,14 +133,45 @@ class GxE_Transformer(nn.Module):
                  ld_enc: bool = True,
                  gxe_enc: str = "tf",
                  moe: bool = True,
+                 g_encoder_type: str = None,
+                 moe_num_experts: int = None,
+                 moe_top_k: int = None,
+                 moe_expert_hidden_dim: int = None,
+                 moe_shared_expert: bool = None,
+                 moe_shared_expert_hidden_dim: int = None,
+                 moe_loss_weight: float = None,
                  config = None
                  ):
         super().__init__()
 
         self.config = config
+        self.g_encoder_type = g_encoder_type if g_encoder_type is not None else getattr(config, "g_encoder_type", "dense")
+        if isinstance(self.g_encoder_type, str):
+            self.g_encoder_type = self.g_encoder_type.lower()
+        else:
+            self.g_encoder_type = "moe" if self.g_encoder_type else "dense"
+        self.moe_num_experts = moe_num_experts if moe_num_experts is not None else getattr(config, "moe_num_experts", 4)
+        self.moe_top_k = moe_top_k if moe_top_k is not None else getattr(config, "moe_top_k", 2)
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim if moe_expert_hidden_dim is not None else getattr(config, "moe_expert_hidden_dim", None)
+        self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
+        self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
+        self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
+        self.moe_aux_loss = None
 
         # set attributes
-        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.g_encoder = (
+            G_Encoder(
+                config,
+                encoder_type=self.g_encoder_type,
+                moe_num_experts=self.moe_num_experts,
+                moe_top_k=self.moe_top_k,
+                moe_expert_hidden_dim=self.moe_expert_hidden_dim,
+                moe_shared_expert=self.moe_shared_expert,
+                moe_shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+            )
+            if g_enc else None
+        )
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
                                    hidden_dim=config.n_embd,
@@ -156,7 +296,16 @@ class GxE_Transformer(nn.Module):
         return x
     
     def forward(self, x):
-        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        self.moe_aux_loss = None
+        if self.g_encoder:
+            if self.use_moe_encoder:
+                g_enc, moe_loss = self.g_encoder(x["g_data"], return_moe_loss=True)
+                if moe_loss is not None:
+                    self.moe_aux_loss = moe_loss * self.moe_loss_weight
+            else:
+                g_enc = self.g_encoder(x["g_data"])
+        else:
+            g_enc = 0
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
         ld_enc = 0
         if self.ld_encoder:
@@ -201,6 +350,13 @@ class GxE_ResidualTransformer(nn.Module):
                  gxe_enc: str = "tf",
                  moe: bool = True,
                  residual: bool = False,
+                 g_encoder_type: str = None,
+                 moe_num_experts: int = None,
+                 moe_top_k: int = None,
+                 moe_expert_hidden_dim: int = None,
+                 moe_shared_expert: bool = None,
+                 moe_shared_expert_hidden_dim: int = None,
+                 moe_loss_weight: float = None,
                  config = None
                  ):
         super().__init__()
@@ -208,9 +364,33 @@ class GxE_ResidualTransformer(nn.Module):
         self.config = config
         self.residual = residual
         self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
+        self.g_encoder_type = g_encoder_type if g_encoder_type is not None else getattr(config, "g_encoder_type", "dense")
+        if isinstance(self.g_encoder_type, str):
+            self.g_encoder_type = self.g_encoder_type.lower()
+        else:
+            self.g_encoder_type = "moe" if self.g_encoder_type else "dense"
+        self.moe_num_experts = moe_num_experts if moe_num_experts is not None else getattr(config, "moe_num_experts", 4)
+        self.moe_top_k = moe_top_k if moe_top_k is not None else getattr(config, "moe_top_k", 2)
+        self.moe_expert_hidden_dim = moe_expert_hidden_dim if moe_expert_hidden_dim is not None else getattr(config, "moe_expert_hidden_dim", None)
+        self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
+        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
+        self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
+        self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
+        self.moe_aux_loss = None
 
         # set attributes
-        self.g_encoder = G_Encoder(config) if g_enc else None
+        self.g_encoder = (
+            G_Encoder(
+                config,
+                encoder_type=self.g_encoder_type,
+                moe_num_experts=self.moe_num_experts,
+                moe_top_k=self.moe_top_k,
+                moe_expert_hidden_dim=self.moe_expert_hidden_dim,
+                moe_shared_expert=self.moe_shared_expert,
+                moe_shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
+            )
+            if g_enc else None
+        )
         self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
                                    output_dim=config.n_embd,
                                    hidden_dim=config.n_embd,
@@ -294,7 +474,16 @@ class GxE_ResidualTransformer(nn.Module):
         return x
     
     def forward(self, x):
-        g_enc = self.g_encoder(x["g_data"]) if self.g_encoder else 0
+        self.moe_aux_loss = None
+        if self.g_encoder:
+            if self.use_moe_encoder:
+                g_enc, moe_loss = self.g_encoder(x["g_data"], return_moe_loss=True)
+                if moe_loss is not None:
+                    self.moe_aux_loss = moe_loss * self.moe_loss_weight
+            else:
+                g_enc = self.g_encoder(x["g_data"])
+        else:
+            g_enc = 0
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
         ld_enc = 0
         if self.ld_encoder:

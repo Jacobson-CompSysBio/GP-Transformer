@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J newdata
-#SBATCH -N 8 
-#SBATCH -t 06:00:00
-#SBATCH -p extended
+#SBATCH -J fulltf
+#SBATCH -N 16 
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -28,6 +28,12 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
+export G_ENCODER_TYPE=dense  # options: "dense", "moe" / applies to FullTF if used
+export MOE_NUM_EXPERTS=16
+export MOE_TOP_K=4
+export MOE_SHARED_EXPERT=True
+export MOE_LOSS_WEIGHT=0.01
+export FULL_TRANSFORMER=True
 
 # calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
 export GBS=16384
@@ -42,17 +48,19 @@ export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
 
-export G_LAYERS=2
+export G_LAYERS=1
 export LD_LAYERS=2
-export MLP_LAYERS=2
-export GXE_LAYERS=2
+export MLP_LAYERS=1
+export GXE_LAYERS=4 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=256
-export SCALE_TARGETS=True
+export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export SCALE_TARGETS=False
 
-export LOSS="envpcc+envmse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -92,6 +100,7 @@ srun -N ${SLURM_NNODES} \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
+        --full_transformer $FULL_TRANSFORMER \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -133,6 +142,7 @@ python -u scripts/eval.py \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
+    --full_transformer $FULL_TRANSFORMER \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \

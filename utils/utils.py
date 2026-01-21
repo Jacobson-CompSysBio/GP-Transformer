@@ -1,4 +1,5 @@
 import argparse
+import os
 import torch
 import random
 import numpy as np
@@ -34,6 +35,15 @@ def parse_args():
     p.add_argument("--ld_enc", type=str2bool, default=True)
     p.add_argument("--gxe_enc", type=str, default=True)
     p.add_argument("--moe", type=str2bool, default=True)
+    p.add_argument("--g_encoder_type", type=str, default=None)
+    p.add_argument("--moe_num_experts", type=int, default=None)
+    p.add_argument("--moe_top_k", type=int, default=None)
+    p.add_argument("--moe_expert_hidden_dim", type=int, default=None)
+    p.add_argument("--moe_shared_expert", type=str2bool, default=None)
+    p.add_argument("--moe_shared_expert_hidden_dim", type=int, default=None)
+    p.add_argument("--moe_loss_weight", type=float, default=None)
+    p.add_argument("--full_transformer", type=str2bool, default=False)
+    p.add_argument("--full_tf_mlp_type", type=str, default=None)
     p.add_argument("--residual", type=str2bool, default=False)
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
@@ -74,19 +84,68 @@ def make_run_name(args) -> str:
             return f"{float(x):g}"
         except Exception:
             return str(x)
+
+    def _get_arg_env(attr, env_key, default=None, cast=None):
+        val = getattr(args, attr, None)
+        if val is None:
+            env_val = os.getenv(env_key)
+            if env_val is None or env_val == "":
+                return default
+            return cast(env_val) if cast is not None else env_val
+        return val
     
-    g = "g+" if args.g_enc else ""
-    e = "e+" if args.e_enc else ""
-    ld = "ld+" if args.ld_enc else ""
-    moe = "moe+" if args.moe else ""
+    full_transformer = bool(getattr(args, "full_transformer", False))
+    g = "g+" if args.g_enc and not full_transformer else ""
+    e = "e+" if args.e_enc and not full_transformer else ""
+    ld = "ld+" if args.ld_enc and not full_transformer else ""
+    full = "fulltf+" if full_transformer else ""
+    wg = "wg+" if args.moe and not full_transformer else ""
     res = "res+" if args.residual else ""
     
-    if args.gxe_enc in ["tf", "mlp", "cnn"]:
+    if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (g + e + ld + gxe + moe + res).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res).rstrip("+")
+
+    # optional MoE encoder tag
+    g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
+    if isinstance(g_encoder_type, str):
+        g_encoder_type = g_encoder_type.lower()
+    else:
+        g_encoder_type = "moe" if g_encoder_type else "dense"
+
+    full_tf_mlp_type = _get_arg_env("full_tf_mlp_type", "FULL_TF_MLP_TYPE", None, str)
+    if full_transformer:
+        if full_tf_mlp_type is None:
+            full_tf_mlp_type = g_encoder_type
+        if isinstance(full_tf_mlp_type, str):
+            full_tf_mlp_type = full_tf_mlp_type.lower()
+        else:
+            full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+
+    mlp_type_for_tag = full_tf_mlp_type if full_transformer else g_encoder_type
+    moe_tag = ""
+    if mlp_type_for_tag == "moe":
+        moe_num_experts = _get_arg_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
+        moe_top_k = _get_arg_env("moe_top_k", "MOE_TOP_K", 2, int)
+        moe_expert_hidden_dim = _get_arg_env("moe_expert_hidden_dim", "MOE_EXPERT_HIDDEN_DIM", None, int)
+        moe_shared_expert = _get_arg_env("moe_shared_expert", "MOE_SHARED_EXPERT", False, str2bool)
+        moe_shared_expert_hidden_dim = _get_arg_env(
+            "moe_shared_expert_hidden_dim", "MOE_SHARED_EXPERT_HIDDEN_DIM", None, int
+        )
+        moe_loss_weight = _get_arg_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
+
+        moe_tag = f"moeenc{moe_num_experts}e{moe_top_k}k"
+        if moe_expert_hidden_dim is not None:
+            moe_tag += f"{moe_expert_hidden_dim}h"
+        if moe_shared_expert:
+            shared_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else "auto"
+            moe_tag += f"_shared{shared_dim}h"
+        moe_tag += f"_lb{short(moe_loss_weight)}"
+
+    full_tag = ""
 
     # loss tag
     terms = [t.strip().lower() for t in args.loss.split("+")]
@@ -104,7 +163,10 @@ def make_run_name(args) -> str:
     
     scale_targets = "_scaled" if args.scale_targets else ""
     return (
-        f"{model_type}_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"
+        f"{model_type}"
+        f"{'_' + moe_tag if moe_tag else ''}"
+        f"{'_' + full_tag if full_tag else ''}"
+        f"_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
         f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"    
