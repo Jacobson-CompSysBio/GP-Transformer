@@ -162,14 +162,19 @@ def make_run_name(args) -> str:
         loss_tag = f"{weight_tag}w_" + "-".join(terms)
     
     scale_targets = "_scaled" if args.scale_targets else ""
+    layer_tag = (
+        f"{args.gxe_layers}gxe_"
+        if full_transformer
+        else f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
+    )
     return (
         f"{model_type}"
         f"{'_' + moe_tag if moe_tag else ''}"
         f"{'_' + full_tag if full_tag else ''}"
         f"_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
-        f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
-        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"    
+        f"{layer_tag}"
+        f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"
     )
 
 def set_seed(seed: int = 42):
