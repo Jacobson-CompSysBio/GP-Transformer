@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-envdata
+#SBATCH -J debug-ft
 #SBATCH -N 1
 #SBATCH -t 00:15:00
 #SBATCH -p batch 
@@ -28,11 +28,24 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
+export MOE_NUM_EXPERTS=16
+export MOE_TOP_K=4
+export MOE_SHARED_EXPERT=True
+export MOE_LOSS_WEIGHT=0.01
+export FULL_TRANSFORMER=True
 
-export BATCH_SIZE=256
+# calculate microbatch size given global batch size and N nodes * 8 gpus/node
+export GBS=2048
+NGPUS=$(($SLURM_NNODES * 8))
+MBS=$(($GBS / $NGPUS))
+export BATCH_SIZE=$MBS
+echo "Debug with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
+export DROPOUT=0.15
+export EARLY_STOP=50
 
 export G_LAYERS=1
 export LD_LAYERS=2
@@ -41,6 +54,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
+export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
 
 export LOSS="envpcc+pcc" # + separated list of losses
@@ -78,14 +93,18 @@ srun -N ${SLURM_NNODES} \
     --kill-on-bad-exit=1 \
     python -u scripts/train.py \
         --batch_size $BATCH_SIZE \
+        --gbs $GBS \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
+        --full_transformer $FULL_TRANSFORMER \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
+        --early_stop $EARLY_STOP \
         --g_layers $G_LAYERS \
         --ld_layers $LD_LAYERS \
         --mlp_layers $MLP_LAYERS \
@@ -116,14 +135,18 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
+    --gbs $GBS \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
+    --full_transformer $FULL_TRANSFORMER \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
+    --dropout $DROPOUT \
+    --early_stop $EARLY_STOP \
     --g_layers $G_LAYERS \
     --ld_layers $LD_LAYERS \
     --mlp_layers $MLP_LAYERS \

@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J moe
-#SBATCH -N 8 
-#SBATCH -t 06:00:00
+#SBATCH -J moe-max
+#SBATCH -N 16 
+#SBATCH -t 12:00:00
 #SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -29,11 +29,9 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
-export MOE_NUM_EXPERTS=4
-export MOE_TOP_K=2
-export MOE_EXPERT_HIDDEN_DIM=
-export MOE_SHARED_EXPERT=False
-export MOE_SHARED_EXPERT_HIDDEN_DIM=
+export MOE_NUM_EXPERTS=16
+export MOE_TOP_K=4
+export MOE_SHARED_EXPERT=True
 export MOE_LOSS_WEIGHT=0.01
 export FULL_TRANSFORMER=False
 
@@ -57,6 +55,8 @@ export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
+export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
 
 export LOSS="envpcc" # + separated list of losses
@@ -100,6 +100,7 @@ srun -N ${SLURM_NNODES} \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
+        --full_transformer $FULL_TRANSFORMER \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -141,6 +142,7 @@ python -u scripts/eval.py \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
+    --full_transformer $FULL_TRANSFORMER \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
