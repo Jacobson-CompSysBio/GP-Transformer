@@ -269,17 +269,31 @@ def load_model(device: torch.device,
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
     if full_transformer:
-        model = FullTransformer(
-            config,
-            mlp_type=full_tf_mlp_type,
-            moe_num_experts=moe_num_experts,
-            moe_top_k=moe_top_k,
-            moe_expert_hidden_dim=moe_expert_hidden_dim,
-            moe_shared_expert=moe_shared_expert,
-            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
-            moe_loss_weight=moe_loss_weight,
-        ).to(device)
-    elif args.residual:
+        if residual:
+            model = FullTransformerResidual(
+                config,
+                mlp_type=full_tf_mlp_type,
+                moe_num_experts=moe_num_experts,
+                moe_top_k=moe_top_k,
+                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                moe_shared_expert=moe_shared_expert,
+                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                moe_loss_weight=moe_loss_weight,
+                residual=residual,
+            ).to(device)
+            model.detach_ymean_in_sum = args.detach_ymean
+        else:
+            model = FullTransformer(
+                config,
+                mlp_type=full_tf_mlp_type,
+                moe_num_experts=moe_num_experts,
+                moe_top_k=moe_top_k,
+                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                moe_shared_expert=moe_shared_expert,
+                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                moe_loss_weight=moe_loss_weight,
+            ).to(device)
+    elif residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,
                                         ld_enc=ld_enc,

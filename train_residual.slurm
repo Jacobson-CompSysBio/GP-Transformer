@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J train_residual_scaled
-#SBATCH -N 2
+#SBATCH -J train_residual_ft_moe
+#SBATCH -N 8
 #SBATCH -t 02:00:00
 #SBATCH -p batch 
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -30,23 +30,23 @@ export MOE=True
 export RES=True
 export FULL_TRANSFORMER=False
 export G_ENCODER_TYPE=dense  # options: "dense", "moe"
-export MOE_NUM_EXPERTS=4
-export MOE_TOP_K=2
-export MOE_SHARED_EXPERT=False            # set to True to enable shared expert
+export MOE_NUM_EXPERTS=8
+export MOE_TOP_K=4
+export MOE_SHARED_EXPERT=True # set to True to enable shared expert
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=2048
+export GBS=16384
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=5000
+export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=500
+export EARLY_STOP=200
 
 export G_LAYERS=1
 export LD_LAYERS=2
@@ -57,9 +57,9 @@ export HEADS=4
 export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export LOSS="mse+pcc"
-export LOSS_WEIGHTS="1.0,0.5"
-export SCALE_TARGETS=True
+export LOSS="mse+envpcc"
+export LOSS_WEIGHTS="0.001,1.0"
+export SCALE_TARGETS=False
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

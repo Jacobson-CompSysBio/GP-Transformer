@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-noresidual
+#SBATCH -J debug-residual
 #SBATCH -N 1
 #SBATCH -t 00:10:00
 #SBATCH -p batch
@@ -28,7 +28,7 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export RES=True
-export FULL_TRANSFORMER=False
+export FULL_TRANSFORMER=True
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=4
 export MOE_TOP_K=2
@@ -54,8 +54,8 @@ export HEADS=1
 export EMB_SIZE=128
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export LOSS="mse+pcc"
-export LOSS_WEIGHTS="1.0,0.5"
+export LOSS="mse+envpcc"
+export LOSS_WEIGHTS="1.0,1.0"
 export SCALE_TARGETS=False # whether to standardize the target values
 
 ### wandb settings ###

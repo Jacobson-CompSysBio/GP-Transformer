@@ -87,7 +87,7 @@ class FullTransformer(nn.Module):
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
 
-    def forward(self, x):
+    def _build_tokens(self, x):
         g = x["g_data"]            # (B, Tm)
         e = x["e_data"]            # (B, Feats)
         B, Tm = g.shape
@@ -97,6 +97,10 @@ class FullTransformer(nn.Module):
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
+        env_start = 1 + Tm
+        return tokens, env_start
+
+    def _encode_tokens(self, tokens):
         self.moe_aux_loss = None
         if self.mlp_type == "moe":
             moe_loss_sum = None
@@ -115,11 +119,72 @@ class FullTransformer(nn.Module):
             for blk in self.blocks:
                 tokens = blk(tokens)
         tokens = self.ln_f(tokens)
+        return tokens
+
+    def forward(self, x):
+        tokens, _ = self._build_tokens(x)
+        tokens = self._encode_tokens(tokens)
         return self.head(tokens[:, 0])
 
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Trainable parameters: {trainable_params:,}")
+
+# full transformer with residual heads (env mean + residual = total)
+class FullTransformerResidual(FullTransformer):
+
+    """
+    """
+
+    def __init__(self,
+                 config,
+                 mlp_type: str = "dense",
+                 moe_num_experts: int = 4,
+                 moe_top_k: int = 2,
+                 moe_expert_hidden_dim: Optional[int] = None,
+                 moe_shared_expert: bool = False,
+                 moe_shared_expert_hidden_dim: Optional[int] = None,
+                 moe_loss_weight: float = 0.01,
+                 residual: bool = False):
+        super().__init__(
+            config=config,
+            mlp_type=mlp_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+        )
+        self.residual = residual
+        self.detach_ymean_in_sum = False
+        self.ymean_head = nn.Linear(config.n_embd, 1)
+
+    def forward(self, x):
+        tokens, env_start = self._build_tokens(x)
+        ymean_pred = None
+        if env_start < tokens.size(1):
+            env_tokens = tokens[:, env_start:, :]
+            env_repr = env_tokens.mean(dim=1)
+            ymean_pred = self.ymean_head(env_repr)
+
+        tokens = self._encode_tokens(tokens)
+        resid_pred = self.head(tokens[:, 0])
+
+        if ymean_pred is None:
+            ymean_pred = torch.zeros_like(resid_pred)
+
+        if not self.residual:
+            return resid_pred
+
+        if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+            total_pred = ymean_pred.detach() + resid_pred
+        else:
+            total_pred = ymean_pred + resid_pred
+        return {'total': total_pred,
+                'ymean': ymean_pred,
+                'resid': resid_pred,
+        }
 
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
@@ -294,8 +359,8 @@ class GxE_Transformer(nn.Module):
         x = x[:, 1:] if x.size(1) > 1 else x
         x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd) 
         return x
-    
-    def forward(self, x):
+
+    def _encode(self, x):
         self.moe_aux_loss = None
         if self.g_encoder:
             if self.use_moe_encoder:
@@ -315,17 +380,21 @@ class GxE_Transformer(nn.Module):
             if isinstance(g_enc, torch.Tensor) and ld_enc.dim() == 3 and ld_enc.size(1) + 1 == g_enc.size(1):
                 pad = torch.zeros(ld_enc.size(0), 1, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
                 ld_enc = torch.cat([pad, ld_enc], dim=1)
-        
+
         if self.gxe_enc == "tf":
-            x = self._forward_tf(g_enc, e_enc, ld_enc)
+            rep = self._forward_tf(g_enc, e_enc, ld_enc)
         elif self.gxe_enc == "mlp":
-            x = self._forward_mlp(g_enc, e_enc, ld_enc)
+            rep = self._forward_mlp(g_enc, e_enc, ld_enc)
         elif self.gxe_enc == "cnn":
-            x = self._forward_cnn(g_enc, e_enc, ld_enc)
+            rep = self._forward_cnn(g_enc, e_enc, ld_enc)
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
-        return self.final_layer(self.final_dropout(x))
+        return rep, e_enc
+    
+    def forward(self, x):
+        rep, _ = self._encode(x)
+        return self.final_layer(self.final_dropout(rep))
     
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -338,11 +407,11 @@ class GxE_Transformer(nn.Module):
 
 
 # create full GxE transformer for genomic prediction
-class GxE_ResidualTransformer(nn.Module):
+class GxE_ResidualTransformer(GxE_Transformer):
 
     """
     """
-    
+
     def __init__(self,
                  g_enc: bool = True,
                  e_enc: bool = True,
@@ -359,153 +428,35 @@ class GxE_ResidualTransformer(nn.Module):
                  moe_loss_weight: float = None,
                  config = None
                  ):
-        super().__init__()
-
-        self.config = config
-        self.residual = residual
-        self.detach_ymean_in_sum = False  # whether to detach ymean prediction in residual sum
-        self.g_encoder_type = g_encoder_type if g_encoder_type is not None else getattr(config, "g_encoder_type", "dense")
-        if isinstance(self.g_encoder_type, str):
-            self.g_encoder_type = self.g_encoder_type.lower()
-        else:
-            self.g_encoder_type = "moe" if self.g_encoder_type else "dense"
-        self.moe_num_experts = moe_num_experts if moe_num_experts is not None else getattr(config, "moe_num_experts", 4)
-        self.moe_top_k = moe_top_k if moe_top_k is not None else getattr(config, "moe_top_k", 2)
-        self.moe_expert_hidden_dim = moe_expert_hidden_dim if moe_expert_hidden_dim is not None else getattr(config, "moe_expert_hidden_dim", None)
-        self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
-        self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
-        self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
-        self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
-        self.moe_aux_loss = None
-
-        # set attributes
-        self.g_encoder = (
-            G_Encoder(
-                config,
-                encoder_type=self.g_encoder_type,
-                moe_num_experts=self.moe_num_experts,
-                moe_top_k=self.moe_top_k,
-                moe_expert_hidden_dim=self.moe_expert_hidden_dim,
-                moe_shared_expert=self.moe_shared_expert,
-                moe_shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
-            )
-            if g_enc else None
+        super().__init__(
+            g_enc=g_enc,
+            e_enc=e_enc,
+            ld_enc=ld_enc,
+            gxe_enc=gxe_enc,
+            moe=moe,
+            g_encoder_type=g_encoder_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+            config=config,
         )
-        self.e_encoder = E_Encoder(input_dim=config.n_env_fts,
-                                   output_dim=config.n_embd,
-                                   hidden_dim=config.n_embd,
-                                   n_hidden=config.n_mlp_layer,
-                                   dropout=config.dropout) if e_enc else None
-        self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
-                                     output_dim=config.n_embd,
-                                     num_blocks=config.n_ld_layer,
-                                     dropout=config.dropout) if ld_enc else None
-        self.moe_w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0])) if moe else None
-        if gxe_enc == "tf":
-            self.gxe_enc = "tf"
-            self.hidden_layers = nn.ModuleList(
-            [TransformerBlock(config) for _ in range(config.n_gxe_layer)]
-            + [nn.LayerNorm(config.n_embd)]
-            )
-        elif gxe_enc == "mlp":
-            self.gxe_enc = "mlp"
-            self.hidden_layers = nn.ModuleList(
-                [Block(self.g_encoder.output_dim if i == 0 else config.n_embd,
-                    config.n_embd,
-                    dropout=config.dropout,
-                    activation=nn.GELU(),
-                    ) for i in range(config.n_gxe_layer)]
-            )
-        elif gxe_enc == "cnn":
-            self.gxe_enc = "cnn"
-            self.hidden_layers = nn.ModuleList(
-                [ResNetBlock1D(in_channels=self.g_encoder.output_dim if i == 0 else config.n_embd,
-                               out_channels=config.n_embd,
-                               dropout=config.dropout,
-                               use_batchnorm=True) for i in range(config.n_gxe_layer)]
-            )
-        else:
-            raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
-
+        self.residual = residual
         # env head to predict per-year mean yield (if residual)
         self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
 
-        # init final layer --> predicts residual in residual mode, total otherwise
-        self.final_layer = nn.Linear(config.n_embd, 1) # CAN CHANGE INPUT, OUTPUT SIZE FOR LAYERS
-    
-    def _concat(self, g_enc, e_enc, ld_enc):
-        if self.moe_w is not None:
-            g_enc = self.moe_w[0] * g_enc
-            e_enc = self.moe_w[1] * e_enc
-            ld_enc = self.moe_w[2] * ld_enc
-        return g_enc + e_enc + ld_enc
-
-    def _forward_tf(self, g_enc, e_enc, ld_enc):
-        if isinstance(e_enc, torch.Tensor): 
-            e_enc = e_enc.unsqueeze(dim=1)
-        x = self._concat(g_enc, e_enc, ld_enc)
-        for layer in self.hidden_layers:
-            x = layer(x)
-        x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd)
-        return x
-
-    def _forward_mlp(self, g_enc, e_enc, ld_enc):
-        # convert [B, T, C] -> [B, C]
-        if isinstance(g_enc, torch.Tensor):
-            g_enc = g_enc.mean(dim=1)
-        if isinstance(ld_enc, torch.Tensor):
-            ld_enc = ld_enc.mean(dim=1)
-        x = self._concat(g_enc, e_enc, ld_enc)
-        for layer in self.hidden_layers:
-            x = x + layer(x)
-        return x
-    
-    def _forward_cnn(self, g_enc, e_enc, ld_enc):
-        #unsqueeze e to concat properly
-        if isinstance(e_enc, torch.Tensor): 
-            e_enc = e_enc.unsqueeze(dim=1)
-        x = self._concat(g_enc, e_enc, ld_enc)
-
-        x = x.transpose(1, 2) # (B, T, C) -> (B, C, T)
-        for layer in self.hidden_layers:
-            x = layer(x)
-        x = x.transpose(1, 2) # (B, C, T) -> (B, T, C)
-        x = x.mean(dim=1) # (B, T, n_embd) -> (B, n_embd) 
-        return x
-    
     def forward(self, x):
-        self.moe_aux_loss = None
-        if self.g_encoder:
-            if self.use_moe_encoder:
-                g_enc, moe_loss = self.g_encoder(x["g_data"], return_moe_loss=True)
-                if moe_loss is not None:
-                    self.moe_aux_loss = moe_loss * self.moe_loss_weight
-            else:
-                g_enc = self.g_encoder(x["g_data"])
-        else:
-            g_enc = 0
-        e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
-        ld_enc = 0
-        if self.ld_encoder:
-            ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
-            ld_enc = self.ld_encoder(ld_feats.float())
-        
-        if self.gxe_enc == "tf":
-            x = self._forward_tf(g_enc, e_enc, ld_enc)
-        elif self.gxe_enc == "mlp":
-            x = self._forward_mlp(g_enc, e_enc, ld_enc)
-        elif self.gxe_enc == "cnn":
-            x = self._forward_cnn(g_enc, e_enc, ld_enc)
-        else:
-            raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
+        rep, e_enc = self._encode(x)
 
-        # non-residual mode: final layer predicts total yield 
+        # non-residual mode: final layer predicts total yield
         if not self.residual:
-            return self.final_layer(x)
-        
+            return self.final_layer(self.final_dropout(rep))
+
         # residual mode:
         ymean_pred = self.ymean_head(e_enc) if self.ymean_head is not None else 0
-        resid_pred = self.final_layer(x)
+        resid_pred = self.final_layer(self.final_dropout(rep))
 
         # option: detach ymean_pred to prevent env head from learning residual signal
         if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
@@ -516,15 +467,6 @@ class GxE_ResidualTransformer(nn.Module):
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
-    
-    def print_trainable_parameters(self):
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        g_trainable_params = sum(p.numel() for p in self.g_encoder.parameters() if p.requires_grad) if self.g_encoder else 0
-        e_trainable_params = sum(p.numel() for p in self.e_encoder.parameters() if p.requires_grad) if self.e_encoder else 0
-        ld_trainable_params = sum(p.numel() for p in self.ld_encoder.parameters() if p.requires_grad) if self.ld_encoder else 0
-        gxe_trainable_params = trainable_params - g_trainable_params - e_trainable_params - ld_trainable_params
-        print(f"Trainable parameters: {trainable_params:,}"
-              f" (G: {g_trainable_params:,}, E: {e_trainable_params:,}, LD: {ld_trainable_params:,}, GxE: {gxe_trainable_params:,})")
 
 # ----------------------------------------------------------------
 
