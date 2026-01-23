@@ -28,6 +28,7 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export RES=True
+export FULL_TRANSFORMER=False
 export G_ENCODER_TYPE=dense  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=4
 export MOE_TOP_K=2
@@ -56,8 +57,8 @@ export HEADS=4
 export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export LOSS="both"
-export ALPHA=0.5 # only used if LOSS is "both"
+export LOSS="mse+pcc"
+export LOSS_WEIGHTS="1.0,0.5"
 export SCALE_TARGETS=True
 
 ### wandb settings ###
@@ -98,6 +99,7 @@ srun -N ${SLURM_NNODES} \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
+        --full_transformer $FULL_TRANSFORMER \
         --residual $RES \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
@@ -111,7 +113,7 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA \
+        --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS
 
 ### python (model eval) ###
@@ -140,6 +142,7 @@ python -u scripts/eval.py \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
+    --full_transformer $FULL_TRANSFORMER \
     --residual $RES \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
@@ -153,5 +156,5 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
-    --alpha $ALPHA \
+    --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS

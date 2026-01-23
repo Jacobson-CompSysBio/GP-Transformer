@@ -94,8 +94,7 @@ def main():
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
         split="train",
-        data_path='data/maize_data_2014-2023_vs_2024/',
-        index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+        data_path='data/maize_data_2014-2023_vs_2024_v2/',
         residual=args.residual,
         scaler=None,
         y_scalers=None,
@@ -105,8 +104,7 @@ def main():
     y_scalers = train_ds.label_scalers
     val_ds = GxE_Dataset(
         split="val",
-        data_path="data/maize_data_2014-2023_vs_2024/",
-        index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
+        data_path="data/maize_data_2014-2023_vs_2024_v2/",
         residual=args.residual,
         scaler=env_scaler,
         y_scalers=y_scalers,
@@ -135,7 +133,8 @@ def main():
                     n_mlp_layer=args.mlp_layers,
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
-                    dropout=args.dropout)
+                    dropout=args.dropout,
+                    n_env_fts=train_ds.n_env_fts)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -183,9 +182,7 @@ def main():
                 find_unused_parameters=moe_encoder_enabled)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    loss_function = build_loss(args.loss, args.alpha)
-    mse_loss_log = nn.MSELoss(reduction="mean")
-    pcc_loss_log = GlobalPearsonCorrLoss(reduction="mean")
+    loss_function = build_loss(args.loss, args.loss_weights)
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -239,7 +236,7 @@ def main():
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
-                             "alpha": args.alpha,
+                             "loss_weights": args.loss_weights,
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
@@ -250,26 +247,22 @@ def main():
                              "moe_expert_hidden_dim": moe_expert_hidden_dim,
                              "moe_shared_expert": moe_shared_expert,
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
-                             "moe_loss_weight": moe_loss_weight},
+                             "moe_loss_weight": moe_loss_weight,
+                             "full_transformer": args.full_transformer},
                              allow_val_change=True)
-        if args.loss == "both":
-            # batch level            
-            run.define_metric("mse", step_metric="iter_num")
-            run.define_metric("pcc_loss", step_metric="iter_num")
-
-            # epoch level
-            run.define_metric("val_mse_epoch", step_metric="epoch")
-            run.define_metric("val_pcc_loss_epoch", step_metric="epoch")
-            run.define_metric("train_mse_epoch", step_metric="epoch")
-            run.define_metric("train_pcc_loss_epoch", step_metric="epoch")
+        for name in loss_function.names:
+            run.define_metric(f"train_loss/{name}", step_metric="iter_num")
+            run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
+            run.define_metric(f"val_loss/{name}", step_metric="epoch")
         
-        # track residual losses 
+        # track residual losses
         if args.residual:
             run.define_metric("aux_ymean_loss", step_metric="iter_num")
             run.define_metric("aux_resid_loss", step_metric="iter_num")
         if moe_encoder_enabled:
-            run.define_metric("moe_lb", step_metric="iter_num")
-            run.define_metric("moe_lb_epoch", step_metric="epoch")
+            run.define_metric("train_loss/moe_lb", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/moe_lb", step_metric="epoch")
+            run.define_metric("val_loss/moe_lb", step_metric="epoch")
             run.define_metric("aux_ymean_mse_epoch", step_metric="epoch")
             run.define_metric("aux_resid_mse_epoch", step_metric="epoch")
 
@@ -297,50 +290,28 @@ def main():
             logits = model(xb)
 
             # residual: compute main and aux losses
+            loss_aux_ymean = None
+            loss_aux_resid = None
             if args.residual:
-                pred_total = logits['total']
-                loss_main = loss_function(pred_total, yb['total'])
-                loss_aux_ymean = F.mse_loss(logits['ymean'], yb['ymean'])
-                loss_aux_resid = F.mse_loss(logits['resid'], yb['resid'])
-                loss = (loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid))
-            
-            # non-residual: just compute main loss
+                pred_total = logits["total"]
+                loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                loss_aux_ymean = F.mse_loss(logits["ymean"], yb["ymean"])
+                loss_aux_resid = F.mse_loss(logits["resid"], yb["resid"])
+                loss = loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid)
             else:
-                loss = loss_function(logits, yb)
+                loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
             moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
             if moe_aux_loss is not None:
-                loss = loss + moe_aux_loss.detach()
+                moe_aux_loss_detached = moe_aux_loss.detach()
+                loss = loss + moe_aux_loss_detached
+                loss_parts["moe_lb"] = float(moe_aux_loss_detached.item())
 
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
-            # compute losses for wandb logging 
-            train_mse_val = None
-            train_pcc_loss_val = None
-            aux_ymean_val = None
-            aux_resid_val = None
-            moe_aux_val = None
-
-            with torch.no_grad():
-                if args.residual:
-                    # log on total
-                    pred_total = logits['total']
-                    tgt_total = yb['total']
-                    if args.loss == "both":
-                        train_mse_val = mse_loss_log(pred_total, tgt_total)
-                        train_pcc_loss_val = pcc_loss_log(pred_total, tgt_total)
-                    # aux logs regardless of main loss choice
-                    if "ymean" in logits:
-                        aux_ymean_val = F.mse_loss(logits['ymean'], yb['ymean'])
-                    if "resid" in logits:
-                        aux_resid_val = F.mse_loss(logits['resid'], yb['resid'])
-                else:
-                    if args.loss == "both":
-                        with torch.no_grad():
-                            train_mse_val = mse_loss_log(logits, yb)
-                            train_pcc_loss_val = pcc_loss_log(logits, yb)
-                if moe_aux_loss is not None:
-                    moe_aux_val = moe_aux_loss.detach()
+            # compute losses for wandb logging
+            aux_ymean_val = loss_aux_ymean.detach() if loss_aux_ymean is not None else None
+            aux_resid_val = loss_aux_resid.detach() if loss_aux_resid is not None else None
 
             # apply learning rate schedule              
             lr = get_lr(iter_num,
@@ -363,15 +334,12 @@ def main():
                     "learning_rate": lr,
                     "iter_num": iter_num,
                 }
-                if args.loss == "both" and train_mse_val is not None:
-                    log_payload["mse"] = float(train_mse_val.item())
-                    log_payload["pcc_loss"] = float(train_pcc_loss_val.item())
+                for k, v in loss_parts.items():
+                    log_payload[f"train_loss/{k}"] = float(v)
                 if aux_ymean_val is not None:
                     log_payload["aux_ymean_loss"] = float(aux_ymean_val.item())
                 if aux_resid_val is not None:
                     log_payload["aux_resid_loss"] = float(aux_resid_val.item())
-                if moe_aux_val is not None:
-                    log_payload["moe_lb"] = float(moe_aux_val.item())
                 wandb.log(log_payload)
             iter_num += 1
             pbar.update(1)
@@ -381,103 +349,73 @@ def main():
         with torch.no_grad():
             model.eval()
 
-            def eval_split(loader):
-                total_loss_acc = torch.tensor(0.0, device=device)
-                mse_acc = torch.tensor(0.0, device=device)
-                pcc_acc = torch.tensor(0.0, device=device)
+            def eval_loader(loader):
+                total_loss = torch.tensor(0.0, device=device)
+                loss_names = list(loss_function.names)
+                if moe_encoder_enabled:
+                    loss_names.append("moe_lb")
+                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_names}
                 aux_ymean_acc = torch.tensor(0.0, device=device)
                 aux_resid_acc = torch.tensor(0.0, device=device)
-                moe_acc = torch.tensor(0.0, device=device)
-                n_batches = 0
+                n_batches = torch.tensor(0.0, device=device)
 
                 for xb, yb in loader:
                     xb = _move_to_device(xb, device)
                     yb = _move_to_device(yb, device)
 
                     out = model(xb)
-                    moe_aux = getattr(model.module, "moe_aux_loss", None)
                     if args.residual:
-                        # main loss on 'total'
-                        total_loss_acc += loss_function(out['total'], yb['total'])
-                        # aux heads
-                        aux_ymean_acc += F.mse_loss(out['ymean'], yb['ymean'])
-                        aux_resid_acc += F.mse_loss(out['resid'], yb['resid'])
-                        if args.loss == "both":
-                            mse_acc += mse_loss_log(out['total'], yb['total'])
-                            pcc_acc += pcc_loss_log(out['total'], yb['total'])
+                        ltot, lparts = loss_function(out["total"], yb["total"], env_id=yb["env_id"])
+                        aux_ymean_acc += F.mse_loss(out["ymean"], yb["ymean"])
+                        aux_resid_acc += F.mse_loss(out["resid"], yb["resid"])
                     else:
-                        total_loss_acc += loss_function(out, yb)
-                        if args.loss == "both":
-                            mse_acc += mse_loss_log(out, yb)
-                            pcc_acc += pcc_loss_log(out, yb)
+                        ltot, lparts = loss_function(out, yb["y"], env_id=yb["env_id"])
+                    moe_aux = getattr(model.module, "moe_aux_loss", None)
                     if moe_aux is not None:
                         moe_aux_detached = moe_aux.detach()
-                        total_loss_acc += moe_aux_detached
-                        moe_acc += moe_aux_detached
-                    n_batches += 1
+                        ltot = ltot + moe_aux_detached
+                        lparts["moe_lb"] = float(moe_aux_detached.item())
+                    total_loss += ltot
+                    for k in parts_acc:
+                        parts_acc[k] += torch.tensor(lparts.get(k, 0.0), device=device)
+                    n_batches += 1.0
 
-                return {
-                    "total_loss_acc": total_loss_acc,
-                    "mse_acc": mse_acc,
-                    "pcc_acc": pcc_acc,
-                    "aux_ymean_acc": aux_ymean_acc,
-                    "aux_resid_acc": aux_resid_acc,
-                    "moe_acc": moe_acc,
-                    "n_batches": n_batches
-                }
-                
-            train_stats = eval_split(train_loader)
-            val_stats = eval_split(val_loader)
+                # allreduce w/ sum
+                dist.all_reduce(total_loss)
+                for t in parts_acc.values():
+                    dist.all_reduce(t)
+                dist.all_reduce(aux_ymean_acc)
+                dist.all_reduce(aux_resid_acc)
+                dist.all_reduce(n_batches)
 
-        to_reduce = [
-            train_stats["total_loss_acc"], val_stats["total_loss_acc"],
-            train_stats["mse_acc"], val_stats["mse_acc"],
-            train_stats["pcc_acc"], val_stats["pcc_acc"],
-            train_stats["aux_ymean_acc"], train_stats["aux_resid_acc"],
-            val_stats["aux_ymean_acc"], val_stats["aux_resid_acc"],
-            train_stats["moe_acc"], val_stats["moe_acc"],
-        ]
-        for t in to_reduce:
-            dist.all_reduce(t)
-        n_train = train_stats["n_batches"]
-        n_val = val_stats["n_batches"]
+                nb = max(1.0, float(n_batches.item()))
+                mean_total = total_loss / nb
+                mean_parts = {k: (v / nb).item() for k, v in parts_acc.items()}
+                mean_aux_ymean = (aux_ymean_acc / nb).item()
+                mean_aux_resid = (aux_resid_acc / nb).item()
+                return mean_total, mean_parts, mean_aux_ymean, mean_aux_resid
 
-        train_loss = (train_stats["total_loss_acc"] / n_train / world_size).item()
-        val_loss = (val_stats["total_loss_acc"] / n_val / world_size).item()
-        if args.loss == "both":
-            train_mse = (train_stats["mse_acc"] / n_train / world_size).item()
-            train_pcc_loss = (train_stats["pcc_acc"] / n_train / world_size).item()
-            val_mse = (val_stats["mse_acc"] / n_val / world_size).item()
-            val_pcc_loss = (val_stats["pcc_acc"] / n_val / world_size).item()
-
-        aux_train_ymean = (train_stats["aux_ymean_acc"] / n_train / world_size).item()
-        aux_train_resid = (train_stats["aux_resid_acc"] / n_train / world_size).item()
-        aux_val_ymean = (val_stats["aux_ymean_acc"] / n_val / world_size).item()
-        aux_val_resid = (val_stats["aux_resid_acc"] / n_val / world_size).item()
-        moe_val = (val_stats["moe_acc"] / n_val / world_size).item()
+            train_total, train_parts, aux_train_ymean, aux_train_resid = eval_loader(train_loader)
+            val_total, val_parts, aux_val_ymean, aux_val_resid = eval_loader(val_loader)
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
-                "val_loss": val_loss,
-                "train_loss_epoch": train_loss,
+                "val_loss": val_total.item(),
+                "train_loss_epoch": train_total.item(),
                 "epoch": epoch_num,
-                "aux_ymean_mse_epoch": aux_val_ymean,
-                "aux_resid_mse_epoch": aux_val_resid,
             }
-            if moe_encoder_enabled:
-                log_epoch_payload["moe_lb_epoch"] = moe_val
-            if args.loss == "both":
-                log_epoch_payload.update({
-                    "train_mse_epoch": train_mse,
-                    "train_pcc_loss_epoch": train_pcc_loss,
-                    "val_mse_epoch": val_mse,
-                    "val_pcc_loss_epoch": val_pcc_loss,
-                })
+            for k, v in train_parts.items():
+                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
+            for k, v in val_parts.items():
+                log_epoch_payload[f"val_loss/{k}"] = float(v)
+            if args.residual:
+                log_epoch_payload["aux_ymean_mse_epoch"] = aux_val_ymean
+                log_epoch_payload["aux_resid_mse_epoch"] = aux_val_resid
             wandb.log(log_epoch_payload)
 
-            if val_loss < best_val_loss:
-                best_val_loss, last_improved = val_loss, 0
+            if val_total < best_val_loss:
+                best_val_loss, last_improved = val_total, 0
                 
                 # collect env scaler and y scalers
                 env_scaler_payload = {
@@ -505,6 +443,7 @@ def main():
                         "ld_enc": args.ld_enc,
                         "gxe_enc": args.gxe_enc,
                         "block_size": config.block_size,
+                        "n_env_fts": config.n_env_fts,
                         "g_layers": args.g_layers,
                         "ld_layers": args.ld_layers,
                         "mlp_layers": args.mlp_layers,
@@ -519,11 +458,13 @@ def main():
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
                         "loss": args.loss,
-                        "alpha": args.alpha,
+                        "loss_weights": args.loss_weights,
                         "residual": args.residual,
                         "lambda_ymean": args.lambda_ymean,
                         "lambda_resid": args.lambda_resid,
                         "detach_ymean": args.detach_ymean,
+                        "full_transformer": args.full_transformer,
+                        "scale_targets": args.scale_targets,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
@@ -550,8 +491,8 @@ def main():
                  
         if is_main(rank):
             elapsed = (time.time() - t0) / 60
-            print(f"[Epoch {epoch_num}] train={train_loss:.4e} | "
-                  f"val={val_loss:.4e} | best_val={best_val_loss:.4e} | "
+            print(f"[Epoch {epoch_num}] train={train_total.item():.4e} | "
+                  f"val={val_total.item():.4e} | best_val={best_val_loss:.4e} | "
                   f"elapsed={elapsed:.2f}m")
 
     dist.barrier()

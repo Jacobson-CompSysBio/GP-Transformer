@@ -119,8 +119,7 @@ def main():
         # create datasets for this fold
         train_ds = GxE_Dataset(
             split="train",
-            data_path='data/maize_data_2014-2023_vs_2024/',
-            index_map_path='data/maize_data_2014-2023_vs_2024/location_2014_2023.csv',
+            data_path='data/maize_data_2014-2023_vs_2024_v2/',
             scaler=None,
             train_year_max=train_year_max,
             y_scalers=None,
@@ -130,8 +129,7 @@ def main():
         y_scalers = train_ds.label_scalers
         val_ds = GxE_Dataset(
             split="val",
-            data_path="data/maize_data_2014-2023_vs_2024/",
-            index_map_path="data/maize_data_2014-2023_vs_2024/location_2014_2023.csv",
+            data_path="data/maize_data_2014-2023_vs_2024_v2/",
             scaler=env_scaler,
             val_year=val_year,
             y_scalers=y_scalers,

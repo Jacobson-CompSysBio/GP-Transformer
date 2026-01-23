@@ -28,11 +28,22 @@ export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True
 export RES=True
+export FULL_TRANSFORMER=False
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
+export MOE_NUM_EXPERTS=4
+export MOE_TOP_K=2
+export MOE_SHARED_EXPERT=True            # set to True to enable shared expert
+export MOE_LOSS_WEIGHT=0.01
 
 export BATCH_SIZE=256
+NGPUS=$(($SLURM_NNODES * 8))
+export GBS=$(($BATCH_SIZE * $NGPUS))
+echo "Debug with global batch size $GBS on $NGPUS GPUs (microbatch size $BATCH_SIZE)"
 export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
+export DROPOUT=0.15
+export EARLY_STOP=50
 
 export G_LAYERS=1
 export LD_LAYERS=1
@@ -41,8 +52,10 @@ export GXE_LAYERS=1
 
 export HEADS=1
 export EMB_SIZE=128
-export LOSS="both"
-export ALPHA=0.5  # only used if LOSS is "both"
+export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
+export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export LOSS="mse+pcc"
+export LOSS_WEIGHTS="1.0,0.5"
 export SCALE_TARGETS=False # whether to standardize the target values
 
 ### wandb settings ###
@@ -68,7 +81,6 @@ rm -rf "$MIOPEN_USER_DB_PATH" && mkdir -p "$MIOPEN_USER_DB_PATH"
 export MIOPEN_FIND_MODE=NORMAL
 
 ### srun (model train) ###
-NGPUS=$(($SLURM_NNODES * 8))
 srun -N ${SLURM_NNODES} \
     -n ${NGPUS} \
     --gpus-per-task=1 \
@@ -77,15 +89,19 @@ srun -N ${SLURM_NNODES} \
     --kill-on-bad-exit=1 \
     python -u scripts/train_residual.py \
         --batch_size $BATCH_SIZE \
+        --gbs $GBS \
         --g_enc $G_ENC \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
         --moe $MOE \
+        --full_transformer $FULL_TRANSFORMER \
         --residual $RES \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
+        --early_stop $EARLY_STOP \
         --g_layers $G_LAYERS \
         --ld_layers $LD_LAYERS \
         --mlp_layers $MLP_LAYERS \
@@ -93,7 +109,7 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
-        --alpha $ALPHA \
+        --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
 
 ### python (model eval) ###
@@ -116,15 +132,19 @@ fi
 
 python -u scripts/eval.py \
     --batch_size $BATCH_SIZE \
+    --gbs $GBS \
     --g_enc $G_ENC \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
     --moe $MOE \
+    --full_transformer $FULL_TRANSFORMER \
     --residual $RES \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \
+    --dropout $DROPOUT \
+    --early_stop $EARLY_STOP \
     --g_layers $G_LAYERS \
     --ld_layers $LD_LAYERS \
     --mlp_layers $MLP_LAYERS \
@@ -132,6 +152,6 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --loss $LOSS \
-    --alpha $ALPHA \
+    --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS \
     --checkpoint_dir "$CHECKPOINT_DIR"
