@@ -21,6 +21,7 @@ from models.config import Config
 from utils.get_lr import get_lr
 from utils.loss import build_loss, GlobalPearsonCorrLoss
 from utils.utils import *
+from utils.utils import EnvStratifiedSampler, str2bool
 
 load_dotenv()
 os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
@@ -113,17 +114,53 @@ def main():
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        pin_memory=True,
-    )
+    
+    # Check if using env-stratified sampling (recommended for envpcc loss)
+    env_stratified = _get_arg_or_env("env_stratified", "ENV_STRATIFIED", False, str2bool)
+    min_samples_per_env = _get_arg_or_env("min_samples_per_env", "MIN_SAMPLES_PER_ENV", 32, int)
+    use_batch_sampler = False
+    
+    if env_stratified and "envpcc" in args.loss.lower():
+        if is_main(rank):
+            print(f"[INFO] Using environment-stratified sampling for envpcc loss")
+            print(f"[INFO] min_samples_per_env = {min_samples_per_env}")
+        train_sampler = EnvStratifiedSampler(
+            env_ids=train_ds.env_id_tensor.tolist(),
+            batch_size=args.batch_size,
+            shuffle=True,
+            seed=args.seed,
+            rank=rank,
+            world_size=world_size,
+            min_samples_per_env=min_samples_per_env,
+        )
+        use_batch_sampler = True
+        
+        # Debug: show sampler stats (without iterating through all batches)
+        if is_main(rank):
+            print(f"[DEBUG] Sampler: {len(train_sampler)} batches for this rank, ~{train_sampler.total_chunks} total chunks")
+    
+    if use_batch_sampler:
+        train_loader = DataLoader(
+            train_ds,
+            batch_sampler=train_sampler,
+            pin_memory=True,
+            num_workers=0,  # Disabled: causes slowdown on Lustre
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            sampler=train_sampler,
+            pin_memory=True,
+            num_workers=0,
+        )
     val_loader = DataLoader(
         val_ds, 
         batch_size=args.batch_size, 
         sampler=val_sampler,
-        pin_memory=True)
+        pin_memory=True,
+        num_workers=0,
+    )
 
     # set up config
     config = Config(block_size=train_ds.block_size,
@@ -211,10 +248,15 @@ def main():
                                 config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
+    # Residual models have multiple output heads (ymean_head, head) and auxiliary losses
+    # that may not flow gradients through all parameters in every forward pass.
+    # MoE models have expert routing that may leave some experts unused.
+    # In both cases, we need find_unused_parameters=True to avoid DDP sync errors.
+    find_unused = bool(args.moe) or moe_encoder_enabled or bool(args.residual)
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
-                find_unused_parameters=moe_encoder_enabled)
+                find_unused_parameters=find_unused)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_function = build_loss(args.loss, args.loss_weights)
@@ -231,6 +273,7 @@ def main():
     early_stop = args.early_stop
 
     if is_main(rank):
+        print(f"[INFO] batches_per_epoch = {batches_per_epoch}, batch_size = {args.batch_size}")
         print(f"Training on {batches_per_epoch * args.batch_size * int(os.getenv('SLURM_NNODES'))* 8} samples for {args.num_epochs} epochs.")
 
     ### wandb logging ###
@@ -311,13 +354,21 @@ def main():
     for epoch_num in range(max_epochs):
         train_sampler.set_epoch(epoch_num)
         model.train()
+        
+        # Timing diagnostics for first epoch
+        if epoch_num == 0 and is_main(rank):
+            t_epoch_start = time.time()
 
         pbar = tqdm(total=eval_interval,
                     desc=f"Rank {rank} Train",
                     disable=not is_main(rank))
         
         # training steps
-        for xb, yb in train_loader:
+        step_times = []
+        for step_idx, (xb, yb) in enumerate(train_loader):
+            if epoch_num == 0 and is_main(rank):
+                t_step_start = time.time()
+            
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
             yb = _move_to_device(yb, device) 
@@ -377,9 +428,21 @@ def main():
                 if aux_resid_val is not None:
                     log_payload["aux_resid_loss"] = float(aux_resid_val.item())
                 wandb.log(log_payload)
+            
+            # Timing diagnostics
+            if epoch_num == 0 and is_main(rank):
+                step_times.append(time.time() - t_step_start)
+                if step_idx < 5 or step_idx % 20 == 0:
+                    print(f"[TIMING] Step {step_idx}: {step_times[-1]:.3f}s (avg: {sum(step_times)/len(step_times):.3f}s)")
+            
             iter_num += 1
             pbar.update(1)
         pbar.close()
+        
+        # End of epoch timing
+        if epoch_num == 0 and is_main(rank):
+            t_epoch_end = time.time()
+            print(f"[TIMING] Epoch 0: {t_epoch_end - t_epoch_start:.1f}s total, {len(step_times)} steps, {sum(step_times)/len(step_times):.3f}s/step avg")
 
         ### evaluation ###
         with torch.no_grad():

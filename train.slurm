@@ -28,7 +28,7 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export MOE=True # this is for the weighted gate 
-export G_ENCODER_TYPE=moe # options: "dense", "moe" / applies to FullTF if used
+export G_ENCODER_TYPE=dense # options: "dense", "moe" / applies to FullTF if used
 export MOE_NUM_EXPERTS=4
 export MOE_TOP_K=1
 export MOE_SHARED_EXPERT=True
@@ -53,14 +53,16 @@ export LD_LAYERS=2
 export MLP_LAYERS=1
 export GXE_LAYERS=1 # applies to FullTF if used
 
-export HEADS=2
-export EMB_SIZE=128
+export HEADS=8
+export EMB_SIZE=1024
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
+export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
+export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -114,7 +116,9 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
-        --scale_targets $SCALE_TARGETS
+        --scale_targets $SCALE_TARGETS \
+        --env_stratified $ENV_STRATIFIED \
+        --min_samples_per_env $MIN_SAMPLES_PER_ENV
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

@@ -4,6 +4,10 @@ import torch
 import random
 import numpy as np
 from dataclasses import dataclass
+from collections import defaultdict
+from typing import Iterator, List, Optional
+from torch.utils.data import Sampler
+import torch.distributed as dist
 
 @dataclass
 class LabelScaler:
@@ -73,6 +77,10 @@ def parse_args():
                    help="composite loss string, e.g. 'mse+envpcc'")
     p.add_argument("--loss_weights", type=str, default="1.0",
                    help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
+    p.add_argument("--env_stratified", type=str2bool, default=False,
+                   help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
+    p.add_argument("--min_samples_per_env", type=int, default=32,
+                   help="Minimum samples per environment in each batch for env-stratified sampling")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     return p.parse_args()
@@ -195,3 +203,267 @@ def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32  # each worker gets a distinct initial seed
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+class EnvStratifiedSampler(Sampler[List[int]]):
+    """
+    Environment-stratified sampler for DDP training.
+    
+    Creates batches that pack multiple environments together, ensuring each
+    environment has at least `min_samples_per_env` samples for reliable 
+    within-environment correlation.
+    
+    OPTIMIZED: Pre-computes batch structure once at init, only shuffles per epoch.
+    Uses numpy for fast array operations.
+    
+    Algorithm:
+        1. For each environment, split samples into chunks of `min_samples_per_env`
+        2. Pack chunks from different environments into batches of `batch_size`
+        3. Each batch now has ~(batch_size / min_samples_per_env) environments,
+           each with at least `min_samples_per_env` samples
+    
+    Usage:
+        sampler = EnvStratifiedSampler(
+            env_ids=train_ds.env_id_tensor.tolist(),
+            batch_size=256,
+            shuffle=True,
+            rank=rank,
+            world_size=world_size,
+            min_samples_per_env=32,
+        )
+        loader = DataLoader(train_ds, batch_sampler=sampler, num_workers=4)
+    """
+    
+    def __init__(
+        self,
+        env_ids: List[int],
+        batch_size: int,
+        shuffle: bool = True,
+        seed: int = 42,
+        rank: Optional[int] = None,
+        world_size: Optional[int] = None,
+        drop_last: bool = False,
+        min_samples_per_env: int = 32,
+    ):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.drop_last = drop_last
+        self.min_samples_per_env = min_samples_per_env
+        self.epoch = 0
+        
+        # DDP settings
+        if rank is None:
+            if dist.is_available() and dist.is_initialized():
+                self.rank = dist.get_rank()
+                self.world_size = dist.get_world_size()
+            else:
+                self.rank = 0
+                self.world_size = 1
+        else:
+            self.rank = rank
+            self.world_size = world_size if world_size is not None else 1
+        
+        # Convert to numpy for speed
+        env_ids_np = np.array(env_ids)
+        
+        # Pre-compute chunk structure (done ONCE at init, not every epoch)
+        # Group indices by environment using numpy
+        unique_envs = np.unique(env_ids_np)
+        self.env_indices = {env: np.where(env_ids_np == env)[0] for env in unique_envs}
+        
+        # Pre-compute which environments have enough samples
+        self.valid_envs = [env for env, idx in self.env_indices.items() 
+                          if len(idx) >= min_samples_per_env]
+        
+        # Pre-compute chunk boundaries for each env (start_idx, end_idx pairs)
+        self.env_chunks = {}
+        for env in self.valid_envs:
+            n = len(self.env_indices[env])
+            n_full_chunks = n // min_samples_per_env
+            self.env_chunks[env] = n_full_chunks
+        
+        # Total number of chunks
+        self.total_chunks = sum(self.env_chunks.values())
+        
+        # Pre-compute batch structure (how many chunks per batch)
+        self.chunks_per_batch = batch_size // min_samples_per_env
+        self.n_batches_total = (self.total_chunks + self.chunks_per_batch - 1) // self.chunks_per_batch
+        
+        # For DDP: each rank gets a subset
+        self.n_batches = (self.n_batches_total + self.world_size - 1) // self.world_size
+        
+        # Build initial batches
+        self._current_batches = None
+    
+    def _build_batches(self):
+        """Build batches for current epoch - optimized with numpy."""
+        rng = np.random.default_rng(self.seed + self.epoch)
+        
+        # Step 1: Create all chunks with shuffled indices within each env
+        all_chunks = []
+        for env in self.valid_envs:
+            indices = self.env_indices[env].copy()
+            if self.shuffle:
+                rng.shuffle(indices)
+            
+            # Split into chunks
+            n_chunks = self.env_chunks[env]
+            for i in range(n_chunks):
+                start = i * self.min_samples_per_env
+                end = start + self.min_samples_per_env
+                all_chunks.append(indices[start:end])
+        
+        # Step 2: Shuffle chunk order
+        if self.shuffle:
+            chunk_order = rng.permutation(len(all_chunks))
+            all_chunks = [all_chunks[i] for i in chunk_order]
+        
+        # Step 3: Pack chunks into batches using numpy concatenation
+        all_batches = []
+        for i in range(0, len(all_chunks), self.chunks_per_batch):
+            batch_chunks = all_chunks[i:i + self.chunks_per_batch]
+            if batch_chunks:
+                batch = np.concatenate(batch_chunks)
+                if not self.drop_last or len(batch) >= self.batch_size // 2:
+                    all_batches.append(batch.tolist())
+        
+        # Step 4: Shuffle batch order
+        if self.shuffle:
+            batch_order = rng.permutation(len(all_batches))
+            all_batches = [all_batches[i] for i in batch_order]
+        
+        # Step 5: Pad to ensure all ranks have same number of batches (DDP requirement)
+        # Without this, ranks with fewer batches finish early and deadlock on gradient sync
+        n_total = len(all_batches)
+        batches_per_rank = (n_total + self.world_size - 1) // self.world_size  # ceil division
+        n_padded = batches_per_rank * self.world_size
+        
+        # Pad by repeating batches from the beginning
+        if n_padded > n_total:
+            all_batches = all_batches + all_batches[:n_padded - n_total]
+        
+        # Distribute to this rank - now guaranteed equal count
+        self._current_batches = all_batches[self.rank::self.world_size]
+    
+    def __iter__(self) -> Iterator[List[int]]:
+        self._build_batches()
+        return iter(self._current_batches)
+    
+    def __len__(self) -> int:
+        # Approximate length (exact after first iteration)
+        if self._current_batches is not None:
+            return len(self._current_batches)
+        return self.n_batches
+    
+    def set_epoch(self, epoch: int):
+        """Set epoch for shuffling (call before each epoch like DistributedSampler)."""
+        self.epoch = epoch
+
+
+class HybridEnvSampler(Sampler[int]):
+    """
+    Hybrid sampler that mixes environment-stratified and random sampling.
+    
+    This gives a balance between:
+    - Environment-stratified: Good for envwise_pcc, but may reduce diversity
+    - Random: Good for MSE/global metrics, but bad for envwise correlation
+    
+    Usage:
+        sampler = HybridEnvSampler(
+            env_ids=train_ds.env_id_tensor.tolist(),
+            batch_size=256,
+            env_batch_ratio=0.5,  # 50% env-stratified, 50% random
+            rank=rank,
+            world_size=world_size,
+        )
+        loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler)
+    """
+    
+    def __init__(
+        self,
+        env_ids: List[int],
+        total_samples: int,
+        env_batch_ratio: float = 0.5,
+        shuffle: bool = True,
+        seed: int = 42,
+        rank: Optional[int] = None,
+        world_size: Optional[int] = None,
+    ):
+        self.env_ids = env_ids
+        self.total_samples = total_samples
+        self.env_batch_ratio = env_batch_ratio
+        self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+        
+        # DDP settings
+        if rank is None:
+            if dist.is_available() and dist.is_initialized():
+                self.rank = dist.get_rank()
+                self.world_size = dist.get_world_size()
+            else:
+                self.rank = 0
+                self.world_size = 1
+        else:
+            self.rank = rank
+            self.world_size = world_size if world_size is not None else 1
+        
+        # Group indices by environment
+        self.env_to_indices = defaultdict(list)
+        for idx, env in enumerate(env_ids):
+            self.env_to_indices[env].append(idx)
+        
+        self.num_samples = (total_samples + self.world_size - 1) // self.world_size
+    
+    def _generate_indices(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        
+        indices = []
+        envs = list(self.env_to_indices.keys())
+        
+        # Env-stratified portion
+        n_env_samples = int(self.total_samples * self.env_batch_ratio)
+        if self.shuffle:
+            perm = torch.randperm(len(envs), generator=g).tolist()
+            envs = [envs[i] for i in perm]
+        
+        env_idx = 0
+        while len(indices) < n_env_samples:
+            env = envs[env_idx % len(envs)]
+            env_indices = self.env_to_indices[env]
+            # Add all samples from this env (or remaining needed)
+            needed = min(len(env_indices), n_env_samples - len(indices))
+            if self.shuffle:
+                perm = torch.randperm(len(env_indices), generator=g)[:needed].tolist()
+                indices.extend([env_indices[i] for i in perm])
+            else:
+                indices.extend(env_indices[:needed])
+            env_idx += 1
+        
+        # Random portion
+        n_random = self.total_samples - len(indices)
+        if n_random > 0:
+            all_indices = list(range(self.total_samples))
+            perm = torch.randperm(len(all_indices), generator=g)[:n_random].tolist()
+            indices.extend([all_indices[i] for i in perm])
+        
+        # Shuffle all together
+        if self.shuffle:
+            perm = torch.randperm(len(indices), generator=g).tolist()
+            indices = [indices[i] for i in perm]
+        
+        # Distribute to ranks
+        indices = indices[self.rank::self.world_size]
+        return indices
+    
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._generate_indices())
+    
+    def __len__(self) -> int:
+        return self.num_samples
+    
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+

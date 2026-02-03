@@ -153,11 +153,23 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8):
     
     return local_mse.mean()
 
-def envwise_pcc(pred, target, env_id, eps=1e-8):
+def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=8):
     """
     Compute Pearson r independently for each environment.
     Computes LOCAL correlation per environment - DDP handles gradient sync.
     Uses Fisher z-transform weighted by sample count for stable averaging.
+    
+    IMPORTANT: For this loss to work well during training, batches should
+    contain multiple samples from the same environment. Use EnvStratifiedSampler
+    instead of random sampling to ensure reliable gradients.
+    
+    Args:
+        pred: Predictions [B] or [B, 1]
+        target: Targets [B] or [B, 1]  
+        env_id: Environment IDs [B]
+        eps: Small constant for numerical stability
+        min_samples: Minimum samples per environment to include in loss
+                     (environments with fewer samples are excluded, default=8)
     """
     pred = pred.squeeze(-1).float()
     target = target.squeeze(-1).float()
@@ -193,7 +205,8 @@ def envwise_pcc(pred, target, env_id, eps=1e-8):
     r_per_env = cov / (var_x.sqrt() * var_y.sqrt() + eps)
     r_per_env = r_per_env.clamp(-1.0, 1.0)
 
-    valid = (count > 1) & (var_x > eps) & (var_y > eps)
+    # Require minimum sample count for stable correlation estimate
+    valid = (count >= min_samples) & (var_x > eps) & (var_y > eps)
     if not valid.any():
         # fallback: use global Pearson correlation on local batch
         r = torch_pearsonr(pred, target)

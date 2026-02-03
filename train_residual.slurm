@@ -60,6 +60,8 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export LOSS="mse+envpcc"
 export LOSS_WEIGHTS="0.001,1.0"
 export SCALE_TARGETS=False
+export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
+export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -114,7 +116,9 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
-        --scale_targets $SCALE_TARGETS
+        --scale_targets $SCALE_TARGETS \
+        --env_stratified $ENV_STRATIFIED \
+        --min_samples_per_env $MIN_SAMPLES_PER_ENV
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
