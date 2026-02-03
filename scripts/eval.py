@@ -227,7 +227,8 @@ def load_model(device: torch.device,
     gxe_layer = config.get("gxe_layers", args.gxe_layers)
     n_head = config.get("n_head", args.heads)
     n_embd = config.get("n_embd", args.emb_size)
-    moe = config.get("moe", args.moe)
+    # Support both old "moe" key and new "wg" key for backwards compatibility
+    moe = config.get("wg", config.get("moe", args.wg))
     loss = config.get("loss", args.loss)
     loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)

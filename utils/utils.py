@@ -109,13 +109,14 @@ def make_run_name(args) -> str:
     full = "fulltf+" if full_transformer else ""
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
+    strat = "strat+" if getattr(args, "env_stratified", False) else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat).rstrip("+")
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)

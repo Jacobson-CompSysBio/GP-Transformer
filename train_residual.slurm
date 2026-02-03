@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J train_residual_ft_moe
+#SBATCH -J 3p,strat,moe,res
 #SBATCH -N 8
-#SBATCH -t 02:00:00
-#SBATCH -p batch 
+#SBATCH -t 08:00:00
+#SBATCH -p extended 
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -29,9 +29,9 @@ export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
 export RES=True
 export FULL_TRANSFORMER=False
-export G_ENCODER_TYPE=dense  # options: "dense", "moe"
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
-export MOE_TOP_K=4
+export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True # set to True to enable shared expert
 export MOE_LOSS_WEIGHT=0.01
 
@@ -51,14 +51,14 @@ export EARLY_STOP=200
 export G_LAYERS=1
 export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=2
+export GXE_LAYERS=1
 
 export HEADS=4
 export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export LOSS="mse+envpcc"
-export LOSS_WEIGHTS="0.001,1.0"
+export LOSS="envpcc"
+export LOSS_WEIGHTS="1.0"
 export SCALE_TARGETS=False
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation

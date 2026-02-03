@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J newdata
-#SBATCH -N 4 
-#SBATCH -t 06:00:00
+#SBATCH -J best-model
+#SBATCH -N 8 
+#SBATCH -t 08:00:00
 #SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -55,14 +55,14 @@ export EARLY_STOP=200
 export G_LAYERS=1
 export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=2
+export GXE_LAYERS=1
 
 export HEADS=4
 export EMB_SIZE=256
 export SCALE_TARGETS=False
 
-export LOSS="envpcc+envmse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
