@@ -38,7 +38,7 @@ def parse_args():
     p.add_argument("--e_enc", type=str2bool, default=True)
     p.add_argument("--ld_enc", type=str2bool, default=True)
     p.add_argument("--gxe_enc", type=str, default=True)
-    p.add_argument("--moe", type=str2bool, default=True)
+    p.add_argument("--wg", type=str2bool, default=True, help="Weighted gate for 3-prong architecture")
     p.add_argument("--g_encoder_type", type=str, default=None)
     p.add_argument("--moe_num_experts", type=int, default=None)
     p.add_argument("--moe_top_k", type=int, default=None)
@@ -107,7 +107,7 @@ def make_run_name(args) -> str:
     e = "e+" if args.e_enc and not full_transformer else ""
     ld = "ld+" if args.ld_enc and not full_transformer else ""
     full = "fulltf+" if full_transformer else ""
-    wg = "wg+" if args.moe and not full_transformer else ""
+    wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):

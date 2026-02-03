@@ -221,7 +221,7 @@ def main():
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
-                                moe=args.moe,
+                                moe=args.wg,
                                 g_encoder_type=g_encoder_type,
                                 moe_num_experts=moe_num_experts,
                                 moe_top_k=moe_top_k,
@@ -237,7 +237,7 @@ def main():
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
-                                moe=args.moe,
+                                moe=args.wg,
                                 g_encoder_type=g_encoder_type,
                                 moe_num_experts=moe_num_experts,
                                 moe_top_k=moe_top_k,
@@ -252,7 +252,7 @@ def main():
     # that may not flow gradients through all parameters in every forward pass.
     # MoE models have expert routing that may leave some experts unused.
     # In both cases, we need find_unused_parameters=True to avoid DDP sync errors.
-    find_unused = bool(args.moe) or moe_encoder_enabled or bool(args.residual)
+    find_unused = bool(args.wg) or moe_encoder_enabled or bool(args.residual)
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,

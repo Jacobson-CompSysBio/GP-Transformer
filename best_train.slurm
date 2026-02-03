@@ -27,7 +27,17 @@ export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
-export MOE=True
+export WG=True  # weighted gate for 3-prong architecture
+export FULL_TRANSFORMER=False  # use 3-prong architecture, not FullTransformer
+
+# MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
+export G_ENCODER_TYPE=dense  # options: "dense", "moe"
+export MOE_NUM_EXPERTS=8
+export MOE_TOP_K=2
+export MOE_SHARED_EXPERT=True
+export MOE_EXPERT_HIDDEN_DIM=256
+export MOE_SHARED_EXPERT_HIDDEN_DIM=256
+export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
 export GBS=16384
@@ -53,6 +63,8 @@ export SCALE_TARGETS=False
 
 export LOSS="envpcc+envmse" # + separated list of losses
 export LOSS_WEIGHTS="1.0,0.01" # comma separated list of weights for each loss
+export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
+export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -91,7 +103,15 @@ srun -N ${SLURM_NNODES} \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
-        --moe $MOE \
+        --wg $WG \
+        --full_transformer $FULL_TRANSFORMER \
+        --g_encoder_type $G_ENCODER_TYPE \
+        --moe_num_experts $MOE_NUM_EXPERTS \
+        --moe_top_k $MOE_TOP_K \
+        --moe_shared_expert $MOE_SHARED_EXPERT \
+        --moe_expert_hidden_dim $MOE_EXPERT_HIDDEN_DIM \
+        --moe_shared_expert_hidden_dim $MOE_SHARED_EXPERT_HIDDEN_DIM \
+        --moe_loss_weight $MOE_LOSS_WEIGHT \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -105,7 +125,9 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
-        --scale_targets $SCALE_TARGETS
+        --scale_targets $SCALE_TARGETS \
+        --env_stratified $ENV_STRATIFIED \
+        --min_samples_per_env $MIN_SAMPLES_PER_ENV
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -132,7 +154,8 @@ python -u scripts/eval.py \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
-    --moe $MOE \
+    --wg $WG \
+    --full_transformer $FULL_TRANSFORMER \
     --num_epochs $NUM_EPOCHS \
     --lr $LR \
     --weight_decay $WEIGHT_DECAY \

@@ -201,7 +201,7 @@ def main():
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
-                                moe=args.moe,
+                                moe=args.wg,
                                 g_encoder_type=g_encoder_type,
                                 moe_num_experts=moe_num_experts,
                                 moe_top_k=moe_top_k,

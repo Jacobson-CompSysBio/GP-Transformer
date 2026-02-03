@@ -26,7 +26,7 @@ export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
-export MOE=True
+export WG=True  # weighted gate for 3-prong architecture
 export RES=True
 export FULL_TRANSFORMER=True
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
@@ -96,7 +96,7 @@ srun -N ${SLURM_NNODES} \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
-        --moe $MOE \
+        --wg $WG \
         --full_transformer $FULL_TRANSFORMER \
         --residual $RES \
         --num_epochs $NUM_EPOCHS \
@@ -141,7 +141,7 @@ python -u scripts/eval.py \
     --e_enc $E_ENC \
     --ld_enc $LD_ENC \
     --gxe_enc $GXE_ENC \
-    --moe $MOE \
+    --wg $WG \
     --full_transformer $FULL_TRANSFORMER \
     --residual $RES \
     --num_epochs $NUM_EPOCHS \

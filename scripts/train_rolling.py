@@ -163,7 +163,7 @@ def main():
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
                                 gxe_enc=args.gxe_enc,
-                                moe=args.moe,
+                                moe=args.wg,
                                 config=config).to(device)
         model = DDP(model,
                     device_ids=[local_rank],

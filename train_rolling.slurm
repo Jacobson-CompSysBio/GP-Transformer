@@ -26,7 +26,7 @@ export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
-export MOE=True
+export WG=True  # weighted gate for 3-prong architecture
 
 export BATCH_SIZE=32
 export NUM_EPOCHS=2500
@@ -82,7 +82,7 @@ srun -N ${SLURM_NNODES} \
         --e_enc $E_ENC \
         --ld_enc $LD_ENC \
         --gxe_enc $GXE_ENC \
-        --moe $MOE \
+        --wg $WG \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
