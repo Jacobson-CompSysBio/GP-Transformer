@@ -63,6 +63,11 @@ export SCALE_TARGETS=False
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
+# Contrastive loss: encourages G embeddings to reflect genetic similarity
+export CONTRASTIVE_LOSS=False
+export CONTRASTIVE_WEIGHT=0.1
+export CONTRASTIVE_TEMPERATURE=0.1
+
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
 export LEO_VAL=True
@@ -124,6 +129,9 @@ srun -N ${SLURM_NNODES} \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
+        --contrastive_loss $CONTRASTIVE_LOSS \
+        --contrastive_weight $CONTRASTIVE_WEIGHT \
+        --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

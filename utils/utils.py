@@ -77,6 +77,12 @@ def parse_args():
                    help="composite loss string, e.g. 'mse+envpcc'")
     p.add_argument("--loss_weights", type=str, default="1.0",
                    help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
+    p.add_argument("--contrastive_loss", type=str2bool, default=False,
+                   help="Add genomic contrastive loss to encourage G embeddings to reflect genetic similarity")
+    p.add_argument("--contrastive_weight", type=float, default=0.1,
+                   help="Weight for genomic contrastive loss (default 0.1)")
+    p.add_argument("--contrastive_temperature", type=float, default=0.1,
+                   help="Temperature for contrastive loss softmax (default 0.1)")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
@@ -115,13 +121,14 @@ def make_run_name(args) -> str:
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
+    contr = "contr+" if getattr(args, "contrastive_loss", False) else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr).rstrip("+")
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)

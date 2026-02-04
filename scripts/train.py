@@ -19,7 +19,7 @@ from utils.dataset import *
 from models.model import *
 from models.config import Config
 from utils.get_lr import get_lr
-from utils.loss import build_loss, GlobalPearsonCorrLoss
+from utils.loss import build_loss, GlobalPearsonCorrLoss, GenomicContrastiveLoss, compute_ibs_similarity
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -243,6 +243,18 @@ def main():
     
     # build loss
     loss_function = build_loss(args.loss, args.loss_weights)
+    
+    # optional contrastive loss for genomic embeddings
+    use_contrastive = getattr(args, 'contrastive_loss', False)
+    if use_contrastive:
+        contrastive_weight = getattr(args, 'contrastive_weight', 0.1)
+        contrastive_temperature = getattr(args, 'contrastive_temperature', 0.1)
+        contrastive_loss_fn = GenomicContrastiveLoss(temperature=contrastive_temperature)
+        if is_main(rank):
+            print(f"[INFO] Using genomic contrastive loss with weight={contrastive_weight}, temperature={contrastive_temperature}")
+    else:
+        contrastive_loss_fn = None
+        contrastive_weight = 0.0
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -297,6 +309,9 @@ def main():
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
+                             "contrastive_loss": use_contrastive,
+                             "contrastive_weight": contrastive_weight if use_contrastive else None,
+                             "contrastive_temperature": contrastive_temperature if use_contrastive else None,
                              "g_encoder_type": g_encoder_type,
                              "moe_num_experts": moe_num_experts,
                              "moe_top_k": moe_top_k,
@@ -311,6 +326,9 @@ def main():
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if use_contrastive:
+            run.define_metric("train_loss/contrastive", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive", step_metric="epoch")
         if moe_encoder_enabled:
             run.define_metric("train_loss/moe_lb", step_metric="iter_num")
             run.define_metric("train_loss_epoch/moe_lb", step_metric="epoch")
@@ -347,8 +365,22 @@ def main():
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                preds = model(xb)
+                if use_contrastive:
+                    preds, g_embeddings = model(xb, return_g_embeddings=True)
+                else:
+                    preds = model(xb)
+                    g_embeddings = None
+                    
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+                
+                # Add contrastive loss if enabled
+                if use_contrastive and g_embeddings is not None:
+                    # Compute IBS similarity on-the-fly from genotype data
+                    ibs_sim = compute_ibs_similarity(xb["g_data"])
+                    contrastive_loss = contrastive_loss_fn(g_embeddings, ibs_sim)
+                    loss_total = loss_total + contrastive_weight * contrastive_loss
+                    loss_parts["contrastive"] = float(contrastive_loss.detach().item())
+                
                 moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
                 if moe_aux_loss is not None:
                     # Detach to avoid a second autograd edge on the gate params (DDP mark-ready error)
