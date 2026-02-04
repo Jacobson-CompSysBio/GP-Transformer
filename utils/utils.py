@@ -81,6 +81,10 @@ def parse_args():
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
+    p.add_argument("--leo_val", type=str2bool, default=False,
+                   help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
+    p.add_argument("--leo_val_fraction", type=float, default=0.15,
+                   help="Fraction of environments to hold out for LEO validation (default 0.15)")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     return p.parse_args()
@@ -110,13 +114,14 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
+    leo = "leo+" if getattr(args, "leo_val", False) else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo).rstrip("+")
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
