@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J fulltf,strat,moe
+#SBATCH -J test-noleo
 #SBATCH -N 8
-#SBATCH -t 8:00:00
-#SBATCH -p extended 
-##SBATCH -q debug
+#SBATCH -t 2:00:00
+#SBATCH -p batch
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -66,7 +66,7 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
-export LEO_VAL=True
+export LEO_VAL=False
 export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
 
 ### wandb settings ###
