@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from torchsort import soft_rank
-from typing import Callable, Union, Tuple, Dict, List
+from typing import Callable, Union, Tuple, Dict, List, Optional
 
 # small helper for optional DDP all-reduce
 def _all_reduce_if_needed(*tensors, op=dist.ReduceOp.SUM):
@@ -380,6 +381,216 @@ class XiLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
         pass
 
+
+# =============================================================================
+# CONTRASTIVE AND AUXILIARY LOSSES FOR GENERALIZABLE GxE LEARNING
+# =============================================================================
+
+def compute_ibs_similarity(g_data: torch.Tensor) -> torch.Tensor:
+    """
+    Compute Identity-by-State (IBS) similarity between hybrids in a batch.
+    
+    IBS = 1 - (mean absolute difference / 2)
+    For SNPs encoded as 0, 1, 2: max difference is 2.
+    
+    Args:
+        g_data: (batch, n_snps) tensor of genotype data (0, 1, 2 encoded)
+    
+    Returns:
+        (batch, batch) similarity matrix with values in [0, 1]
+    """
+    # Normalize to [0, 1] range
+    g_norm = g_data.float() / 2.0  # Now in [0, 1]
+    
+    # Compute pairwise L1 distance
+    # |g_i - g_j| for each SNP, then mean across SNPs
+    diff = g_norm.unsqueeze(1) - g_norm.unsqueeze(0)  # (B, B, n_snps)
+    l1_dist = diff.abs().mean(dim=-1)  # (B, B)
+    
+    # Convert distance to similarity
+    similarity = 1.0 - l1_dist
+    
+    return similarity
+
+
+class GenomicContrastiveLoss(nn.Module):
+    """
+    Learn G embeddings where genetically similar hybrids have similar embeddings.
+    
+    Uses genetic similarity (IBS) as soft supervision to encourage the G encoder
+    to learn meaningful representations that capture functional similarity.
+    
+    This provides self-supervision from genotype data and should improve
+    generalization to new environments.
+    """
+    
+    def __init__(self, temperature: float = 0.1):
+        super().__init__()
+        self.temperature = temperature
+    
+    def forward(
+        self, 
+        g_embeddings: torch.Tensor,  # (batch, d_model)
+        genetic_similarity: torch.Tensor  # (batch, batch) - IBS or kinship
+    ) -> torch.Tensor:
+        """
+        Args:
+            g_embeddings: Hybrid embeddings from G encoder (batch, d_model)
+            genetic_similarity: Pairwise genetic similarity matrix (0 to 1)
+        """
+        # Normalize embeddings
+        g_norm = F.normalize(g_embeddings, dim=1)
+        
+        # Compute embedding similarity
+        embed_sim = torch.mm(g_norm, g_norm.t()) / self.temperature
+        
+        # Use genetic similarity as soft targets
+        # High genetic similarity -> high embedding similarity
+        targets = F.softmax(genetic_similarity / self.temperature, dim=1)
+        
+        # Cross-entropy loss (KL divergence with softmax)
+        log_probs = F.log_softmax(embed_sim, dim=1)
+        loss = -torch.sum(targets * log_probs) / g_embeddings.size(0)
+        
+        return loss
+
+
+class TripletRankingLoss(nn.Module):
+    """
+    Learn to rank hybrids correctly within environments using triplet loss.
+    
+    For each anchor hybrid, find a positive (higher yield) and negative (lower yield).
+    Penalize if prediction order doesn't match target order.
+    
+    This is a margin-based alternative to correlation losses.
+    """
+    
+    def __init__(self, margin: float = 0.5):
+        super().__init__()
+        self.margin = margin
+    
+    def forward(
+        self,
+        predictions: torch.Tensor,  # (batch,) predicted yields
+        targets: torch.Tensor,       # (batch,) true yields
+        env_ids: torch.Tensor        # (batch,) environment identifiers
+    ) -> torch.Tensor:
+        """
+        For each sample, find samples in the same env with higher/lower yield.
+        Penalize if prediction order doesn't match target order.
+        """
+        if predictions.dim() > 1:
+            predictions = predictions.squeeze(-1)
+        if targets.dim() > 1:
+            targets = targets.squeeze(-1)
+            
+        batch_size = predictions.size(0)
+        total_loss = torch.tensor(0.0, device=predictions.device)
+        n_triplets = 0
+        
+        for env in env_ids.unique():
+            mask = env_ids == env
+            env_pred = predictions[mask]
+            env_true = targets[mask]
+            n = env_pred.size(0)
+            
+            if n < 3:
+                continue
+            
+            # Create all valid triplets efficiently
+            # For each pair (i, j) where true[i] > true[j], pred[i] should be > pred[j]
+            true_diff = env_true.unsqueeze(0) - env_true.unsqueeze(1)  # (n, n)
+            pred_diff = env_pred.unsqueeze(0) - env_pred.unsqueeze(1)  # (n, n)
+            
+            # Mask for valid pairs: true[i] > true[j] + threshold
+            valid_pairs = true_diff > 0.2  # At least 0.2 Mg/ha difference
+            
+            if valid_pairs.sum() == 0:
+                continue
+            
+            # Hinge loss: pred[i] - pred[j] should be > margin when true[i] > true[j]
+            violations = F.relu(self.margin - pred_diff[valid_pairs])
+            total_loss = total_loss + violations.sum()
+            n_triplets += valid_pairs.sum().item()
+        
+        if n_triplets > 0:
+            return total_loss / n_triplets
+        else:
+            return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+
+
+class RankingConsistencyLoss(nn.Module):
+    """
+    Encourage consistent hybrid rankings across similar environments.
+    
+    If Environment A and B are similar (e.g., same location, similar weather),
+    then the ranking of hybrids should be similar. This teaches the model
+    that rankings should transfer across environments.
+    
+    Requires pairs of samples from the same hybrid in different environments.
+    """
+    
+    def __init__(self, margin: float = 0.1):
+        super().__init__()
+        self.margin = margin
+    
+    def forward(
+        self,
+        predictions: torch.Tensor,  # (batch,) predictions
+        targets: torch.Tensor,       # (batch,) true yields
+        hybrid_ids: torch.Tensor,    # (batch,) hybrid identifiers
+        env_ids: torch.Tensor        # (batch,) environment identifiers
+    ) -> torch.Tensor:
+        """
+        For hybrids appearing in multiple environments, encourage consistent rankings.
+        """
+        if predictions.dim() > 1:
+            predictions = predictions.squeeze(-1)
+        if targets.dim() > 1:
+            targets = targets.squeeze(-1)
+            
+        # Find hybrids that appear in multiple environments
+        unique_hybrids = hybrid_ids.unique()
+        
+        total_loss = torch.tensor(0.0, device=predictions.device)
+        n_pairs = 0
+        
+        for hybrid in unique_hybrids:
+            mask = hybrid_ids == hybrid
+            if mask.sum() < 2:
+                continue
+            
+            # Get predictions and targets for this hybrid across envs
+            h_pred = predictions[mask]
+            h_true = targets[mask]
+            h_envs = env_ids[mask]
+            
+            # If same hybrid has different rankings in different envs, 
+            # that's GxE - we want to capture it, not penalize it
+            # So this loss encourages the MODEL's predictions to match
+            # the true pattern (whatever it is)
+            
+            # Rank predictions should match rank of true values
+            pred_ranks = h_pred.argsort().argsort().float()
+            true_ranks = h_true.argsort().argsort().float()
+            
+            # Spearman-like loss on the hybrid's performance across envs
+            rank_corr = F.cosine_similarity(
+                pred_ranks - pred_ranks.mean(),
+                true_ranks - true_ranks.mean(),
+                dim=0
+            )
+            
+            # Negative correlation is loss (want high correlation)
+            total_loss = total_loss + (1.0 - rank_corr)
+            n_pairs += 1
+        
+        if n_pairs > 0:
+            return total_loss / n_pairs
+        else:
+            return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+
+
 ### composite utilities ###
 class _CallableLoss(nn.Module):
     """Wrapper to unify nn.Module and callable losses functions"""
@@ -452,6 +663,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(KTauLoss(), expects_env=False, name=term)
         if term == "xi":
             return term, _CallableLoss(XiLoss(), expects_env=False, name=term)
+        if term == "triplet":
+            return term, _CallableLoss(TripletRankingLoss(), expects_env=True, name=term)
         raise ValueError(f"Unknown loss term: {term}")
     
     loss_list = []

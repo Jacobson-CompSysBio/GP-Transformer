@@ -92,6 +92,14 @@ def main():
     torch.manual_seed(args.seed + rank)
     random.seed(args.seed + rank)
 
+    # Check if using LEO (Leave-Environment-Out) validation
+    leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
+    leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    
+    if is_main(rank) and leo_val:
+        print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
+        print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
         split="train",
@@ -99,18 +107,32 @@ def main():
         residual=args.residual,
         scaler=None,
         y_scalers=None,
-        scale_targets=args.scale_targets
+        scale_targets=args.scale_targets,
+        leo_val=leo_val,
+        leo_val_fraction=leo_val_fraction,
+        leo_seed=args.seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
+    leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
+    
+    if is_main(rank) and leo_val:
+        print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
+        print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+    
     val_ds = GxE_Dataset(
         split="val",
         data_path="data/maize_data_2014-2023_vs_2024_v2/",
         residual=args.residual,
         scaler=env_scaler,
         y_scalers=y_scalers,
-        scale_targets=args.scale_targets
+        scale_targets=args.scale_targets,
+        leo_val=leo_val,
+        leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
     )
+    
+    if is_main(rank) and leo_val:
+        print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)

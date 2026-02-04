@@ -33,6 +33,38 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
+# ----------------------------------------------------------------
+# LEO (Leave-Environment-Out) validation split helper
+def compute_leo_val_envs(
+    x_raw: pd.DataFrame,
+    test_year: int = 2024,
+    val_fraction: float = 0.15,
+    seed: int = 42,
+) -> set:
+    """
+    Compute which environments should be held out for LEO validation.
+    
+    Returns a set of environment names that will be used for validation.
+    These environments are entirely held out from training to better
+    simulate generalization to unseen environments (like the test set).
+    """
+    rng = np.random.default_rng(seed)
+    
+    # Get environments from years before test_year
+    x_raw = x_raw.copy()
+    x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
+    train_val_mask = x_raw['Year'] < test_year
+    
+    # Get unique environments from train/val pool
+    all_envs = x_raw.loc[train_val_mask, 'Env'].unique()
+    n_val_envs = max(1, int(len(all_envs) * val_fraction))
+    
+    # Randomly select environments for validation
+    val_envs = set(rng.choice(all_envs, size=n_val_envs, replace=False))
+    
+    return val_envs
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
@@ -44,7 +76,11 @@ class GxE_Dataset(Dataset):
                  train_year_max: int | None = None,
                  val_year: int | None = None,
                  y_scalers: Optional[Dict[str, LabelScaler]] = None,
-                 scale_targets: bool = True
+                 scale_targets: bool = True,
+                 leo_val: bool = False,
+                 leo_val_envs: Optional[set] = None,
+                 leo_val_fraction: float = 0.15,
+                 leo_seed: int = 42,
                  ):
         
         """
@@ -57,11 +93,16 @@ class GxE_Dataset(Dataset):
             val_year (int|None): if not None and split=='val', filter to this year
             y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
             scale_targets (bool): if True, scale targets using y_scalers
+            leo_val (bool): if True, use Leave-Environment-Out validation
+            leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
+            leo_val_fraction (float): fraction of environments to hold out for LEO val
+            leo_seed (int): random seed for LEO environment selection
         """
         super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
+        self.leo_val = leo_val
         self.scale_targets = scale_targets
 
         ############################################
@@ -105,14 +146,36 @@ class GxE_Dataset(Dataset):
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
-        if split == "train":
-            cutoff = 2022 if train_year_max is None else train_year_max
-            keep_mask = x_raw['Year'] <= cutoff
-        elif split == "val":
-            which = 2023 if val_year is None else val_year
-            keep_mask = x_raw['Year'] == which
-        else: # 'test', 'sub'
-            keep_mask = x_raw['Year'] >= 2024
+        # LEO validation: hold out entire environments (not years)
+        if leo_val and split in ("train", "val"):
+            # Compute or use provided LEO val environments
+            if leo_val_envs is None:
+                # First call (train split) - compute the held-out environments
+                leo_val_envs = compute_leo_val_envs(
+                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                )
+            self.leo_val_envs = leo_val_envs
+            
+            # Filter to years before test (2014-2023)
+            pre_test_mask = x_raw['Year'] < 2024
+            env_in_val = x_raw['Env'].isin(leo_val_envs)
+            
+            if split == "train":
+                # Train: all pre-2024 data EXCEPT held-out environments
+                keep_mask = pre_test_mask & ~env_in_val
+            else:  # val
+                # Val: only the held-out environments (from any year < 2024)
+                keep_mask = pre_test_mask & env_in_val
+        else:
+            self.leo_val_envs = None
+            if split == "train":
+                cutoff = 2022 if train_year_max is None else train_year_max
+                keep_mask = x_raw['Year'] <= cutoff
+            elif split == "val":
+                which = 2023 if val_year is None else val_year
+                keep_mask = x_raw['Year'] == which
+            else: # 'test', 'sub'
+                keep_mask = x_raw['Year'] >= 2024
         
         ### FILTER/ALIGN X/Y BY MASK BUILT ON X ###
         x_filt = x_raw.loc[keep_mask.values].reset_index(drop=True)

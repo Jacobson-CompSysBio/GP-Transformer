@@ -121,10 +121,21 @@ class FullTransformer(nn.Module):
         tokens = self.ln_f(tokens)
         return tokens
 
-    def forward(self, x):
-        tokens, _ = self._build_tokens(x)
+    def forward(self, x, return_g_embeddings: bool = False):
+        tokens, env_start = self._build_tokens(x)
+        
+        # Extract G embeddings before transformer (for contrastive loss)
+        if return_g_embeddings:
+            # G tokens are from index 1 to env_start (excluding CLS at 0)
+            g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
+            g_embed = g_tokens.mean(dim=1)  # Pool to (B, C)
+        
         tokens = self._encode_tokens(tokens)
-        return self.head(tokens[:, 0])
+        pred = self.head(tokens[:, 0])
+        
+        if return_g_embeddings:
+            return pred, g_embed
+        return pred
 
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -390,11 +401,25 @@ class GxE_Transformer(nn.Module):
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
-        return rep, e_enc
+        return rep, e_enc, g_enc
     
-    def forward(self, x):
-        rep, _ = self._encode(x)
-        return self.final_layer(self.final_dropout(rep))
+    def forward(self, x, return_g_embeddings: bool = False):
+        rep, _, g_enc = self._encode(x)
+        pred = self.final_layer(self.final_dropout(rep))
+        
+        if return_g_embeddings:
+            # Return pooled G embedding for contrastive loss
+            if isinstance(g_enc, torch.Tensor):
+                if g_enc.dim() == 3:
+                    # Take CLS token or mean pool
+                    g_embed = g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
+                else:
+                    g_embed = g_enc
+            else:
+                g_embed = None
+            return pred, g_embed
+        
+        return pred
     
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
