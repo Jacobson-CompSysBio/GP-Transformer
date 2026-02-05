@@ -144,8 +144,8 @@ class MoELayer(nn.Module):
             weighted_output = output * weights
 
             # add to the final output tensor at the correct positions
-            # use index_add_ for scatter-add op.
-            final_output.index_add(0, original_indices, weighted_output)
+            # use index_add_ for scatter-add op. (note: underscore for in-place!)
+            final_output.index_add_(0, original_indices, weighted_output)
 
         # add shared expert output (always active)
         if self.shared_expert is not None:

@@ -115,9 +115,9 @@ class TransformerBlock(nn.Module):
         # stochastic depth: randomly skip this block during training
         if self.training and self.drop_path > 0.0:
             if torch.rand(1).item() < self.drop_path:
-                return x  # skip entire block
+                return x  # skip entire block (same return type as normal path)
         
-        # resid connections
+        # resid connections (Pre-LN: normalize before attention/mlp)
         x = x + self.dropout(self.attn(self.ln_1(x)))
         x = x + self.dropout(self.mlp(self.ln_2(x)))
         return x

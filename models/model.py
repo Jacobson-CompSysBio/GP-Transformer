@@ -86,6 +86,14 @@ class FullTransformer(nn.Module):
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+        
+        # Projection head for contrastive learning (like SimCLR)
+        # Projects G embeddings to a space good for contrastive learning
+        self.g_proj = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd),
+            nn.ReLU(),
+            nn.Linear(config.n_embd, config.n_embd // 2),
+        )
 
     def _build_tokens(self, x):
         g = x["g_data"]            # (B, Tm)
@@ -123,14 +131,17 @@ class FullTransformer(nn.Module):
 
     def forward(self, x, return_g_embeddings: bool = False):
         tokens, env_start = self._build_tokens(x)
+        tokens = self._encode_tokens(tokens)
         
-        # Extract G embeddings before transformer (for contrastive loss)
+        # Extract G embeddings AFTER transformer (for contrastive loss)
+        # This is crucial - now the embeddings contain learned representations
         if return_g_embeddings:
             # G tokens are from index 1 to env_start (excluding CLS at 0)
             g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
-            g_embed = g_tokens.mean(dim=1)  # Pool to (B, C)
+            g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
+            # Project through contrastive head (like SimCLR)
+            g_embed = self.g_proj(g_pooled)  # (B, C//2)
         
-        tokens = self._encode_tokens(tokens)
         pred = self.head(tokens[:, 0])
         
         if return_g_embeddings:
@@ -473,7 +484,7 @@ class GxE_ResidualTransformer(GxE_Transformer):
         self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
 
     def forward(self, x):
-        rep, e_enc = self._encode(x)
+        rep, e_enc, _ = self._encode(x)  # Unpack all 3 return values
 
         # non-residual mode: final layer predicts total yield
         if not self.residual:

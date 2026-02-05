@@ -270,9 +270,9 @@ def main():
     # other options
     batches_per_epoch = len(train_loader)
     total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch * 1  # warmup for ~1 epoch
-    lr_decay_iters = int(total_iters * 0.6)  # decay over ~60% of training
-    max_lr, min_lr = (args.lr), (0.1 * args.lr)  # keep a higher floor for stability
+    warmup_iters = batches_per_epoch * 2  # warmup for ~2 epochs (more stable)
+    lr_decay_iters = int(total_iters * 0.8)  # decay over last 20% (was 60%)
+    max_lr, min_lr = (args.lr), (0.2 * args.lr)  # higher floor (0.2x instead of 0.1x)
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
@@ -386,19 +386,28 @@ def main():
                     
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
                 
-                # Add contrastive loss if enabled
-                if use_contrastive and g_embeddings is not None:
+                # Add contrastive loss if enabled (with warmup)
+                # Don't add contrastive loss until model has learned basic patterns
+                contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
+                if use_contrastive and g_embeddings is not None and epoch_num >= contrastive_warmup_epochs:
                     # Pass raw genotype data - contrastive loss computes GRM/IBS internally
                     contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
-                    loss_total = loss_total + contrastive_weight * contrastive_loss
+                    # Ramp up contrastive weight linearly after warmup
+                    warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
+                    effective_weight = contrastive_weight * warmup_factor
+                    loss_total = loss_total + effective_weight * contrastive_loss
                     loss_parts["contrastive"] = float(contrastive_loss.detach().item())
+                    loss_parts["contrastive_weight_eff"] = effective_weight
+                elif use_contrastive:
+                    loss_parts["contrastive"] = 0.0
+                    loss_parts["contrastive_weight_eff"] = 0.0
                 
                 moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
                 if moe_aux_loss is not None:
-                    # Detach to avoid a second autograd edge on the gate params (DDP mark-ready error)
-                    moe_aux_loss_detached = moe_aux_loss.detach()
-                    loss_total = loss_total + moe_aux_loss_detached
-                    loss_parts["moe_lb"] = float(moe_aux_loss_detached.item())
+                    # Don't detach - gradients need to flow to gate network for load balancing
+                    # DDP handles this with find_unused_parameters=True
+                    loss_total = loss_total + moe_aux_loss
+                    loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
 

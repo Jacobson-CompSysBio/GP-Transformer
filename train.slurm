@@ -66,8 +66,9 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
 # This can improve generalization by learning meaningful genomic representations
-export CONTRASTIVE_LOSS=True       # Set to True to enable
-export CONTRASTIVE_WEIGHT=0.1       # weight for contrastive loss term
+# NOTE: Now uses warmup - doesn't activate until epoch 50
+export CONTRASTIVE_LOSS=True        # Set to True to enable
+export CONTRASTIVE_WEIGHT=0.05      # Lower weight (was 0.1) - ramps up after warmup
 export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
 export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
 export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
