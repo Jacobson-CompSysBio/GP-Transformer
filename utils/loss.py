@@ -413,46 +413,246 @@ def compute_ibs_similarity(g_data: torch.Tensor) -> torch.Tensor:
     return similarity
 
 
+def compute_grm_similarity(g_data: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Compute Genomic Relationship Matrix (GRM) similarity between hybrids.
+    
+    GRM is the standard in quantitative genetics and accounts for allele frequencies.
+    Formula: G = ZZ' / m, where Z is centered and scaled genotype matrix.
+    
+    This weights rare alleles more heavily (more informative) and is more
+    biologically meaningful than IBS for predicting phenotypic similarity.
+    
+    Args:
+        g_data: (batch, n_snps) tensor of genotype data (0, 1, 2 encoded)
+        eps: Small constant for numerical stability
+    
+    Returns:
+        (batch, batch) genomic relationship matrix (can be > 1 for inbred, < 0 for unrelated)
+    """
+    g = g_data.float()
+    batch_size, n_snps = g.shape
+    
+    # Compute allele frequencies from batch (p = mean / 2)
+    p = g.mean(dim=0) / 2.0  # (n_snps,)
+    
+    # Center genotypes: subtract 2p (expected value under HWE)
+    g_centered = g - 2.0 * p.unsqueeze(0)  # (batch, n_snps)
+    
+    # Scale by sqrt(2 * p * (1-p)) - the expected std under HWE
+    # This weights rare alleles more heavily
+    scale = torch.sqrt(2.0 * p * (1.0 - p) + eps)  # (n_snps,)
+    g_scaled = g_centered / scale.unsqueeze(0)  # (batch, n_snps)
+    
+    # Handle SNPs with no variation (p=0 or p=1)
+    # Set their contribution to 0
+    valid_snps = (p > eps) & (p < 1.0 - eps)
+    g_scaled = g_scaled * valid_snps.float().unsqueeze(0)
+    n_valid = valid_snps.sum().clamp_min(1.0)
+    
+    # GRM = ZZ' / m (m = number of valid SNPs)
+    grm = torch.mm(g_scaled, g_scaled.t()) / n_valid
+    
+    return grm
+
+
+def compute_env_similarity(e_data: torch.Tensor, method: str = "cosine") -> torch.Tensor:
+    """
+    Compute environment similarity for environment contrastive loss.
+    
+    If two environments have similar features (weather, soil, etc.),
+    hybrids should rank similarly in them.
+    
+    Args:
+        e_data: (batch, n_env_features) tensor of environment features
+        method: "cosine" or "correlation"
+    
+    Returns:
+        (batch, batch) environment similarity matrix
+    """
+    e = e_data.float()
+    
+    if method == "cosine":
+        # L2 normalize then dot product
+        e_norm = F.normalize(e, dim=1)
+        similarity = torch.mm(e_norm, e_norm.t())
+    elif method == "correlation":
+        # Center then normalize (Pearson correlation)
+        e_centered = e - e.mean(dim=1, keepdim=True)
+        e_norm = F.normalize(e_centered, dim=1)
+        similarity = torch.mm(e_norm, e_norm.t())
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    return similarity
+
+
 class GenomicContrastiveLoss(nn.Module):
     """
     Learn G embeddings where genetically similar hybrids have similar embeddings.
     
-    Uses genetic similarity (IBS) as soft supervision to encourage the G encoder
+    Uses genetic similarity (GRM or IBS) as soft supervision to encourage the G encoder
     to learn meaningful representations that capture functional similarity.
     
-    This provides self-supervision from genotype data and should improve
-    generalization to new environments.
+    Improvements over v1:
+    - GRM instead of IBS (weights by allele frequency, more biologically meaningful)
+    - MSE loss instead of KL (more stable, clearer gradients)
+    - Optional correlation target (align correlation structure, not absolute values)
     """
     
-    def __init__(self, temperature: float = 0.1):
+    def __init__(
+        self, 
+        temperature: float = 0.1,
+        similarity_type: str = "grm",  # "grm" or "ibs"
+        loss_type: str = "mse",  # "mse", "cosine", or "kl"
+    ):
         super().__init__()
         self.temperature = temperature
+        self.similarity_type = similarity_type
+        self.loss_type = loss_type
     
     def forward(
         self, 
         g_embeddings: torch.Tensor,  # (batch, d_model)
-        genetic_similarity: torch.Tensor  # (batch, batch) - IBS or kinship
+        g_data: torch.Tensor = None,  # (batch, n_snps) - raw genotypes for computing similarity
+        genetic_similarity: torch.Tensor = None  # (batch, batch) - precomputed similarity
     ) -> torch.Tensor:
         """
         Args:
             g_embeddings: Hybrid embeddings from G encoder (batch, d_model)
-            genetic_similarity: Pairwise genetic similarity matrix (0 to 1)
+            g_data: Raw genotype data to compute similarity (if genetic_similarity not provided)
+            genetic_similarity: Precomputed similarity matrix (optional)
         """
-        # Normalize embeddings
+        # Compute genetic similarity if not provided
+        if genetic_similarity is None:
+            if g_data is None:
+                raise ValueError("Either g_data or genetic_similarity must be provided")
+            if self.similarity_type == "grm":
+                genetic_similarity = compute_grm_similarity(g_data)
+            else:
+                genetic_similarity = compute_ibs_similarity(g_data)
+        
+        # Compute embedding similarity (cosine similarity)
         g_norm = F.normalize(g_embeddings, dim=1)
+        embed_sim = torch.mm(g_norm, g_norm.t())  # (batch, batch), range [-1, 1]
         
-        # Compute embedding similarity
-        embed_sim = torch.mm(g_norm, g_norm.t()) / self.temperature
-        
-        # Use genetic similarity as soft targets
-        # High genetic similarity -> high embedding similarity
-        targets = F.softmax(genetic_similarity / self.temperature, dim=1)
-        
-        # Cross-entropy loss (KL divergence with softmax)
-        log_probs = F.log_softmax(embed_sim, dim=1)
-        loss = -torch.sum(targets * log_probs) / g_embeddings.size(0)
+        if self.loss_type == "mse":
+            # Normalize GRM to similar range as cosine similarity
+            # GRM typically ranges from -0.5 to 2+ for inbred lines
+            # Shift and scale to roughly [-1, 1]
+            if self.similarity_type == "grm":
+                # Normalize GRM: shift so diagonal is ~1, off-diagonal centered at ~0
+                diag = genetic_similarity.diag().mean()
+                target_sim = genetic_similarity / diag.clamp_min(0.1)
+                target_sim = target_sim.clamp(-1, 2)  # Clip extreme values
+            else:
+                # IBS is already in [0, 1], shift to [-1, 1]
+                target_sim = 2.0 * genetic_similarity - 1.0
+            
+            # MSE between embedding similarity and genetic similarity
+            # Exclude diagonal (always 1 for both)
+            mask = ~torch.eye(embed_sim.size(0), dtype=torch.bool, device=embed_sim.device)
+            loss = F.mse_loss(embed_sim[mask], target_sim[mask])
+            
+        elif self.loss_type == "cosine":
+            # Flatten and compute cosine similarity between similarity matrices
+            # This aligns the *structure* of relationships, not absolute values
+            embed_flat = embed_sim.flatten()
+            target_flat = genetic_similarity.flatten()
+            
+            # Cosine similarity between flattened matrices (want to maximize, so 1 - cosine)
+            loss = 1.0 - F.cosine_similarity(
+                embed_flat.unsqueeze(0), 
+                target_flat.unsqueeze(0)
+            ).squeeze()
+            
+        elif self.loss_type == "kl":
+            # Original KL divergence approach (softmax over rows)
+            embed_logits = embed_sim / self.temperature
+            target_probs = F.softmax(genetic_similarity / self.temperature, dim=1)
+            log_probs = F.log_softmax(embed_logits, dim=1)
+            loss = -torch.sum(target_probs * log_probs) / g_embeddings.size(0)
+            
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
         
         return loss
+
+
+class EnvironmentContrastiveLoss(nn.Module):
+    """
+    Learn that similar environments should produce similar hybrid rankings.
+    
+    If E_a and E_b have similar features, and hybrid H1 > H2 in E_a,
+    then H1 should likely > H2 in E_b (assuming stable GxE patterns).
+    
+    This loss encourages the model to learn transferable environment effects.
+    """
+    
+    def __init__(self, temperature: float = 0.5):
+        super().__init__()
+        self.temperature = temperature
+    
+    def forward(
+        self,
+        predictions: torch.Tensor,  # (batch,) predicted yields
+        e_data: torch.Tensor,        # (batch, n_env_features) environment features
+        env_ids: torch.Tensor,       # (batch,) environment IDs
+    ) -> torch.Tensor:
+        """
+        For pairs of samples from different environments:
+        - If environments are similar (cosine sim > threshold)
+        - Then prediction rankings should be consistent
+        """
+        predictions = predictions.squeeze(-1)
+        batch_size = predictions.size(0)
+        
+        # Compute environment similarity
+        env_sim = compute_env_similarity(e_data, method="cosine")
+        
+        # For each pair of environments, compare prediction consistency
+        # This is expensive, so we sample pairs
+        total_loss = torch.tensor(0.0, device=predictions.device)
+        n_pairs = 0
+        
+        unique_envs = env_ids.unique()
+        if len(unique_envs) < 2:
+            return total_loss
+        
+        # Sample pairs of different environments
+        for i, env_a in enumerate(unique_envs[:-1]):
+            for env_b in unique_envs[i+1:]:
+                mask_a = env_ids == env_a
+                mask_b = env_ids == env_b
+                
+                if mask_a.sum() < 2 or mask_b.sum() < 2:
+                    continue
+                
+                # Get a representative sample from each environment
+                idx_a = torch.where(mask_a)[0][0]
+                idx_b = torch.where(mask_b)[0][0]
+                
+                # Environment similarity
+                e_sim = env_sim[idx_a, idx_b]
+                
+                # If environments are similar, prediction distributions should be similar
+                pred_a = predictions[mask_a]
+                pred_b = predictions[mask_b]
+                
+                # Compare prediction statistics (mean, std)
+                # Similar environments should have similar yield distributions
+                mean_diff = (pred_a.mean() - pred_b.mean()).abs()
+                std_diff = (pred_a.std() - pred_b.std()).abs()
+                
+                # Weight by environment similarity
+                # High env similarity + high pred difference = high loss
+                pair_loss = e_sim * (mean_diff + 0.5 * std_diff)
+                total_loss = total_loss + pair_loss
+                n_pairs += 1
+        
+        if n_pairs > 0:
+            return total_loss / n_pairs
+        return total_loss
 
 
 class TripletRankingLoss(nn.Module):

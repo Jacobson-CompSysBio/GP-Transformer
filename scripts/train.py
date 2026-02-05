@@ -19,7 +19,7 @@ from utils.dataset import *
 from models.model import *
 from models.config import Config
 from utils.get_lr import get_lr
-from utils.loss import build_loss, GlobalPearsonCorrLoss, GenomicContrastiveLoss, compute_ibs_similarity
+from utils.loss import build_loss, GlobalPearsonCorrLoss, GenomicContrastiveLoss, compute_ibs_similarity, compute_grm_similarity
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -249,12 +249,23 @@ def main():
     if use_contrastive:
         contrastive_weight = getattr(args, 'contrastive_weight', 0.1)
         contrastive_temperature = getattr(args, 'contrastive_temperature', 0.1)
-        contrastive_loss_fn = GenomicContrastiveLoss(temperature=contrastive_temperature)
+        contrastive_sim_type = getattr(args, 'contrastive_sim_type', 'grm')  # 'grm' or 'ibs'
+        contrastive_loss_type = getattr(args, 'contrastive_loss_type', 'mse')  # 'mse', 'cosine', or 'kl'
+        contrastive_loss_fn = GenomicContrastiveLoss(
+            temperature=contrastive_temperature,
+            similarity_type=contrastive_sim_type,
+            loss_type=contrastive_loss_type,
+        )
         if is_main(rank):
-            print(f"[INFO] Using genomic contrastive loss with weight={contrastive_weight}, temperature={contrastive_temperature}")
+            print(f"[INFO] Using genomic contrastive loss:")
+            print(f"       weight={contrastive_weight}, temperature={contrastive_temperature}")
+            print(f"       similarity_type={contrastive_sim_type}, loss_type={contrastive_loss_type}")
     else:
         contrastive_loss_fn = None
         contrastive_weight = 0.0
+        contrastive_temperature = None
+        contrastive_sim_type = None
+        contrastive_loss_type = None
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -312,6 +323,8 @@ def main():
                              "contrastive_loss": use_contrastive,
                              "contrastive_weight": contrastive_weight if use_contrastive else None,
                              "contrastive_temperature": contrastive_temperature if use_contrastive else None,
+                             "contrastive_sim_type": contrastive_sim_type if use_contrastive else None,
+                             "contrastive_loss_type": contrastive_loss_type if use_contrastive else None,
                              "g_encoder_type": g_encoder_type,
                              "moe_num_experts": moe_num_experts,
                              "moe_top_k": moe_top_k,
@@ -375,9 +388,8 @@ def main():
                 
                 # Add contrastive loss if enabled
                 if use_contrastive and g_embeddings is not None:
-                    # Compute IBS similarity on-the-fly from genotype data
-                    ibs_sim = compute_ibs_similarity(xb["g_data"])
-                    contrastive_loss = contrastive_loss_fn(g_embeddings, ibs_sim)
+                    # Pass raw genotype data - contrastive loss computes GRM/IBS internally
+                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
                     loss_total = loss_total + contrastive_weight * contrastive_loss
                     loss_parts["contrastive"] = float(contrastive_loss.detach().item())
                 

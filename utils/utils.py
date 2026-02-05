@@ -83,6 +83,12 @@ def parse_args():
                    help="Weight for genomic contrastive loss (default 0.1)")
     p.add_argument("--contrastive_temperature", type=float, default=0.1,
                    help="Temperature for contrastive loss softmax (default 0.1)")
+    p.add_argument("--contrastive_sim_type", type=str, default="grm",
+                   choices=["grm", "ibs"],
+                   help="Genetic similarity type for contrastive loss: 'grm' (recommended) or 'ibs'")
+    p.add_argument("--contrastive_loss_type", type=str, default="mse",
+                   choices=["mse", "cosine", "kl"],
+                   help="Contrastive loss type: 'mse' (recommended), 'cosine', or 'kl' (original)")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
