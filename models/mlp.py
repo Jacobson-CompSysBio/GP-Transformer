@@ -60,6 +60,8 @@ class E_Encoder(nn.Module):
         # add final layer
         self.final_layer = nn.Linear(hidden_dim, output_dim)
         self.final_activation = activation
+        # Add output layer norm for scale consistency with other encoders
+        self.output_ln = nn.LayerNorm(output_dim)
 
     # forward pass
     def forward(self, x):
@@ -71,7 +73,8 @@ class E_Encoder(nn.Module):
             else: 
                 x = x + layer(x)
 
-        # through final layer
+        # through final layer with normalization
         x = self.final_activation(self.final_layer(x))
+        x = self.output_ln(x)
 
         return x

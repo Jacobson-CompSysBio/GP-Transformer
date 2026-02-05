@@ -87,6 +87,9 @@ class LD_Encoder(nn.Module):
                 ) for _ in range(num_blocks)
             ]
         )
+        
+        # Final layer norm for scale consistency with G and E encoders
+        self.output_ln = nn.LayerNorm(output_dim)
 
     def forward(self, x):
         # accept B, T, C and transpose to B, C, T
@@ -99,4 +102,7 @@ class LD_Encoder(nn.Module):
         
         # transpose back to original shape
         x = x.transpose(1, 2) # B, C, T --> B, T, C
+        
+        # Apply final normalization
+        x = self.output_ln(x)
         return x

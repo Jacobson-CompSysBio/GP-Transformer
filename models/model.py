@@ -184,14 +184,17 @@ class FullTransformerResidual(FullTransformer):
 
     def forward(self, x):
         tokens, env_start = self._build_tokens(x)
-        ymean_pred = None
-        if env_start < tokens.size(1):
-            env_tokens = tokens[:, env_start:, :]
-            env_repr = env_tokens.mean(dim=1)
-            ymean_pred = self.ymean_head(env_repr)
-
+        
+        # IMPORTANT: Encode FIRST, then extract features from encoded tokens
         tokens = self._encode_tokens(tokens)
         resid_pred = self.head(tokens[:, 0])
+        
+        # Compute ymean from ENCODED env tokens (not raw projections!)
+        ymean_pred = None
+        if env_start < tokens.size(1):
+            env_tokens = tokens[:, env_start:, :]  # Now these are encoded
+            env_repr = env_tokens.mean(dim=1)
+            ymean_pred = self.ymean_head(env_repr)
 
         if ymean_pred is None:
             ymean_pred = torch.zeros_like(resid_pred)
