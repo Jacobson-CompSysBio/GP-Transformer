@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J contr-test
+#SBATCH -J fulltf,strat,contr,moe
 #SBATCH -N 8
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -t 6:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -66,7 +66,7 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
 # This can improve generalization by learning meaningful genomic representations
-export CONTRASTIVE_LOSS=False       # Set to True to enable
+export CONTRASTIVE_LOSS=True       # Set to True to enable
 export CONTRASTIVE_WEIGHT=0.1       # weight for contrastive loss term
 export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
 export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
