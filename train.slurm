@@ -66,9 +66,11 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
 # This can improve generalization by learning meaningful genomic representations
-export CONTRASTIVE_LOSS=True
-export CONTRASTIVE_WEIGHT=0.1  # weight for contrastive loss term
-export CONTRASTIVE_TEMPERATURE=0.1  # temperature for softmax in contrastive loss
+export CONTRASTIVE_LOSS=False       # Set to True to enable
+export CONTRASTIVE_WEIGHT=0.1       # weight for contrastive loss term
+export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
+export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
+export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
@@ -133,6 +135,8 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss $CONTRASTIVE_LOSS \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
+        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
