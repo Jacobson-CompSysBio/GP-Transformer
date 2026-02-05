@@ -286,10 +286,13 @@ def main():
     # other options
     batches_per_epoch = len(train_loader)
     batches_per_eval = len(val_loader)
-    total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch * 10  # warmup for 10 epochs - should be enough
-    lr_decay_iters = total_iters * .5
-    max_lr, min_lr = (args.lr), (0.001 * args.lr)
+    # Use effective training horizon (early_stop), not max_epochs, for LR schedule
+    # Otherwise cosine decay never activates before early stopping kicks in
+    effective_epochs = min(args.early_stop * 2, args.num_epochs)  # ~2x early_stop as budget
+    total_iters = effective_epochs * batches_per_epoch
+    warmup_iters = batches_per_epoch * 5  # warmup for ~5 epochs (large batch needs longer warmup)
+    lr_decay_iters = total_iters  # cosine spans entire effective window
+    max_lr, min_lr = (args.lr), (0.1 * args.lr)  # 10x decay ratio
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
@@ -411,9 +414,10 @@ def main():
                 loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
             moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
             if moe_aux_loss is not None:
-                moe_aux_loss_detached = moe_aux_loss.detach()
-                loss = loss + moe_aux_loss_detached
-                loss_parts["moe_lb"] = float(moe_aux_loss_detached.item())
+                # Don't detach - gradients need to flow to gate network for load balancing
+                # DDP handles this with find_unused_parameters=True
+                loss = loss + moe_aux_loss
+                loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
 
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")

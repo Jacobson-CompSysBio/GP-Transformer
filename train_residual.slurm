@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J 3p,strat,moe,res
 #SBATCH -N 8
-#SBATCH -t 08:00:00
-#SBATCH -p extended 
+#SBATCH -t 02:00:00
+#SBATCH -p batch 
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -44,12 +44,12 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=3000
 export LR=1e-4
-export WEIGHT_DECAY=1e-5
-export DROPOUT=0.15
+export WEIGHT_DECAY=1e-4
+export DROPOUT=0.25
 export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=2
+export LD_LAYERS=1
 export MLP_LAYERS=1
 export GXE_LAYERS=1
 
@@ -64,9 +64,13 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
-export CONTRASTIVE_LOSS=False
-export CONTRASTIVE_WEIGHT=0.1
-export CONTRASTIVE_TEMPERATURE=0.1
+# This can improve generalization by learning meaningful genomic representations
+# NOTE: Now uses warmup - doesn't activate until epoch 50
+export CONTRASTIVE_LOSS=True        # Set to True to enable
+export CONTRASTIVE_WEIGHT=0.05      # Lower weight (was 0.1) - ramps up after warmup
+export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
+export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
+export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
@@ -132,6 +136,8 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss $CONTRASTIVE_LOSS \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
+        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

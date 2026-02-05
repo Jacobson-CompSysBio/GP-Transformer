@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J fulltf,strat,contr,moe
 #SBATCH -N 8
-#SBATCH -t 6:00:00
-#SBATCH -p extended
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -33,7 +33,7 @@ export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
 export MOE_LOSS_WEIGHT=0.01
-export FULL_TRANSFORMER=True
+export FULL_TRANSFORMER=False
 
 # calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
 export GBS=16384
@@ -51,7 +51,7 @@ export EARLY_STOP=200
 export G_LAYERS=1
 export LD_LAYERS=2
 export MLP_LAYERS=1
-export GXE_LAYERS=2 # applies to FullTF if used
+export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=256

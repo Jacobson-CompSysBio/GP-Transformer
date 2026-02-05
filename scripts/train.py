@@ -269,10 +269,13 @@ def main():
 
     # other options
     batches_per_epoch = len(train_loader)
-    total_iters = args.num_epochs * batches_per_epoch
-    warmup_iters = batches_per_epoch * 2  # warmup for ~2 epochs (more stable)
-    lr_decay_iters = int(total_iters * 0.8)  # decay over last 20% (was 60%)
-    max_lr, min_lr = (args.lr), (0.2 * args.lr)  # higher floor (0.2x instead of 0.1x)
+    # Use effective training horizon (early_stop), not max_epochs, for LR schedule
+    # Otherwise cosine decay never activates before early stopping kicks in
+    effective_epochs = min(args.early_stop * 2, args.num_epochs)  # ~2x early_stop as budget
+    total_iters = effective_epochs * batches_per_epoch
+    warmup_iters = batches_per_epoch * 5  # warmup for ~5 epochs (large batch needs longer warmup)
+    lr_decay_iters = total_iters  # cosine spans entire effective window
+    max_lr, min_lr = (args.lr), (0.1 * args.lr)  # 10x decay ratio
     max_epochs = args.num_epochs
     eval_interval = batches_per_epoch
     early_stop = args.early_stop
