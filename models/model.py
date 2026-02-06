@@ -181,8 +181,15 @@ class FullTransformerResidual(FullTransformer):
         self.residual = residual
         self.detach_ymean_in_sum = False
         self.ymean_head = nn.Linear(config.n_embd, 1)
+        
+        # Projection head for contrastive learning (like SimCLR)
+        self.g_proj = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd),
+            nn.ReLU(),
+            nn.Linear(config.n_embd, config.n_embd // 2),
+        )
 
-    def forward(self, x):
+    def forward(self, x, return_g_embeddings: bool = False):
         tokens, env_start = self._build_tokens(x)
         
         # IMPORTANT: Encode FIRST, then extract features from encoded tokens
@@ -198,18 +205,30 @@ class FullTransformerResidual(FullTransformer):
 
         if ymean_pred is None:
             ymean_pred = torch.zeros_like(resid_pred)
+        
+        # Extract G embeddings for contrastive loss
+        g_embed = None
+        if return_g_embeddings:
+            g_tokens = tokens[:, 1:env_start, :]  # G tokens (excluding CLS)
+            g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
+            g_embed = self.g_proj(g_pooled)  # (B, C//2)
 
         if not self.residual:
+            if return_g_embeddings:
+                return resid_pred, g_embed
             return resid_pred
 
         if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
             total_pred = ymean_pred.detach() + resid_pred
         else:
             total_pred = ymean_pred + resid_pred
-        return {'total': total_pred,
+        result = {'total': total_pred,
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
+        if return_g_embeddings:
+            return result, g_embed
+        return result
 
 # create full GxE transformer for genomic prediction
 class GxE_Transformer(nn.Module):
@@ -485,13 +504,33 @@ class GxE_ResidualTransformer(GxE_Transformer):
         self.residual = residual
         # env head to predict per-year mean yield (if residual)
         self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
+        
+        # Projection head for contrastive learning (like SimCLR)
+        self.g_proj = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd),
+            nn.ReLU(),
+            nn.Linear(config.n_embd, config.n_embd // 2),
+        )
 
-    def forward(self, x):
-        rep, e_enc, _ = self._encode(x)  # Unpack all 3 return values
+    def forward(self, x, return_g_embeddings: bool = False):
+        rep, e_enc, g_enc = self._encode(x)  # Unpack all 3 return values
+
+        # Extract G embeddings for contrastive loss
+        g_embed = None
+        if return_g_embeddings:
+            if isinstance(g_enc, torch.Tensor):
+                if g_enc.dim() == 3:
+                    g_pooled = g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
+                else:
+                    g_pooled = g_enc
+                g_embed = self.g_proj(g_pooled)  # (B, C//2)
 
         # non-residual mode: final layer predicts total yield
         if not self.residual:
-            return self.final_layer(self.final_dropout(rep))
+            pred = self.final_layer(self.final_dropout(rep))
+            if return_g_embeddings:
+                return pred, g_embed
+            return pred
 
         # residual mode:
         ymean_pred = self.ymean_head(e_enc) if self.ymean_head is not None else 0
@@ -502,10 +541,13 @@ class GxE_ResidualTransformer(GxE_Transformer):
             total_pred = ymean_pred.detach() + resid_pred
         else:
             total_pred = ymean_pred + resid_pred
-        return {'total': total_pred,
+        result = {'total': total_pred,
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
+        if return_g_embeddings:
+            return result, g_embed
+        return result
 
 # ----------------------------------------------------------------
 

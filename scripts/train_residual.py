@@ -19,7 +19,7 @@ from utils.dataset import *
 from models.model import *
 from models.config import Config
 from utils.get_lr import get_lr
-from utils.loss import build_loss, GlobalPearsonCorrLoss
+from utils.loss import build_loss, GlobalPearsonCorrLoss, GenomicContrastiveLoss, compute_ibs_similarity, compute_grm_similarity
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -274,7 +274,7 @@ def main():
     # that may not flow gradients through all parameters in every forward pass.
     # MoE models have expert routing that may leave some experts unused.
     # In both cases, we need find_unused_parameters=True to avoid DDP sync errors.
-    find_unused = bool(args.wg) or moe_encoder_enabled or bool(args.residual)
+    find_unused = bool(args.wg) or moe_encoder_enabled or bool(args.residual) or bool(getattr(args, 'contrastive_loss', False))
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -282,6 +282,26 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_function = build_loss(args.loss, args.loss_weights)
+
+    # optional contrastive loss for genomic embeddings
+    use_contrastive = getattr(args, 'contrastive_loss', False)
+    if use_contrastive:
+        contrastive_weight = getattr(args, 'contrastive_weight', 0.1)
+        contrastive_temperature = getattr(args, 'contrastive_temperature', 0.1)
+        contrastive_sim_type = getattr(args, 'contrastive_sim_type', 'grm')
+        contrastive_loss_type = getattr(args, 'contrastive_loss_type', 'mse')
+        contrastive_loss_fn = GenomicContrastiveLoss(
+            temperature=contrastive_temperature,
+            similarity_type=contrastive_sim_type,
+            loss_type=contrastive_loss_type,
+        )
+        if is_main(rank):
+            print(f"[INFO] Using genomic contrastive loss:")
+            print(f"       weight={contrastive_weight}, temperature={contrastive_temperature}")
+            print(f"       similarity_type={contrastive_sim_type}, loss_type={contrastive_loss_type}")
+    else:
+        contrastive_loss_fn = None
+        contrastive_weight = 0.0
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -352,13 +372,20 @@ def main():
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                              "moe_loss_weight": moe_loss_weight,
                              "full_tf_mlp_type": full_tf_mlp_type,
-                             "full_transformer": args.full_transformer},
+                             "full_transformer": args.full_transformer,
+                             "contrastive_loss": use_contrastive,
+                             "contrastive_weight": contrastive_weight,},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
         
+        # track contrastive loss
+        if use_contrastive:
+            run.define_metric("train_loss/contrastive", step_metric="iter_num")
+            run.define_metric("train_loss/contrastive_weight_eff", step_metric="iter_num")
+
         # track residual losses
         if args.residual:
             run.define_metric("aux_ymean_loss", step_metric="iter_num")
@@ -399,25 +426,44 @@ def main():
             yb = _move_to_device(yb, device) 
 
             # fwd/bwd pass
-            logits = model(xb)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                if use_contrastive:
+                    logits, g_embeddings = model(xb, return_g_embeddings=True)
+                else:
+                    logits = model(xb)
+                    g_embeddings = None
 
-            # residual: compute main and aux losses
-            loss_aux_ymean = None
-            loss_aux_resid = None
-            if args.residual:
-                pred_total = logits["total"]
-                loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
-                loss_aux_ymean = F.mse_loss(logits["ymean"], yb["ymean"])
-                loss_aux_resid = F.mse_loss(logits["resid"], yb["resid"])
-                loss = loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid)
-            else:
-                loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
-            moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
-            if moe_aux_loss is not None:
-                # Don't detach - gradients need to flow to gate network for load balancing
-                # DDP handles this with find_unused_parameters=True
-                loss = loss + moe_aux_loss
-                loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
+                # residual: compute main and aux losses
+                loss_aux_ymean = None
+                loss_aux_resid = None
+                if args.residual:
+                    pred_total = logits["total"]
+                    loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                    loss_aux_ymean = F.mse_loss(logits["ymean"], yb["ymean"])
+                    loss_aux_resid = F.mse_loss(logits["resid"], yb["resid"])
+                    loss = loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid)
+                else:
+                    loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
+
+                # Add contrastive loss if enabled (with warmup)
+                contrastive_warmup_epochs = 50
+                if use_contrastive and g_embeddings is not None and epoch_num >= contrastive_warmup_epochs:
+                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
+                    warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
+                    effective_weight = contrastive_weight * warmup_factor
+                    loss = loss + effective_weight * contrastive_loss
+                    loss_parts["contrastive"] = float(contrastive_loss.detach().item())
+                    loss_parts["contrastive_weight_eff"] = effective_weight
+                elif use_contrastive:
+                    loss_parts["contrastive"] = 0.0
+                    loss_parts["contrastive_weight_eff"] = 0.0
+
+                moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
+                if moe_aux_loss is not None:
+                    # Don't detach - gradients need to flow to gate network for load balancing
+                    # DDP handles this with find_unused_parameters=True
+                    loss = loss + moe_aux_loss
+                    loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
 
             if torch.isnan(loss):
                 raise RuntimeError("Loss is NaN, stopping training.")
