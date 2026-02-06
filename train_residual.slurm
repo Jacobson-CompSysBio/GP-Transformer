@@ -44,8 +44,8 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=3000
 export LR=1e-4
-export WEIGHT_DECAY=1e-4
-export DROPOUT=0.25
+export WEIGHT_DECAY=5e-5
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -60,6 +60,10 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export LOSS="envpcc"
 export LOSS_WEIGHTS="1.0"
 export SCALE_TARGETS=False
+
+# Residual loss weights
+export LAMBDA_YMEAN=0.05
+export LAMBDA_RESID=1.0
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
@@ -117,6 +121,8 @@ srun -N ${SLURM_NNODES} \
         --wg $WG \
         --full_transformer $FULL_TRANSFORMER \
         --residual $RES \
+        --lambda_ymean $LAMBDA_YMEAN \
+        --lambda_resid $LAMBDA_RESID \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -179,6 +185,7 @@ python -u scripts/eval.py \
     --mlp_layers $MLP_LAYERS \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
+    --emb_size $EMB_SIZE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

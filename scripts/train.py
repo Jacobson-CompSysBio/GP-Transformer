@@ -234,6 +234,9 @@ def main():
                                 config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
+        print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
+              f"n_head={config.n_head}, dropout={config.dropout}, "
+              f"full_transformer={args.full_transformer}")
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -323,6 +326,18 @@ def main():
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
+                             "n_embd": args.emb_size,
+                             "gxe_layers": args.gxe_layers,
+                             "g_layers": args.g_layers,
+                             "ld_layers": args.ld_layers,
+                             "mlp_layers": args.mlp_layers,
+                             "heads": args.heads,
+                             "dropout": args.dropout,
+                             "lr": args.lr,
+                             "weight_decay": args.weight_decay,
+                             "batch_size": args.batch_size,
+                             "gbs": args.gbs,
+                             "early_stop": args.early_stop,
                              "contrastive_loss": use_contrastive,
                              "contrastive_weight": contrastive_weight if use_contrastive else None,
                              "contrastive_temperature": contrastive_temperature if use_contrastive else None,
@@ -459,61 +474,63 @@ def main():
         with torch.no_grad():
             model.eval()
 
-            def eval_loader(loader, max_batches=None):
-                """
-                evaluates loader, returns:
-                    mean_total_loss, parts_mean_dict, nbatches
-                """
-
-                # accumulate as tensors to allow dist.all_reduce
-                total_loss = torch.tensor(0.0, device=device)
-                loss_names = list(loss_function.names)
-                if moe_encoder_enabled:
-                    loss_names.append("moe_lb")
-                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_names}
-                n_batches = torch.tensor(0.0, device=device) 
+            def _gather_predictions(loader, dataset_len, max_batches=None):
+                """Gather ALL predictions/targets across batches and DDP ranks,
+                then compute metrics on the full dataset.  This aligns the
+                validation metric with how eval.py computes test metrics."""
+                all_preds = []
+                all_targets = []
+                all_env_ids = []
 
                 for i, (xb, yb) in enumerate(loader):
-                    # if we hit eval_iters limit, break
                     if (max_batches is not None) and (i >= max_batches):
                         break
-                    
-                    # send to device
                     xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
                     y_true = yb["y"].to(device, non_blocking=True).float()
                     env_id = yb["env_id"].to(device, non_blocking=True).long()
 
-                    # fwd
                     preds = model(xb)
-                    ltot, lparts = loss_function(preds, y_true, env_id=env_id)
-                    moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
-                    if moe_aux_loss is not None:
-                        ltot = ltot + moe_aux_loss.detach()
-                        lparts["moe_lb"] = float(moe_aux_loss.detach().item())
-                    total_loss += ltot
-                    for k in parts_acc:
-                        parts_acc[k] += torch.tensor(lparts.get(k, 0.0), device=device)
-                    n_batches += 1.0
+                    all_preds.append(preds.squeeze(-1))
+                    all_targets.append(y_true.squeeze(-1))
+                    all_env_ids.append(env_id)
 
-                # allreduce w/ sum
-                dist.all_reduce(total_loss)
-                for t in parts_acc.values():
-                    dist.all_reduce(t)
-                dist.all_reduce(n_batches)
-                
-                # convert to global means with zero div guard
-                nb = max(1.0, float(n_batches.item()))
-                mean_total = total_loss / nb
-                mean_parts = {k: (v / nb).item() for k, v in parts_acc.items()}
+                local_preds = torch.cat(all_preds) if all_preds else torch.empty(0, device=device)
+                local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, device=device)
+                local_env_ids = torch.cat(all_env_ids) if all_env_ids else torch.empty(0, dtype=torch.long, device=device)
 
-                return mean_total, mean_parts, nb
+                # All-gather across DDP ranks
+                def _all_gather_flat(t):
+                    local_n = torch.tensor([t.shape[0]], device=device)
+                    all_n = [torch.zeros_like(local_n) for _ in range(world_size)]
+                    dist.all_gather(all_n, local_n)
+                    max_n = max(x.item() for x in all_n)
+                    padded = torch.zeros(max_n, device=device, dtype=t.dtype)
+                    padded[:t.shape[0]] = t
+                    gathered = [torch.zeros_like(padded) for _ in range(world_size)]
+                    dist.all_gather(gathered, padded)
+                    parts = [gathered[i][:all_n[i].item()] for i in range(world_size)]
+                    return torch.cat(parts)
+
+                full_preds = _all_gather_flat(local_preds)[:dataset_len]
+                full_targets = _all_gather_flat(local_targets)[:dataset_len]
+                full_env_ids = _all_gather_flat(local_env_ids.float()).long()[:dataset_len]
+                return full_preds, full_targets, full_env_ids
+
+            def eval_loader(loader, dataset_len, max_batches=None):
+                """Compute validation metrics using gather-then-compute approach."""
+                full_preds, full_targets, full_env_ids = \
+                    _gather_predictions(loader, dataset_len, max_batches)
+
+                ltot, lparts = loss_function(full_preds, full_targets, env_id=full_env_ids)
+                mean_parts = {k: float(v) for k, v in lparts.items()}
+                return ltot, mean_parts
             
             # reshuffle train sampler s.t. sampled subset is different each epoch
             if isinstance(train_sampler, DistributedSampler):
                 train_sampler.set_epoch(10_000 + epoch_num)
             # eval on subset of train for speed, full val
-            train_total, train_parts, _ = eval_loader(train_loader, max_batches=int(math.ceil(len(val_loader) / world_size))) 
-            val_total, val_parts, _ = eval_loader(val_loader, max_batches=None)
+            train_total, train_parts = eval_loader(train_loader, len(train_ds), max_batches=int(math.ceil(len(val_loader) / world_size))) 
+            val_total, val_parts = eval_loader(val_loader, len(val_ds), max_batches=None)
 
         # log eval / early stop (only rank 0)
         if is_main(rank):

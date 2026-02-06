@@ -112,10 +112,12 @@ def envwise_spearman(pred, target, env_id):
     # get 1.0 - avg spearman as loss 
     return 1.0 - torch.stack(spearmans).mean() 
 
-def envwise_mse(pred, target, env_id, eps: float = 1e-8):
+def envwise_mse(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
     """
-    Mean of per-environment MSE (with per-env centering).
-    Computes loss LOCALLY to maintain gradient flow - DDP handles gradient sync.
+    Macro-averaged per-environment MSE.
+    Computes MSE within each environment, then averages equally across environments.
+    This gives equal weight to each environment regardless of sample count,
+    matching the macro-avg methodology used in eval.py for test metrics.
     """
     # squeeze preds, targets if they are [B, 1]
     if pred.ndim > 1:
@@ -134,25 +136,22 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8):
         buf = vec.new_zeros(max_env)
         return buf.scatter_add(0, env_id, vec)
 
-    # Compute LOCAL sufficient statistics only (no all-reduce)
+    # Per-sample squared error
+    se = (pred_f - target_f) ** 2
+
+    # Accumulate count and sum-of-SE per environment
     count = _accumulate(torch.ones_like(pred_f))
-    sy = _accumulate(target_f)
+    sum_se = _accumulate(se)
 
-    valid = count > 1
+    # Only include environments with enough samples
+    valid = count >= min_samples
     if not valid.any():
-        # fallback to simple MSE
-        return torch.mean((pred_f - target_f) ** 2)
+        # fallback to global MSE
+        return se.mean()
 
-    # Compute LOCAL per-env target mean for centering
-    mean_y = sy / count.clamp_min(1.0)
-    
-    # Per-sample env mean
-    env_mean_y_local = mean_y[env_id]
-    
-    # Centered squared error (pred - target)^2
-    local_mse = (pred_f - target_f) ** 2
-    
-    return local_mse.mean()
+    # Per-env MSE = sum_se / count, then macro-average across valid envs
+    per_env_mse = sum_se[valid] / count[valid]
+    return per_env_mse.mean()
 
 def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=8):
     """

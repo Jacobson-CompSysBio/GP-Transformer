@@ -364,6 +364,18 @@ def main():
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
                              "lambda_resid": args.lambda_resid,
+                             "n_embd": args.emb_size,
+                             "gxe_layers": args.gxe_layers,
+                             "g_layers": args.g_layers,
+                             "ld_layers": args.ld_layers,
+                             "mlp_layers": args.mlp_layers,
+                             "heads": args.heads,
+                             "dropout": args.dropout,
+                             "lr": args.lr,
+                             "weight_decay": args.weight_decay,
+                             "batch_size": args.batch_size,
+                             "gbs": args.gbs,
+                             "early_stop": args.early_stop,
                              "g_encoder_type": g_encoder_type,
                              "moe_num_experts": moe_num_experts,
                              "moe_top_k": moe_top_k,
@@ -520,15 +532,17 @@ def main():
         with torch.no_grad():
             model.eval()
 
-            def eval_loader(loader):
-                total_loss = torch.tensor(0.0, device=device)
-                loss_names = list(loss_function.names)
-                if moe_encoder_enabled:
-                    loss_names.append("moe_lb")
-                parts_acc = {name: torch.tensor(0.0, device=device) for name in loss_names}
-                aux_ymean_acc = torch.tensor(0.0, device=device)
-                aux_resid_acc = torch.tensor(0.0, device=device)
-                n_batches = torch.tensor(0.0, device=device)
+            def _gather_predictions(loader, dataset_len):
+                """Gather ALL predictions/targets across batches and DDP ranks,
+                then compute metrics on the full dataset.  This aligns the
+                validation metric with how eval.py computes test metrics."""
+                all_preds = []
+                all_targets = []
+                all_env_ids = []
+                all_ymean_preds = []
+                all_ymean_targets = []
+                all_resid_preds = []
+                all_resid_targets = []
 
                 for xb, yb in loader:
                     xb = _move_to_device(xb, device)
@@ -536,38 +550,78 @@ def main():
 
                     out = model(xb)
                     if args.residual:
-                        ltot, lparts = loss_function(out["total"], yb["total"], env_id=yb["env_id"])
-                        aux_ymean_acc += F.mse_loss(out["ymean"], yb["ymean"])
-                        aux_resid_acc += F.mse_loss(out["resid"], yb["resid"])
+                        all_preds.append(out["total"].squeeze(-1))
+                        all_targets.append(yb["total"].squeeze(-1))
+                        all_ymean_preds.append(out["ymean"].squeeze(-1))
+                        all_ymean_targets.append(yb["ymean"].squeeze(-1))
+                        all_resid_preds.append(out["resid"].squeeze(-1))
+                        all_resid_targets.append(yb["resid"].squeeze(-1))
                     else:
-                        ltot, lparts = loss_function(out, yb["y"], env_id=yb["env_id"])
-                    moe_aux = getattr(model.module, "moe_aux_loss", None)
-                    if moe_aux is not None:
-                        moe_aux_detached = moe_aux.detach()
-                        ltot = ltot + moe_aux_detached
-                        lparts["moe_lb"] = float(moe_aux_detached.item())
-                    total_loss += ltot
-                    for k in parts_acc:
-                        parts_acc[k] += torch.tensor(lparts.get(k, 0.0), device=device)
-                    n_batches += 1.0
+                        all_preds.append(out.squeeze(-1))
+                        all_targets.append(yb["y"].squeeze(-1))
+                    all_env_ids.append(yb["env_id"])
 
-                # allreduce w/ sum
-                dist.all_reduce(total_loss)
-                for t in parts_acc.values():
-                    dist.all_reduce(t)
-                dist.all_reduce(aux_ymean_acc)
-                dist.all_reduce(aux_resid_acc)
-                dist.all_reduce(n_batches)
+                # Concatenate local predictions
+                local_preds = torch.cat(all_preds) if all_preds else torch.empty(0, device=device)
+                local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, device=device)
+                local_env_ids = torch.cat(all_env_ids) if all_env_ids else torch.empty(0, dtype=torch.long, device=device)
+                local_ymean_p = torch.cat(all_ymean_preds) if all_ymean_preds else None
+                local_ymean_t = torch.cat(all_ymean_targets) if all_ymean_targets else None
+                local_resid_p = torch.cat(all_resid_preds) if all_resid_preds else None
+                local_resid_t = torch.cat(all_resid_targets) if all_resid_targets else None
 
-                nb = max(1.0, float(n_batches.item()))
-                mean_total = total_loss / nb
-                mean_parts = {k: (v / nb).item() for k, v in parts_acc.items()}
-                mean_aux_ymean = (aux_ymean_acc / nb).item()
-                mean_aux_resid = (aux_resid_acc / nb).item()
-                return mean_total, mean_parts, mean_aux_ymean, mean_aux_resid
+                # All-gather across DDP ranks to reconstruct full dataset
+                # DistributedSampler may pad, so gather all then trim to dataset_len
+                def _all_gather_flat(t):
+                    local_n = torch.tensor([t.shape[0]], device=device)
+                    all_n = [torch.zeros_like(local_n) for _ in range(world_size)]
+                    dist.all_gather(all_n, local_n)
+                    max_n = max(x.item() for x in all_n)
+                    # Pad to max_n
+                    padded = torch.zeros(max_n, device=device, dtype=t.dtype)
+                    padded[:t.shape[0]] = t
+                    gathered = [torch.zeros_like(padded) for _ in range(world_size)]
+                    dist.all_gather(gathered, padded)
+                    # Trim each rank's contribution to actual size
+                    parts = [gathered[i][:all_n[i].item()] for i in range(world_size)]
+                    return torch.cat(parts)
 
-            train_total, train_parts, aux_train_ymean, aux_train_resid = eval_loader(train_loader)
-            val_total, val_parts, aux_val_ymean, aux_val_resid = eval_loader(val_loader)
+                full_preds = _all_gather_flat(local_preds)[:dataset_len]
+                full_targets = _all_gather_flat(local_targets)[:dataset_len]
+                full_env_ids = _all_gather_flat(local_env_ids.float()).long()[:dataset_len]
+
+                full_ymean_p = _all_gather_flat(local_ymean_p)[:dataset_len] if local_ymean_p is not None else None
+                full_ymean_t = _all_gather_flat(local_ymean_t)[:dataset_len] if local_ymean_t is not None else None
+                full_resid_p = _all_gather_flat(local_resid_p)[:dataset_len] if local_resid_p is not None else None
+                full_resid_t = _all_gather_flat(local_resid_t)[:dataset_len] if local_resid_t is not None else None
+
+                return (full_preds, full_targets, full_env_ids,
+                        full_ymean_p, full_ymean_t, full_resid_p, full_resid_t)
+
+            def eval_loader(loader, dataset_len):
+                """Compute validation metrics using gather-then-compute approach.
+                This computes per-env Pearson r on the FULL gathered dataset,
+                matching the methodology used in eval.py for test metrics."""
+                (full_preds, full_targets, full_env_ids,
+                 full_ymean_p, full_ymean_t, full_resid_p, full_resid_t) = \
+                    _gather_predictions(loader, dataset_len)
+
+                # Compute the main loss on the FULL dataset (same metric as test)
+                ltot, lparts = loss_function(full_preds, full_targets, env_id=full_env_ids)
+
+                # Aux residual metrics
+                mean_aux_ymean = 0.0
+                mean_aux_resid = 0.0
+                if full_ymean_p is not None and full_ymean_t is not None:
+                    mean_aux_ymean = F.mse_loss(full_ymean_p, full_ymean_t).item()
+                if full_resid_p is not None and full_resid_t is not None:
+                    mean_aux_resid = F.mse_loss(full_resid_p, full_resid_t).item()
+
+                mean_parts = {k: float(v) for k, v in lparts.items()}
+                return ltot, mean_parts, mean_aux_ymean, mean_aux_resid
+
+            train_total, train_parts, aux_train_ymean, aux_train_resid = eval_loader(train_loader, len(train_ds))
+            val_total, val_parts, aux_val_ymean, aux_val_resid = eval_loader(val_loader, len(val_ds))
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
