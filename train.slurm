@@ -57,8 +57,8 @@ export LD_LAYERS=1
 export MLP_LAYERS=1
 export GXE_LAYERS=1
 
-export HEADS=6              # 384/6 = 64-dim/head (same ratio as 256/4=64)
-export EMB_SIZE=384
+export HEADS=4              
+export EMB_SIZE=256
 export SCALE_TARGETS=True   # per-env normalization — required for MSE to work properly
 
 export LOSS="envpcc+mse"    # MSE constrains absolute yield prediction, prevents overfitting to rank-only patterns
