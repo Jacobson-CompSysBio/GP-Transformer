@@ -12,4 +12,5 @@ def get_lr(it, warmup, total, max_lr, min_lr):
     if it < warmup:
         return max_lr * it / max(1, warmup)
     t = (it - warmup) / max(1, total - warmup)
+    t = min(t, 1.0)  # clamp so LR never rebounds after cosine completes
     return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * t))

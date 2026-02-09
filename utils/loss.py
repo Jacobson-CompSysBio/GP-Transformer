@@ -153,7 +153,7 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
     per_env_mse = sum_se[valid] / count[valid]
     return per_env_mse.mean()
 
-def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=8):
+def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     """
     Compute Pearson r independently for each environment.
     Computes LOCAL correlation per environment - DDP handles gradient sync.
@@ -169,7 +169,7 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=8):
         env_id: Environment IDs [B]
         eps: Small constant for numerical stability
         min_samples: Minimum samples per environment to include in loss
-                     (environments with fewer samples are excluded, default=8)
+                     (environments with fewer samples are excluded, default=4)
     """
     pred = pred.squeeze(-1).float()
     target = target.squeeze(-1).float()
@@ -214,15 +214,9 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=8):
             return (pred.sum() * 0.0) + 1.0
         return 1.0 - r
 
-    # Weight by sample count (more samples = more reliable estimate)
-    # Use Fisher z-transform for stability, then weighted average
-    r_valid = r_per_env[valid].clamp(-0.99999, 0.99999)
-    count_valid = count[valid]
-    
-    z = 0.5 * torch.log((1 + r_valid) / (1 - r_valid))
-    weights = count_valid / count_valid.sum()
-    z_weighted = (z * weights).sum()
-    r_bar = torch.tanh(z_weighted)
+    # Uniform (macro) average across environments — matches eval.py's test metric
+    r_valid = r_per_env[valid]
+    r_bar = r_valid.mean()
     
     return 1.0 - r_bar
 

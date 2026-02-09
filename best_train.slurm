@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-model
-#SBATCH -N 8 
-#SBATCH -t 08:00:00
-#SBATCH -p extended
+#SBATCH -J best-fulltf-moe8
+#SBATCH -N 4
+#SBATCH -t 02:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -28,10 +28,10 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=False  # use 3-prong architecture, not FullTransformer
+export FULL_TRANSFORMER=True  # use FullTransformer architecture
 
 # MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
-export G_ENCODER_TYPE=dense  # options: "dense", "moe"
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
@@ -39,8 +39,8 @@ export MOE_EXPERT_HIDDEN_DIM=256
 export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
-# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
-export GBS=16384
+# calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -53,7 +53,7 @@ export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=2
+export LD_LAYERS=1
 export MLP_LAYERS=1
 export GXE_LAYERS=1
 
@@ -66,16 +66,14 @@ export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
-# Contrastive loss: encourages G embeddings to reflect genetic similarity
-# This can improve generalization by learning meaningful genomic representations
+# Contrastive loss
 export CONTRASTIVE_LOSS=False
-export CONTRASTIVE_WEIGHT=0.1  # weight for contrastive loss term
-export CONTRASTIVE_TEMPERATURE=0.1  # temperature for softmax in contrastive loss
+export CONTRASTIVE_WEIGHT=0.1
+export CONTRASTIVE_TEMPERATURE=0.1
 
-# LEO (Leave-Environment-Out) validation: hold out entire environments for val
-# This better simulates test performance on unseen environments
+# LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
-export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
+export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -182,6 +180,7 @@ python -u scripts/eval.py \
     --mlp_layers $MLP_LAYERS \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
+    --emb_size $EMB_SIZE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

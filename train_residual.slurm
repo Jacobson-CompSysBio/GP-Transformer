@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J 3p,strat,moe,res
-#SBATCH -N 8
+#SBATCH -N 4
 #SBATCH -t 02:00:00
 #SBATCH -p batch 
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -36,7 +36,7 @@ export MOE_SHARED_EXPERT=True # set to True to enable shared expert
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 2048 and N nodes * 8 gpus/node = 64 gpus
-export GBS=16384
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -51,14 +51,14 @@ export EARLY_STOP=200
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=1
+export GXE_LAYERS=2
 
 export HEADS=4
 export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export LOSS="envpcc"
-export LOSS_WEIGHTS="1.0"
+export LOSS="envpcc+envmse+pcc+mse"
+export LOSS_WEIGHTS="1.0,0.1,0.1,0.1"
 export SCALE_TARGETS=False
 
 # Residual loss weights

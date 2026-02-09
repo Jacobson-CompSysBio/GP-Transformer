@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J baseline
-#SBATCH -N 8
-#SBATCH -t 2:00:00
+#SBATCH -J lessnodes
+#SBATCH -N 4
+#SBATCH -t 02:00:00
 #SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -27,16 +27,20 @@ export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
-export WG=True # weighted gate for 3-prong architecture
-export G_ENCODER_TYPE=moe # options: "dense", "moe" / applies to FullTF if used
+export WG=True  # weighted gate for 3-prong architecture
+export FULL_TRANSFORMER=True  # use FullTransformer architecture
+
+# MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
+export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
+export MOE_EXPERT_HIDDEN_DIM=256
+export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
-export FULL_TRANSFORMER=True
 
-# calculate microbatch size given global batch size of 16384 and N nodes * 8 gpus/node = 128 gpus
-export GBS=16384
+# calculate microbatch size: GBS=16 on 8 nodes * 8 gpus/node = 64 gpus
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -49,14 +53,12 @@ export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
-export LD_LAYERS=2
+export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=1 # applies to FullTF if used
+export GXE_LAYERS=2
 
 export HEADS=4
-export EMB_SIZE=256
-export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
-export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export EMB_SIZE=384
 export SCALE_TARGETS=False
 
 export LOSS="envpcc" # + separated list of losses
@@ -64,19 +66,14 @@ export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
-# Contrastive loss: encourages G embeddings to reflect genetic similarity
-# This can improve generalization by learning meaningful genomic representations
-# NOTE: Now uses warmup - doesn't activate until epoch 50
-export CONTRASTIVE_LOSS=False        # Set to True to enable
-export CONTRASTIVE_WEIGHT=0.05      # Lower weight (was 0.1) - ramps up after warmup
-export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
-export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
-export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
+# Contrastive loss
+export CONTRASTIVE_LOSS=False
+export CONTRASTIVE_WEIGHT=0.1
+export CONTRASTIVE_TEMPERATURE=0.1
 
-# LEO (Leave-Environment-Out) validation: hold out entire environments for val
-# This better simulates test performance on unseen environments
-export LEO_VAL=False
-export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
+# LEO (Leave-Environment-Out) validation
+export LEO_VAL=True
+export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -117,6 +114,13 @@ srun -N ${SLURM_NNODES} \
         --gxe_enc $GXE_ENC \
         --wg $WG \
         --full_transformer $FULL_TRANSFORMER \
+        --g_encoder_type $G_ENCODER_TYPE \
+        --moe_num_experts $MOE_NUM_EXPERTS \
+        --moe_top_k $MOE_TOP_K \
+        --moe_shared_expert $MOE_SHARED_EXPERT \
+        --moe_expert_hidden_dim $MOE_EXPERT_HIDDEN_DIM \
+        --moe_shared_expert_hidden_dim $MOE_SHARED_EXPERT_HIDDEN_DIM \
+        --moe_loss_weight $MOE_LOSS_WEIGHT \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -136,8 +140,6 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss $CONTRASTIVE_LOSS \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
-        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
-        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
