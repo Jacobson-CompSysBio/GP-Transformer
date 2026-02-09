@@ -19,6 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.config import *
 from models.model import *
+from utils.loss import macro_env_pearson
 from utils.utils import *
 
 RESULTS_DIR = Path("data/results")
@@ -111,29 +112,58 @@ def evaluate(model,
     # convert our multi-dimensional list to a dataframe
     df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred'])
 
-    # global results
-    y_true = df['Actual'].to_numpy()
-    y_pred = df['Pred'].to_numpy()
-    global_pcc = _safe_pcc(y_true, y_pred)
-    global_mse = float(mean_squared_error(y_true, y_pred))
+    # filter to finite pairs for metric computation
+    y_true = df['Actual'].to_numpy(dtype=float)
+    y_pred = df['Pred'].to_numpy(dtype=float)
+    valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    df_valid = df.loc[valid_mask].copy()
 
-    # env-avg results
-    grp = df.groupby('Env', sort=False)[['Actual', 'Pred']]
-    pcc_by_env = grp.apply(
-        lambda g: _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy()),
-        include_groups=False
-    ).dropna()
-    macro_env_pcc = float(pcc_by_env.mean()) if len(pcc_by_env) else np.nan
+    if len(df_valid):
+        # global results
+        y_true_valid = df_valid['Actual'].to_numpy(dtype=float)
+        y_pred_valid = df_valid['Pred'].to_numpy(dtype=float)
+        global_pcc = _safe_pcc(y_true_valid, y_pred_valid)
+        global_mse = float(mean_squared_error(y_true_valid, y_pred_valid))
 
-    # also take a sample-weighted mean for good measure
-    counts = grp.size().loc[pcc_by_env.index]
-    weighted_env_pcc = float(np.nansum(pcc_by_env.values * counts.values) / counts.values.sum()) if len (pcc_by_env) else np.nan
+        # env-avg Pearson via shared helper (same as training selection metric)
+        env_ids = pd.Categorical(df_valid['Env'].astype(str)).codes
+        macro_env_pcc_t = macro_env_pearson(
+            pred=torch.tensor(y_pred_valid, dtype=torch.float32, device=device),
+            target=torch.tensor(y_true_valid, dtype=torch.float32, device=device),
+            env_id=torch.tensor(env_ids, dtype=torch.long, device=device),
+            min_samples=2,
+        )
+        macro_env_pcc = (
+            float(macro_env_pcc_t.item())
+            if bool(torch.isfinite(macro_env_pcc_t).item())
+            else np.nan
+        )
 
-    mse_by_env = grp.apply(
-        lambda g: float(mean_squared_error(g['Actual'].to_numpy(), g['Pred'].to_numpy())),
-        include_groups=False
-    ).dropna()
-    macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
+        # per-env tables for reporting
+        grp = df_valid.groupby('Env', sort=False)[['Actual', 'Pred']]
+        pcc_by_env = grp.apply(
+            lambda g: _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy()),
+            include_groups=False
+        ).dropna()
+        counts = grp.size().loc[pcc_by_env.index]
+        weighted_env_pcc = (
+            float(np.nansum(pcc_by_env.values * counts.values) / counts.values.sum())
+            if len(pcc_by_env)
+            else np.nan
+        )
+
+        mse_by_env = grp.apply(
+            lambda g: float(mean_squared_error(g['Actual'].to_numpy(), g['Pred'].to_numpy())),
+            include_groups=False
+        ).dropna()
+        macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
+    else:
+        global_pcc = np.nan
+        global_mse = np.nan
+        macro_env_pcc = np.nan
+        weighted_env_pcc = np.nan
+        macro_env_mse = np.nan
+        pcc_by_env = pd.Series(dtype=float)
 
     results = {
         'global_pcc': float(global_pcc) if not np.isnan(global_pcc) else None,

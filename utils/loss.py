@@ -275,6 +275,54 @@ def torch_pearsonr(pred: torch.Tensor, target: torch.Tensor, dim=0, eps=1e-8):
     r = cov / (v_pred.clamp_min(eps).sqrt() * v_target.clamp_min(eps).sqrt())
     return r.clamp(-1.0, 1.0)
 
+def macro_env_pearson(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    env_id: torch.Tensor,
+    eps: float = 1e-8,
+    min_samples: int = 2,
+) -> torch.Tensor:
+    """
+    Compute macro-averaged Pearson correlation across environments.
+
+    Matches eval-time behavior:
+    - skip environments with < min_samples
+    - skip environments where predictions or targets are constant
+    - average Pearson r uniformly across valid environments
+    """
+    if pred.ndim > 1:
+        pred = pred.squeeze(-1)
+    if target.ndim > 1:
+        target = target.squeeze(-1)
+
+    pred = pred.float()
+    target = target.float()
+    env_id = env_id.to(pred.device)
+
+    rs = []
+    for env in torch.unique(env_id):
+        mask = (env_id == env)
+        if int(mask.sum().item()) < min_samples:
+            continue
+
+        p = pred[mask]
+        t = target[mask]
+
+        p_center = p - p.mean()
+        t_center = t - t.mean()
+        p_ss = (p_center * p_center).sum()
+        t_ss = (t_center * t_center).sum()
+        if p_ss <= eps or t_ss <= eps:
+            continue
+
+        r = (p_center * t_center).sum() / (p_ss.sqrt() * t_ss.sqrt())
+        if torch.isfinite(r):
+            rs.append(r.clamp(-1.0, 1.0))
+
+    if len(rs) == 0:
+        return torch.tensor(float("nan"), device=pred.device)
+    return torch.stack(rs).mean()
+
 class LocalSpearmanCorrLoss(nn.Module):
     """Loss = 1 - Spearman rho (averaged if reduction='mean')."""
     def __init__(self, dim: int = -1, eps: float = 1e-8, reduction: str = "mean"):

@@ -19,7 +19,14 @@ from utils.dataset import *
 from models.model import *
 from models.config import Config
 from utils.get_lr import get_lr
-from utils.loss import build_loss, GlobalPearsonCorrLoss, GenomicContrastiveLoss, compute_ibs_similarity, compute_grm_similarity
+from utils.loss import (
+    build_loss,
+    GlobalPearsonCorrLoss,
+    GenomicContrastiveLoss,
+    compute_ibs_similarity,
+    compute_grm_similarity,
+    macro_env_pearson,
+)
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -356,10 +363,13 @@ def main():
         run.define_metric("epoch")
         run.define_metric("train_loss_epoch", step_metric="epoch")
         run.define_metric("val_loss", step_metric="epoch")
+        run.define_metric("train_env_avg_pearson", step_metric="epoch")
+        run.define_metric("val_env_avg_pearson", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
+                             "selection_metric": "val_env_avg_pearson",
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
@@ -410,9 +420,13 @@ def main():
             run.define_metric("aux_resid_mse_epoch", step_metric="epoch")
 
     # initialize training states
-    best_val_loss, last_improved = float("inf"), 0
+    best_val_loss = float("inf")
+    best_val_env_pcc = -float("inf")
+    last_improved = 0
     iter_num = 0
     t0 = time.time()
+    if is_main(rank):
+        print("[INFO] Checkpoint/early-stop selection metric: val_env_avg_pearson (maximize)")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -617,17 +631,24 @@ def main():
                 if full_resid_p is not None and full_resid_t is not None:
                     mean_aux_resid = F.mse_loss(full_resid_p, full_resid_t).item()
 
+                env_pcc = macro_env_pearson(
+                    full_preds, full_targets, full_env_ids, min_samples=2
+                )
                 mean_parts = {k: float(v) for k, v in lparts.items()}
-                return ltot, mean_parts, mean_aux_ymean, mean_aux_resid
+                return ltot, mean_parts, mean_aux_ymean, mean_aux_resid, float(env_pcc.item())
 
-            train_total, train_parts, aux_train_ymean, aux_train_resid = eval_loader(train_loader, len(train_ds))
-            val_total, val_parts, aux_val_ymean, aux_val_resid = eval_loader(val_loader, len(val_ds))
+            train_total, train_parts, aux_train_ymean, aux_train_resid, train_env_pcc = \
+                eval_loader(train_loader, len(train_ds))
+            val_total, val_parts, aux_val_ymean, aux_val_resid, val_env_pcc = \
+                eval_loader(val_loader, len(val_ds))
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
                 "val_loss": val_total.item(),
                 "train_loss_epoch": train_total.item(),
+                "train_env_avg_pearson": train_env_pcc,
+                "val_env_avg_pearson": val_env_pcc,
                 "epoch": epoch_num,
             }
             for k, v in train_parts.items():
@@ -639,8 +660,21 @@ def main():
                 log_epoch_payload["aux_resid_mse_epoch"] = aux_val_resid
             wandb.log(log_epoch_payload)
 
-            if val_total < best_val_loss:
-                best_val_loss, last_improved = val_total, 0
+            val_loss_value = float(val_total.item())
+            improved = False
+            if math.isfinite(val_env_pcc):
+                if (val_env_pcc > best_val_env_pcc + 1e-8) or (
+                    abs(val_env_pcc - best_val_env_pcc) <= 1e-8
+                    and val_loss_value < best_val_loss
+                ):
+                    improved = True
+            elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
+                improved = True
+
+            if improved:
+                best_val_loss = val_loss_value
+                best_val_env_pcc = val_env_pcc
+                last_improved = 0
                 
                 # collect env scaler and y scalers
                 env_scaler_payload = {
@@ -661,7 +695,8 @@ def main():
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch_num,
-                    "val_loss": float(val_total.item()),
+                    "val_loss": val_loss_value,
+                    "val_env_avg_pearson": val_env_pcc,
                     "config": {
                         "g_enc": args.g_enc,
                         "e_enc": args.e_enc,
@@ -699,7 +734,10 @@ def main():
                 }
                 ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
                 torch.save(ckpt, ckpt_path)
-                print(f"*** validation loss improved: {best_val_loss:.4e} ***")
+                print(
+                    "*** validation env_avg_pearson improved: "
+                    f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
+                )
             else:
                 last_improved += 1
                 print(f"Validation has not improved in {last_improved} steps")
@@ -717,9 +755,12 @@ def main():
                  
         if is_main(rank):
             elapsed = (time.time() - t0) / 60
-            print(f"[Epoch {epoch_num}] train={train_total.item():.4e} | "
-                  f"val={val_total.item():.4e} | best_val={best_val_loss:.4e} | "
-                  f"elapsed={elapsed:.2f}m")
+            print(
+                f"[Epoch {epoch_num}] train_loss={train_total.item():.4e} | "
+                f"val_loss={val_total.item():.4e} | "
+                f"val_env_pcc={val_env_pcc:.5f} | best_env_pcc={best_val_env_pcc:.5f} | "
+                f"elapsed={elapsed:.2f}m"
+            )
 
     dist.barrier()
     if is_main(rank):
