@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J lessnodes
+#SBATCH -J best-fulltf-moe8
 #SBATCH -N 4
-#SBATCH -t 02:00:00
-#SBATCH -p batch
+#SBATCH -t 04:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -39,7 +39,7 @@ export MOE_EXPERT_HIDDEN_DIM=256
 export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
-# calculate microbatch size: GBS=16 on 8 nodes * 8 gpus/node = 64 gpus
+# calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
 export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
@@ -50,15 +50,15 @@ export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
-export EARLY_STOP=200
+export EARLY_STOP=400
 
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=2
+export GXE_LAYERS=1
 
 export HEADS=4
-export EMB_SIZE=384
+export EMB_SIZE=256
 export SCALE_TARGETS=False
 
 export LOSS="envpcc" # + separated list of losses
