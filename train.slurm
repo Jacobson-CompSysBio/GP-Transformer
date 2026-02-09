@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J best-fulltf-moe8
 #SBATCH -N 4
-#SBATCH -t 08:00:00
-#SBATCH -p extended
+#SBATCH -t 02:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -35,8 +35,8 @@ export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
-export MOE_EXPERT_HIDDEN_DIM=384   # MUST match EMB_SIZE — 256 creates FFN bottleneck for 384 emb
-export MOE_SHARED_EXPERT_HIDDEN_DIM=384
+export MOE_EXPERT_HIDDEN_DIM=320
+export MOE_SHARED_EXPERT_HIDDEN_DIM=320
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
@@ -48,21 +48,21 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=3000
 export LR=1e-4
-export WEIGHT_DECAY=5e-5   # stronger regularization for larger model (was 1e-5)
-export DROPOUT=0.20            # more dropout for 384-emb to prevent overfitting (was 0.15)
-export EARLY_STOP=200          # tighter patience — val loss declining ≠ test improvement
+export WEIGHT_DECAY=3e-5
+export DROPOUT=0.20
+export EARLY_STOP=200
 
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
 export GXE_LAYERS=1
 
-export HEADS=4              
-export EMB_SIZE=256
-export SCALE_TARGETS=True   # per-env normalization — required for MSE to work properly
+export HEADS=4
+export EMB_SIZE=320
+export SCALE_TARGETS=False
 
-export LOSS="envpcc+mse"    # MSE constrains absolute yield prediction, prevents overfitting to rank-only patterns
-export LOSS_WEIGHTS="1.0,0.1" # envpcc dominates, MSE provides regularizing gradient signal
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 

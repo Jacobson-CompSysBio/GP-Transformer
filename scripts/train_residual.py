@@ -363,13 +363,13 @@ def main():
         run.define_metric("epoch")
         run.define_metric("train_loss_epoch", step_metric="epoch")
         run.define_metric("val_loss", step_metric="epoch")
-        run.define_metric("train_env_avg_pearson", step_metric="epoch")
-        run.define_metric("val_env_avg_pearson", step_metric="epoch")
+        run.define_metric("train/env_avg_pearson", step_metric="epoch")
+        run.define_metric("val/env_avg_pearson", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
-                             "selection_metric": "val_env_avg_pearson",
+                             "selection_metric": "val/env_avg_pearson",
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
@@ -426,7 +426,7 @@ def main():
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val_env_avg_pearson (maximize)")
+        print("[INFO] Checkpoint/early-stop selection metric: val/env_avg_pearson (maximize)")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -647,8 +647,8 @@ def main():
             log_epoch_payload = {
                 "val_loss": val_total.item(),
                 "train_loss_epoch": train_total.item(),
-                "train_env_avg_pearson": train_env_pcc,
-                "val_env_avg_pearson": val_env_pcc,
+                "train/env_avg_pearson": train_env_pcc,
+                "val/env_avg_pearson": val_env_pcc,
                 "epoch": epoch_num,
             }
             for k, v in train_parts.items():
