@@ -77,8 +77,9 @@ def parse_args():
                    help="composite loss string, e.g. 'mse+envpcc'")
     p.add_argument("--loss_weights", type=str, default="1.0",
                    help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
-    p.add_argument("--contrastive_loss", type=str2bool, default=False,
-                   help="Add genomic contrastive loss to encourage G embeddings to reflect genetic similarity")
+    p.add_argument("--contrastive_mode", type=str, default="none",
+                   choices=["none", "g", "e", "g+e"],
+                   help="Contrastive ablation mode: none, g, e, or g+e")
     p.add_argument("--contrastive_weight", type=float, default=0.1,
                    help="Weight for genomic contrastive loss (default 0.1)")
     p.add_argument("--contrastive_temperature", type=float, default=0.1,
@@ -89,6 +90,10 @@ def parse_args():
     p.add_argument("--contrastive_loss_type", type=str, default="mse",
                    choices=["mse", "cosine", "kl"],
                    help="Contrastive loss type: 'mse' (recommended), 'cosine', or 'kl' (original)")
+    p.add_argument("--env_contrastive_weight", type=float, default=0.1,
+                   help="Weight for environment contrastive loss")
+    p.add_argument("--env_contrastive_temperature", type=float, default=0.5,
+                   help="Temperature for environment contrastive loss")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
@@ -127,7 +132,15 @@ def make_run_name(args) -> str:
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
-    contr = "contr+" if getattr(args, "contrastive_loss", False) else ""
+    contrastive_mode = str(getattr(args, "contrastive_mode", "none")).lower()
+    if contrastive_mode == "g+e":
+        contr = "contrge+"
+    elif contrastive_mode == "g":
+        contr = "contrg+"
+    elif contrastive_mode == "e":
+        contr = "contre+"
+    else:
+        contr = ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
@@ -485,4 +498,3 @@ class HybridEnvSampler(Sampler[int]):
     
     def set_epoch(self, epoch: int):
         self.epoch = epoch
-

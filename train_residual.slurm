@@ -70,11 +70,13 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
 # This can improve generalization by learning meaningful genomic representations
 # NOTE: Now uses warmup - doesn't activate until epoch 50
-export CONTRASTIVE_LOSS=True        # Set to True to enable
+export CONTRASTIVE_MODE=g           # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.05      # Lower weight (was 0.1) - ramps up after warmup
 export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
 export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
 export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
+export ENV_CONTRASTIVE_WEIGHT=0.05
+export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
@@ -139,11 +141,13 @@ srun -N ${SLURM_NNODES} \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
-        --contrastive_loss $CONTRASTIVE_LOSS \
+        --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
         --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
+        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
+        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

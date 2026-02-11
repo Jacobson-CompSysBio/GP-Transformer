@@ -23,6 +23,7 @@ from utils.loss import (
     build_loss,
     GlobalPearsonCorrLoss,
     GenomicContrastiveLoss,
+    EnvironmentContrastiveLoss,
     compute_ibs_similarity,
     compute_grm_similarity,
     macro_env_pearson,
@@ -254,28 +255,50 @@ def main():
     # build loss
     loss_function = build_loss(args.loss, args.loss_weights)
     
-    # optional contrastive loss for genomic embeddings
-    use_contrastive = getattr(args, 'contrastive_loss', False)
-    if use_contrastive:
-        contrastive_weight = getattr(args, 'contrastive_weight', 0.1)
-        contrastive_temperature = getattr(args, 'contrastive_temperature', 0.1)
-        contrastive_sim_type = getattr(args, 'contrastive_sim_type', 'grm')  # 'grm' or 'ibs'
-        contrastive_loss_type = getattr(args, 'contrastive_loss_type', 'mse')  # 'mse', 'cosine', or 'kl'
-        contrastive_loss_fn = GenomicContrastiveLoss(
+    # contrastive objectives (ablation mode: none, g, e, g+e)
+    contrastive_mode = str(getattr(args, "contrastive_mode", "none")).lower()
+    if contrastive_mode not in {"none", "g", "e", "g+e"}:
+        raise ValueError(
+            f"Unsupported contrastive_mode='{contrastive_mode}'. Allowed: ['none', 'g', 'e', 'g+e']"
+        )
+    use_g_contrastive = contrastive_mode in {"g", "g+e"}
+    use_e_contrastive = contrastive_mode in {"e", "g+e"}
+
+    contrastive_weight = float(getattr(args, "contrastive_weight", 0.1))
+    contrastive_temperature = float(getattr(args, "contrastive_temperature", 0.1))
+    contrastive_sim_type = getattr(args, "contrastive_sim_type", "grm")
+    contrastive_loss_type = getattr(args, "contrastive_loss_type", "mse")
+
+    env_contrastive_weight = float(getattr(args, "env_contrastive_weight", 0.1))
+    env_contrastive_temperature = float(getattr(args, "env_contrastive_temperature", 0.5))
+
+    g_contrastive_loss_fn = None
+    if use_g_contrastive:
+        g_contrastive_loss_fn = GenomicContrastiveLoss(
             temperature=contrastive_temperature,
             similarity_type=contrastive_sim_type,
             loss_type=contrastive_loss_type,
         )
-        if is_main(rank):
-            print(f"[INFO] Using genomic contrastive loss:")
-            print(f"       weight={contrastive_weight}, temperature={contrastive_temperature}")
-            print(f"       similarity_type={contrastive_sim_type}, loss_type={contrastive_loss_type}")
-    else:
-        contrastive_loss_fn = None
-        contrastive_weight = 0.0
-        contrastive_temperature = None
-        contrastive_sim_type = None
-        contrastive_loss_type = None
+
+    e_contrastive_loss_fn = None
+    if use_e_contrastive:
+        e_contrastive_loss_fn = EnvironmentContrastiveLoss(
+            temperature=env_contrastive_temperature
+        )
+
+    if is_main(rank):
+        print(f"[INFO] Contrastive mode: {contrastive_mode}")
+        if use_g_contrastive:
+            print(
+                f"       G contrastive: weight={contrastive_weight}, "
+                f"temperature={contrastive_temperature}, "
+                f"similarity_type={contrastive_sim_type}, loss_type={contrastive_loss_type}"
+            )
+        if use_e_contrastive:
+            print(
+                f"       E contrastive: weight={env_contrastive_weight}, "
+                f"temperature={env_contrastive_temperature}"
+            )
 
     # other options
     batches_per_epoch = len(train_loader)
@@ -348,11 +371,15 @@ def main():
                              "batch_size": args.batch_size,
                              "gbs": args.gbs,
                              "early_stop": args.early_stop,
-                             "contrastive_loss": use_contrastive,
-                             "contrastive_weight": contrastive_weight if use_contrastive else None,
-                             "contrastive_temperature": contrastive_temperature if use_contrastive else None,
-                             "contrastive_sim_type": contrastive_sim_type if use_contrastive else None,
-                             "contrastive_loss_type": contrastive_loss_type if use_contrastive else None,
+                             "contrastive_mode": contrastive_mode,
+                             "g_contrastive_enabled": use_g_contrastive,
+                             "g_contrastive_weight": contrastive_weight if use_g_contrastive else None,
+                             "g_contrastive_temperature": contrastive_temperature if use_g_contrastive else None,
+                             "g_contrastive_sim_type": contrastive_sim_type if use_g_contrastive else None,
+                             "g_contrastive_loss_type": contrastive_loss_type if use_g_contrastive else None,
+                             "e_contrastive_enabled": use_e_contrastive,
+                             "e_contrastive_weight": env_contrastive_weight if use_e_contrastive else None,
+                             "e_contrastive_temperature": env_contrastive_temperature if use_e_contrastive else None,
                              "g_encoder_type": g_encoder_type,
                              "moe_num_experts": moe_num_experts,
                              "moe_top_k": moe_top_k,
@@ -367,7 +394,15 @@ def main():
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
-        if use_contrastive:
+        if use_g_contrastive:
+            run.define_metric("train_loss/contrastive_g", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive_g", step_metric="epoch")
+            run.define_metric("train_loss/contrastive_weight_eff_g", step_metric="iter_num")
+        if use_e_contrastive:
+            run.define_metric("train_loss/contrastive_e", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive_e", step_metric="epoch")
+            run.define_metric("train_loss/contrastive_weight_eff_e", step_metric="iter_num")
+        if use_g_contrastive or use_e_contrastive:
             run.define_metric("train_loss/contrastive", step_metric="iter_num")
             run.define_metric("train_loss_epoch/contrastive", step_metric="epoch")
         if moe_encoder_enabled:
@@ -410,7 +445,7 @@ def main():
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                if use_contrastive:
+                if use_g_contrastive:
                     preds, g_embeddings = model(xb, return_g_embeddings=True)
                 else:
                     preds = model(xb)
@@ -421,18 +456,43 @@ def main():
                 # Add contrastive loss if enabled (with warmup)
                 # Don't add contrastive loss until model has learned basic patterns
                 contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
-                if use_contrastive and g_embeddings is not None and epoch_num >= contrastive_warmup_epochs:
-                    # Pass raw genotype data - contrastive loss computes GRM/IBS internally
-                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
-                    # Ramp up contrastive weight linearly after warmup
-                    warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
-                    effective_weight = contrastive_weight * warmup_factor
-                    loss_total = loss_total + effective_weight * contrastive_loss
-                    loss_parts["contrastive"] = float(contrastive_loss.detach().item())
-                    loss_parts["contrastive_weight_eff"] = effective_weight
-                elif use_contrastive:
-                    loss_parts["contrastive"] = 0.0
-                    loss_parts["contrastive_weight_eff"] = 0.0
+                if use_g_contrastive or use_e_contrastive:
+                    if epoch_num >= contrastive_warmup_epochs:
+                        # Ramp up contrastive weights linearly after warmup
+                        warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
+                        contrastive_total = 0.0
+
+                        if use_g_contrastive and g_embeddings is not None and g_contrastive_loss_fn is not None:
+                            g_contr = g_contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
+                            g_weight_eff = contrastive_weight * warmup_factor
+                            loss_total = loss_total + g_weight_eff * g_contr
+                            loss_parts["contrastive_g"] = float(g_contr.detach().item())
+                            loss_parts["contrastive_weight_eff_g"] = g_weight_eff
+                            contrastive_total += float(g_contr.detach().item())
+                        elif use_g_contrastive:
+                            loss_parts["contrastive_g"] = 0.0
+                            loss_parts["contrastive_weight_eff_g"] = 0.0
+
+                        if use_e_contrastive and e_contrastive_loss_fn is not None:
+                            e_contr = e_contrastive_loss_fn(preds, xb["e_data"], env_id)
+                            e_weight_eff = env_contrastive_weight * warmup_factor
+                            loss_total = loss_total + e_weight_eff * e_contr
+                            loss_parts["contrastive_e"] = float(e_contr.detach().item())
+                            loss_parts["contrastive_weight_eff_e"] = e_weight_eff
+                            contrastive_total += float(e_contr.detach().item())
+                        elif use_e_contrastive:
+                            loss_parts["contrastive_e"] = 0.0
+                            loss_parts["contrastive_weight_eff_e"] = 0.0
+
+                        loss_parts["contrastive"] = contrastive_total
+                    else:
+                        if use_g_contrastive:
+                            loss_parts["contrastive_g"] = 0.0
+                            loss_parts["contrastive_weight_eff_g"] = 0.0
+                        if use_e_contrastive:
+                            loss_parts["contrastive_e"] = 0.0
+                            loss_parts["contrastive_weight_eff_e"] = 0.0
+                        loss_parts["contrastive"] = 0.0
                 
                 moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
                 if moe_aux_loss is not None:

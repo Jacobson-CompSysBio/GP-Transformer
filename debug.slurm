@@ -64,7 +64,7 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
-export CONTRASTIVE_LOSS=True
+export CONTRASTIVE_MODE=g  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.5
 export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
@@ -129,7 +129,7 @@ srun -N ${SLURM_NNODES} \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
-        --contrastive_loss $CONTRASTIVE_LOSS \
+        --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
         --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \

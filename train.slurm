@@ -35,8 +35,8 @@ export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
-export MOE_EXPERT_HIDDEN_DIM=320
-export MOE_SHARED_EXPERT_HIDDEN_DIM=320
+export MOE_EXPERT_HIDDEN_DIM=256
+export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
@@ -58,7 +58,8 @@ export MLP_LAYERS=1
 export GXE_LAYERS=1
 
 export HEADS=4
-export EMB_SIZE=320
+export EMB_SIZE=256
+export SEED=1
 export SCALE_TARGETS=False
 
 export LOSS="envpcc" # + separated list of losses
@@ -67,9 +68,11 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_LOSS=False
+export CONTRASTIVE_MODE=none  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
+export ENV_CONTRASTIVE_WEIGHT=0.1
+export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
@@ -132,14 +135,17 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --seed $SEED \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
-        --contrastive_loss $CONTRASTIVE_LOSS \
+        --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
+        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
