@@ -622,110 +622,87 @@ class GenomicContrastiveLoss(nn.Module):
 
 class EnvironmentContrastiveLoss(nn.Module):
     """
-    Encourage consistent hybrid rankings across similar environments.
+    Learn E embeddings where similar environments have similar embeddings.
 
-    Core idea: if environments E_a and E_b have similar features, then
-    hybrids observed in both should be ranked similarly by the model.
-
-    For each pair of environments in the batch:
-      1. Find hybrids that appear in BOTH environments.
-      2. Compare prediction rankings of shared hybrids (Pearson r).
-      3. Weight the consistency penalty by environment feature similarity,
-         sharpened through a sigmoid gate controlled by ``temperature``.
+    Mirrors GenomicContrastiveLoss:
+    - target relationship matrix is computed from raw environment vectors
+    - learned relationship matrix is computed from environment embeddings
+    - the loss aligns those matrices (default: MSE on off-diagonal entries)
 
     Args:
-        temperature: Controls the sharpness of the env-similarity gate.
-            Lower values create a harder threshold around sim=0.5;
-            higher values give a smoother weighting.
-        min_shared: Minimum number of shared hybrids required for a valid
-            environment pair (pairs with fewer shared hybrids are skipped).
+        temperature: Softmax temperature for KL mode.
+        similarity_method: How to build target env similarity from e_data.
+            Supported: "cosine", "correlation".
+        loss_type: Alignment objective: "mse", "cosine", or "kl".
     """
 
-    def __init__(self, temperature: float = 0.5, min_shared: int = 3):
+    def __init__(
+        self,
+        temperature: float = 0.5,
+        similarity_method: str = "cosine",
+        loss_type: str = "mse",
+    ):
         super().__init__()
         self.temperature = temperature
-        self.min_shared = min_shared
+        self.similarity_method = similarity_method
+        self.loss_type = loss_type
 
     def forward(
         self,
-        predictions: torch.Tensor,   # (batch,) predicted yields
-        e_data: torch.Tensor,         # (batch, n_env_features)
-        env_ids: torch.Tensor,        # (batch,) environment IDs
-        hybrid_ids: torch.Tensor,     # (batch,) hybrid IDs
+        e_embeddings: torch.Tensor,            # (batch, d_model)
+        e_data: torch.Tensor = None,           # (batch, n_env_features)
+        env_similarity: torch.Tensor = None,   # (batch, batch), optional precomputed target sim
     ) -> torch.Tensor:
-        predictions = predictions.squeeze(-1).float()
-        device = predictions.device
+        if e_embeddings is None:
+            raise ValueError("e_embeddings must be provided")
 
-        unique_envs = env_ids.unique()
-        if len(unique_envs) < 2:
-            # Not enough environments — maintain gradient flow
-            return predictions.sum() * 0.0
+        if e_embeddings.dim() > 2:
+            e_embeddings = e_embeddings.reshape(e_embeddings.size(0), -1)
+        if e_embeddings.dim() == 1:
+            e_embeddings = e_embeddings.unsqueeze(0)
+        e_embeddings = e_embeddings.float()
 
-        # ------------------------------------------------------------------
-        # Environment centroids & pairwise cosine similarity
-        # ------------------------------------------------------------------
-        centroids = []
-        env_list = []
-        for env in unique_envs:
-            mask = env_ids == env
-            centroids.append(e_data[mask].float().mean(dim=0))
-            env_list.append(env)
-        centroids = torch.stack(centroids)                         # (E, F)
-        centroids_n = F.normalize(centroids, dim=1)
-        sim_matrix = torch.mm(centroids_n, centroids_n.t())        # (E, E)
+        if e_embeddings.size(0) < 2:
+            return e_embeddings.sum() * 0.0
 
-        # ------------------------------------------------------------------
-        # Iterate over environment pairs
-        # ------------------------------------------------------------------
-        total_loss = torch.zeros((), device=device, dtype=predictions.dtype)
-        n_valid = 0
+        # Compute target environment similarity if not precomputed.
+        if env_similarity is None:
+            if e_data is None:
+                raise ValueError("Either e_data or env_similarity must be provided")
+            env_similarity = compute_env_similarity(
+                e_data,
+                method=self.similarity_method,
+            )
+        env_similarity = env_similarity.float().to(e_embeddings.device)
 
-        for i in range(len(env_list)):
-            mask_a = env_ids == env_list[i]
-            idx_a = torch.where(mask_a)[0]
-            hyb_a = hybrid_ids[idx_a]
+        # Learn embedding similarity via cosine similarity.
+        e_norm = F.normalize(e_embeddings, dim=1)
+        embed_sim = torch.mm(e_norm, e_norm.t())
 
-            # Build lookup: hybrid_id -> local position in env A
-            hyb_to_global_a: dict = {}
-            for local, glob in enumerate(idx_a.tolist()):
-                h = hybrid_ids[glob].item()
-                hyb_to_global_a[h] = glob  # last occurrence wins (all same genotype)
+        if self.loss_type == "mse":
+            # Align pairwise structure; ignore diagonal (trivially 1.0).
+            mask = ~torch.eye(embed_sim.size(0), dtype=torch.bool, device=embed_sim.device)
+            if not mask.any():
+                return e_embeddings.sum() * 0.0
+            target_sim = env_similarity.clamp(-1.0, 1.0)
+            loss = F.mse_loss(embed_sim[mask], target_sim[mask])
+        elif self.loss_type == "cosine":
+            embed_flat = embed_sim.flatten()
+            target_flat = env_similarity.flatten()
+            loss = 1.0 - F.cosine_similarity(
+                embed_flat.unsqueeze(0),
+                target_flat.unsqueeze(0),
+            ).squeeze()
+        elif self.loss_type == "kl":
+            temp = max(self.temperature, 1e-6)
+            embed_logits = embed_sim / temp
+            target_probs = F.softmax(env_similarity / temp, dim=1)
+            log_probs = F.log_softmax(embed_logits, dim=1)
+            loss = -torch.sum(target_probs * log_probs) / e_embeddings.size(0)
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
 
-            for j in range(i + 1, len(env_list)):
-                mask_b = env_ids == env_list[j]
-                idx_b = torch.where(mask_b)[0]
-
-                # ---- find shared hybrids via dict intersection ----
-                matched_a: list = []
-                matched_b: list = []
-                for local, glob in enumerate(idx_b.tolist()):
-                    h = hybrid_ids[glob].item()
-                    if h in hyb_to_global_a:
-                        matched_a.append(hyb_to_global_a[h])
-                        matched_b.append(glob)
-
-                if len(matched_a) < self.min_shared:
-                    continue
-
-                # Gather predictions for shared hybrids (gradient flows)
-                pred_a = predictions[matched_a]   # (S,)
-                pred_b = predictions[matched_b]   # (S,)
-
-                # ---- ranking consistency: Pearson r ----
-                r = torch_pearsonr(pred_a, pred_b, dim=0)
-
-                # ---- env-similarity gate (sigmoid controlled by temperature) ----
-                e_sim = sim_matrix[i, j]
-                weight = torch.sigmoid((e_sim - 0.5) / max(self.temperature, 1e-6))
-
-                # Loss: weight * (1 - r)
-                total_loss = total_loss + weight * (1.0 - r)
-                n_valid += 1
-
-        if n_valid > 0:
-            return total_loss / n_valid
-        # No valid pairs — maintain gradient flow
-        return predictions.sum() * 0.0
+        return loss
 
 
 class TripletRankingLoss(nn.Module):

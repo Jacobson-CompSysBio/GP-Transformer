@@ -306,7 +306,7 @@ def main():
         bool(args.wg)
         or moe_encoder_enabled
         or bool(args.residual)
-        or str(getattr(args, "contrastive_mode", "none")).lower() in {"g", "g+e"}
+        or str(getattr(args, "contrastive_mode", "none")).lower() in {"g", "e", "g+e"}
     )
     model = DDP(model,
                 device_ids=[local_rank],
@@ -530,11 +530,22 @@ def main():
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                if use_g_contrastive:
+                if use_g_contrastive and use_e_contrastive:
+                    logits, g_embeddings, e_embeddings = model(
+                        xb,
+                        return_g_embeddings=True,
+                        return_e_embeddings=True,
+                    )
+                elif use_g_contrastive:
                     logits, g_embeddings = model(xb, return_g_embeddings=True)
+                    e_embeddings = None
+                elif use_e_contrastive:
+                    logits, e_embeddings = model(xb, return_e_embeddings=True)
+                    g_embeddings = None
                 else:
                     logits = model(xb)
                     g_embeddings = None
+                    e_embeddings = None
 
                 # residual: compute main and aux losses
                 loss_aux_ymean = None
@@ -566,10 +577,10 @@ def main():
                             loss_parts["contrastive_g"] = 0.0
                             loss_parts["contrastive_weight_eff_g"] = 0.0
 
-                        if use_e_contrastive and e_contrastive_loss_fn is not None:
-                            e_pred = pred_total if args.residual else logits
+                        if use_e_contrastive and e_embeddings is not None and e_contrastive_loss_fn is not None:
                             e_contr = e_contrastive_loss_fn(
-                                e_pred, xb["e_data"], yb["env_id"], yb["hybrid_id"]
+                                e_embeddings,
+                                e_data=xb["e_data"],
                             )
                             e_weight_eff = env_contrastive_weight * warmup_factor
                             loss = loss + e_weight_eff * e_contr

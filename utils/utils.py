@@ -147,6 +147,19 @@ def make_run_name(args) -> str:
 
     model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr).rstrip("+")
 
+    # optional contrastive hyperparameter tag
+    contr_tag = ""
+    if contrastive_mode in {"g", "g+e"}:
+        c_w = short(getattr(args, "contrastive_weight", 0.1))
+        c_sim = str(getattr(args, "contrastive_sim_type", "grm")).lower()
+        c_lt = str(getattr(args, "contrastive_loss_type", "mse")).lower()
+        contr_tag += f"gcontr{c_w}{c_sim}-{c_lt}"
+    if contrastive_mode in {"e", "g+e"}:
+        e_w = short(getattr(args, "env_contrastive_weight", 0.1))
+        e_t = short(getattr(args, "env_contrastive_temperature", 0.5))
+        sep = "_" if contr_tag else ""
+        contr_tag += f"{sep}econtr{e_w}t{e_t}"
+
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     if isinstance(g_encoder_type, str):
@@ -207,6 +220,7 @@ def make_run_name(args) -> str:
     )
     return (
         f"{model_type}"
+        f"{'_' + contr_tag if contr_tag else ''}"
         f"{'_' + moe_tag if moe_tag else ''}"
         f"{'_' + full_tag if full_tag else ''}"
         f"_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"

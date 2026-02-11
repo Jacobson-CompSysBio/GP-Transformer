@@ -473,15 +473,25 @@ def main():
                 xb[k] = v.to(device, non_blocking=True)
             y_true = yb["y"].to(device, non_blocking=True).float()
             env_id = yb["env_id"].to(device, non_blocking=True).long()
-            hybrid_id = yb["hybrid_id"].to(device, non_blocking=True).long()
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                if use_g_contrastive:
+                if use_g_contrastive and use_e_contrastive:
+                    preds, g_embeddings, e_embeddings = model(
+                        xb,
+                        return_g_embeddings=True,
+                        return_e_embeddings=True,
+                    )
+                elif use_g_contrastive:
                     preds, g_embeddings = model(xb, return_g_embeddings=True)
+                    e_embeddings = None
+                elif use_e_contrastive:
+                    preds, e_embeddings = model(xb, return_e_embeddings=True)
+                    g_embeddings = None
                 else:
                     preds = model(xb)
                     g_embeddings = None
+                    e_embeddings = None
                     
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
                 
@@ -505,9 +515,10 @@ def main():
                             loss_parts["contrastive_g"] = 0.0
                             loss_parts["contrastive_weight_eff_g"] = 0.0
 
-                        if use_e_contrastive and e_contrastive_loss_fn is not None:
+                        if use_e_contrastive and e_embeddings is not None and e_contrastive_loss_fn is not None:
                             e_contr = e_contrastive_loss_fn(
-                                preds, xb["e_data"], env_id, hybrid_id
+                                e_embeddings,
+                                e_data=xb["e_data"],
                             )
                             e_weight_eff = env_contrastive_weight * warmup_factor
                             loss_total = loss_total + e_weight_eff * e_contr

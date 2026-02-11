@@ -129,23 +129,38 @@ class FullTransformer(nn.Module):
         tokens = self.ln_f(tokens)
         return tokens
 
-    def forward(self, x, return_g_embeddings: bool = False):
+    def forward(
+        self,
+        x,
+        return_g_embeddings: bool = False,
+        return_e_embeddings: bool = False,
+    ):
         tokens, env_start = self._build_tokens(x)
         tokens = self._encode_tokens(tokens)
-        
+
         # Extract G embeddings AFTER transformer (for contrastive loss)
         # This is crucial - now the embeddings contain learned representations
+        g_embed = None
         if return_g_embeddings:
             # G tokens are from index 1 to env_start (excluding CLS at 0)
             g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             # Project through contrastive head (like SimCLR)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
-        
+
+        e_embed = None
+        if return_e_embeddings and env_start < tokens.size(1):
+            e_tokens = tokens[:, env_start:, :]  # (B, Feats, C)
+            e_embed = e_tokens.mean(dim=1)       # (B, C)
+
         pred = self.head(tokens[:, 0])
-        
+
+        if return_g_embeddings and return_e_embeddings:
+            return pred, g_embed, e_embed
         if return_g_embeddings:
             return pred, g_embed
+        if return_e_embeddings:
+            return pred, e_embed
         return pred
 
     def print_trainable_parameters(self):
@@ -189,15 +204,21 @@ class FullTransformerResidual(FullTransformer):
             nn.Linear(config.n_embd, config.n_embd // 2),
         )
 
-    def forward(self, x, return_g_embeddings: bool = False):
+    def forward(
+        self,
+        x,
+        return_g_embeddings: bool = False,
+        return_e_embeddings: bool = False,
+    ):
         tokens, env_start = self._build_tokens(x)
-        
+
         # IMPORTANT: Encode FIRST, then extract features from encoded tokens
         tokens = self._encode_tokens(tokens)
         resid_pred = self.head(tokens[:, 0])
-        
+
         # Compute ymean from ENCODED env tokens (not raw projections!)
         ymean_pred = None
+        env_repr = None
         if env_start < tokens.size(1):
             env_tokens = tokens[:, env_start:, :]  # Now these are encoded
             env_repr = env_tokens.mean(dim=1)
@@ -213,9 +234,15 @@ class FullTransformerResidual(FullTransformer):
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
+        e_embed = env_repr if return_e_embeddings else None
+
         if not self.residual:
+            if return_g_embeddings and return_e_embeddings:
+                return resid_pred, g_embed, e_embed
             if return_g_embeddings:
                 return resid_pred, g_embed
+            if return_e_embeddings:
+                return resid_pred, e_embed
             return resid_pred
 
         if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
@@ -226,8 +253,12 @@ class FullTransformerResidual(FullTransformer):
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
+        if return_g_embeddings and return_e_embeddings:
+            return result, g_embed, e_embed
         if return_g_embeddings:
             return result, g_embed
+        if return_e_embeddings:
+            return result, e_embed
         return result
 
 # create full GxE transformer for genomic prediction
@@ -436,10 +467,16 @@ class GxE_Transformer(nn.Module):
 
         return rep, e_enc, g_enc
     
-    def forward(self, x, return_g_embeddings: bool = False):
-        rep, _, g_enc = self._encode(x)
+    def forward(
+        self,
+        x,
+        return_g_embeddings: bool = False,
+        return_e_embeddings: bool = False,
+    ):
+        rep, e_enc, g_enc = self._encode(x)
         pred = self.final_layer(self.final_dropout(rep))
-        
+
+        g_embed = None
         if return_g_embeddings:
             # Return pooled G embedding for contrastive loss
             if isinstance(g_enc, torch.Tensor):
@@ -448,10 +485,15 @@ class GxE_Transformer(nn.Module):
                     g_embed = g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
                 else:
                     g_embed = g_enc
-            else:
-                g_embed = None
+        e_embed = e_enc if (return_e_embeddings and isinstance(e_enc, torch.Tensor)) else None
+
+        if return_g_embeddings and return_e_embeddings:
+            return pred, g_embed, e_embed
+        if return_e_embeddings:
+            return pred, e_embed
+        if return_g_embeddings:
             return pred, g_embed
-        
+
         return pred
     
     def print_trainable_parameters(self):
@@ -512,7 +554,12 @@ class GxE_ResidualTransformer(GxE_Transformer):
             nn.Linear(config.n_embd, config.n_embd // 2),
         )
 
-    def forward(self, x, return_g_embeddings: bool = False):
+    def forward(
+        self,
+        x,
+        return_g_embeddings: bool = False,
+        return_e_embeddings: bool = False,
+    ):
         rep, e_enc, g_enc = self._encode(x)  # Unpack all 3 return values
 
         # Extract G embeddings for contrastive loss
@@ -524,10 +571,15 @@ class GxE_ResidualTransformer(GxE_Transformer):
                 else:
                     g_pooled = g_enc
                 g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
+        e_embed = e_enc if (return_e_embeddings and isinstance(e_enc, torch.Tensor)) else None
 
         # non-residual mode: final layer predicts total yield
         if not self.residual:
             pred = self.final_layer(self.final_dropout(rep))
+            if return_g_embeddings and return_e_embeddings:
+                return pred, g_embed, e_embed
+            if return_e_embeddings:
+                return pred, e_embed
             if return_g_embeddings:
                 return pred, g_embed
             return pred
@@ -545,8 +597,12 @@ class GxE_ResidualTransformer(GxE_Transformer):
                 'ymean': ymean_pred,
                 'resid': resid_pred,
         }
+        if return_g_embeddings and return_e_embeddings:
+            return result, g_embed, e_embed
         if return_g_embeddings:
             return result, g_embed
+        if return_e_embeddings:
+            return result, e_embed
         return result
 
 # ----------------------------------------------------------------
