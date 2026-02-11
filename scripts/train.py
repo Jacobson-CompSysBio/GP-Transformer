@@ -55,6 +55,15 @@ def setup_ddp():
 
     local_rank = 0
     torch.cuda.set_device(local_rank)
+
+    # Ensure MASTER_ADDR is set and routable (hostname -i can return IPv6 on Frontier)
+    master = os.environ.get("MASTER_ADDR", "")
+    if not master or ":" in master:  # missing or IPv6
+        master = extract_master_addr()
+        os.environ["MASTER_ADDR"] = master
+    if rank == 0:
+        print(f"[DDP] MASTER_ADDR={os.environ.get('MASTER_ADDR')}, MASTER_PORT={os.environ.get('MASTER_PORT')}, world_size={world_size}")
+
     dist.init_process_group(
         backend="nccl",
         rank=rank,
@@ -464,6 +473,7 @@ def main():
                 xb[k] = v.to(device, non_blocking=True)
             y_true = yb["y"].to(device, non_blocking=True).float()
             env_id = yb["env_id"].to(device, non_blocking=True).long()
+            hybrid_id = yb["hybrid_id"].to(device, non_blocking=True).long()
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -496,7 +506,9 @@ def main():
                             loss_parts["contrastive_weight_eff_g"] = 0.0
 
                         if use_e_contrastive and e_contrastive_loss_fn is not None:
-                            e_contr = e_contrastive_loss_fn(preds, xb["e_data"], env_id)
+                            e_contr = e_contrastive_loss_fn(
+                                preds, xb["e_data"], env_id, hybrid_id
+                            )
                             e_weight_eff = env_contrastive_weight * warmup_factor
                             loss_total = loss_total + e_weight_eff * e_contr
                             loss_parts["contrastive_e"] = float(e_contr.detach().item())

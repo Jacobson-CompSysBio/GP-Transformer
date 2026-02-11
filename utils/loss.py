@@ -622,78 +622,110 @@ class GenomicContrastiveLoss(nn.Module):
 
 class EnvironmentContrastiveLoss(nn.Module):
     """
-    Learn that similar environments should produce similar hybrid rankings.
-    
-    If E_a and E_b have similar features, and hybrid H1 > H2 in E_a,
-    then H1 should likely > H2 in E_b (assuming stable GxE patterns).
-    
-    This loss encourages the model to learn transferable environment effects.
+    Encourage consistent hybrid rankings across similar environments.
+
+    Core idea: if environments E_a and E_b have similar features, then
+    hybrids observed in both should be ranked similarly by the model.
+
+    For each pair of environments in the batch:
+      1. Find hybrids that appear in BOTH environments.
+      2. Compare prediction rankings of shared hybrids (Pearson r).
+      3. Weight the consistency penalty by environment feature similarity,
+         sharpened through a sigmoid gate controlled by ``temperature``.
+
+    Args:
+        temperature: Controls the sharpness of the env-similarity gate.
+            Lower values create a harder threshold around sim=0.5;
+            higher values give a smoother weighting.
+        min_shared: Minimum number of shared hybrids required for a valid
+            environment pair (pairs with fewer shared hybrids are skipped).
     """
-    
-    def __init__(self, temperature: float = 0.5):
+
+    def __init__(self, temperature: float = 0.5, min_shared: int = 3):
         super().__init__()
         self.temperature = temperature
-    
+        self.min_shared = min_shared
+
     def forward(
         self,
-        predictions: torch.Tensor,  # (batch,) predicted yields
-        e_data: torch.Tensor,        # (batch, n_env_features) environment features
-        env_ids: torch.Tensor,       # (batch,) environment IDs
+        predictions: torch.Tensor,   # (batch,) predicted yields
+        e_data: torch.Tensor,         # (batch, n_env_features)
+        env_ids: torch.Tensor,        # (batch,) environment IDs
+        hybrid_ids: torch.Tensor,     # (batch,) hybrid IDs
     ) -> torch.Tensor:
-        """
-        For pairs of samples from different environments:
-        - If environments are similar (cosine sim > threshold)
-        - Then prediction rankings should be consistent
-        """
-        predictions = predictions.squeeze(-1)
-        batch_size = predictions.size(0)
-        
-        # Compute environment similarity
-        env_sim = compute_env_similarity(e_data, method="cosine")
-        
-        # For each pair of environments, compare prediction consistency
-        # This is expensive, so we sample pairs
-        total_loss = torch.tensor(0.0, device=predictions.device)
-        n_pairs = 0
-        
+        predictions = predictions.squeeze(-1).float()
+        device = predictions.device
+
         unique_envs = env_ids.unique()
         if len(unique_envs) < 2:
-            return total_loss
-        
-        # Sample pairs of different environments
-        for i, env_a in enumerate(unique_envs[:-1]):
-            for env_b in unique_envs[i+1:]:
-                mask_a = env_ids == env_a
-                mask_b = env_ids == env_b
-                
-                if mask_a.sum() < 2 or mask_b.sum() < 2:
+            # Not enough environments — maintain gradient flow
+            return predictions.sum() * 0.0
+
+        # ------------------------------------------------------------------
+        # Environment centroids & pairwise cosine similarity
+        # ------------------------------------------------------------------
+        centroids = []
+        env_list = []
+        for env in unique_envs:
+            mask = env_ids == env
+            centroids.append(e_data[mask].float().mean(dim=0))
+            env_list.append(env)
+        centroids = torch.stack(centroids)                         # (E, F)
+        centroids_n = F.normalize(centroids, dim=1)
+        sim_matrix = torch.mm(centroids_n, centroids_n.t())        # (E, E)
+
+        # ------------------------------------------------------------------
+        # Iterate over environment pairs
+        # ------------------------------------------------------------------
+        total_loss = torch.zeros((), device=device, dtype=predictions.dtype)
+        n_valid = 0
+
+        for i in range(len(env_list)):
+            mask_a = env_ids == env_list[i]
+            idx_a = torch.where(mask_a)[0]
+            hyb_a = hybrid_ids[idx_a]
+
+            # Build lookup: hybrid_id -> local position in env A
+            hyb_to_global_a: dict = {}
+            for local, glob in enumerate(idx_a.tolist()):
+                h = hybrid_ids[glob].item()
+                hyb_to_global_a[h] = glob  # last occurrence wins (all same genotype)
+
+            for j in range(i + 1, len(env_list)):
+                mask_b = env_ids == env_list[j]
+                idx_b = torch.where(mask_b)[0]
+
+                # ---- find shared hybrids via dict intersection ----
+                matched_a: list = []
+                matched_b: list = []
+                for local, glob in enumerate(idx_b.tolist()):
+                    h = hybrid_ids[glob].item()
+                    if h in hyb_to_global_a:
+                        matched_a.append(hyb_to_global_a[h])
+                        matched_b.append(glob)
+
+                if len(matched_a) < self.min_shared:
                     continue
-                
-                # Get a representative sample from each environment
-                idx_a = torch.where(mask_a)[0][0]
-                idx_b = torch.where(mask_b)[0][0]
-                
-                # Environment similarity
-                e_sim = env_sim[idx_a, idx_b]
-                
-                # If environments are similar, prediction distributions should be similar
-                pred_a = predictions[mask_a]
-                pred_b = predictions[mask_b]
-                
-                # Compare prediction statistics (mean, std)
-                # Similar environments should have similar yield distributions
-                mean_diff = (pred_a.mean() - pred_b.mean()).abs()
-                std_diff = (pred_a.std() - pred_b.std()).abs()
-                
-                # Weight by environment similarity
-                # High env similarity + high pred difference = high loss
-                pair_loss = e_sim * (mean_diff + 0.5 * std_diff)
-                total_loss = total_loss + pair_loss
-                n_pairs += 1
-        
-        if n_pairs > 0:
-            return total_loss / n_pairs
-        return total_loss
+
+                # Gather predictions for shared hybrids (gradient flows)
+                pred_a = predictions[matched_a]   # (S,)
+                pred_b = predictions[matched_b]   # (S,)
+
+                # ---- ranking consistency: Pearson r ----
+                r = torch_pearsonr(pred_a, pred_b, dim=0)
+
+                # ---- env-similarity gate (sigmoid controlled by temperature) ----
+                e_sim = sim_matrix[i, j]
+                weight = torch.sigmoid((e_sim - 0.5) / max(self.temperature, 1e-6))
+
+                # Loss: weight * (1 - r)
+                total_loss = total_loss + weight * (1.0 - r)
+                n_valid += 1
+
+        if n_valid > 0:
+            return total_loss / n_valid
+        # No valid pairs — maintain gradient flow
+        return predictions.sum() * 0.0
 
 
 class TripletRankingLoss(nn.Module):

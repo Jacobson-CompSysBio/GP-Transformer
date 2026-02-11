@@ -68,7 +68,7 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_MODE=g+e  # ablation: none, g, e, g+e
+export CONTRASTIVE_MODE=g  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
 export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
@@ -92,7 +92,7 @@ export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${SLURM_JOB_ID}.txt"
 rm -f "$WANDB_RUN_ID_FILE" "$CHECKPOINT_DIR_FILE"
 
 ### network / rccl settings ###
-export MASTER_ADDR=$(hostname -i)
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
 export MASTER_PORT=6000
 export NCCL_SOCKET_IFNAME=hsn0
 
