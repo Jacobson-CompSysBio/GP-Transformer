@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-fulltf-moe8
+#SBATCH -J fulltf,strat,contr,moe
 #SBATCH -N 4
-#SBATCH -t 02:00:00
+#SBATCH -t 2:00:00
 #SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
@@ -39,7 +39,7 @@ export MOE_EXPERT_HIDDEN_DIM=320
 export MOE_SHARED_EXPERT_HIDDEN_DIM=320
 export MOE_LOSS_WEIGHT=0.01
 
-# calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
+# calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
 export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
@@ -55,11 +55,12 @@ export EARLY_STOP=200
 export G_LAYERS=1
 export LD_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=1
+export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=320
 export SCALE_TARGETS=False
+export G_INPUT_TYPE=grm   # options: "tokens", "grm"
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -132,6 +133,7 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --g_input_type $G_INPUT_TYPE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -181,6 +183,7 @@ python -u scripts/eval.py \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
+    --g_input_type $G_INPUT_TYPE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
