@@ -336,13 +336,13 @@ def main():
         run.define_metric("epoch")
         run.define_metric("train_loss_epoch", step_metric="epoch")
         run.define_metric("val_loss", step_metric="epoch")
-        run.define_metric("train/env_avg_pearson", step_metric="epoch")
-        run.define_metric("val/env_avg_pearson", step_metric="epoch")
+        run.define_metric("train_loss_epoch/env_avg_pearson", step_metric="epoch")
+        run.define_metric("val_loss/env_avg_pearson", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
-                             "selection_metric": "val/env_avg_pearson",
+                             "selection_metric": "val_loss/env_avg_pearson",
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
                              "g_layers": args.g_layers,
@@ -390,7 +390,7 @@ def main():
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val/env_avg_pearson (maximize)")
+        print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -426,25 +426,16 @@ def main():
                     
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
                 
-<<<<<<< HEAD
-                # Add contrastive loss if enabled (with warmup)
-                # Don't add contrastive loss until model has learned basic patterns
+                # Add contrastive loss if enabled (with warmup).
                 contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
                 if use_contrastive and g_embeddings is not None and epoch_num >= contrastive_warmup_epochs:
-                    # Pass raw genotype data - contrastive loss computes GRM/IBS internally
-                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
-                    # Ramp up contrastive weight linearly after warmup
-                    warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
-                    effective_weight = contrastive_weight * warmup_factor
-                    loss_total = loss_total + effective_weight * contrastive_loss
-=======
-                # Add contrastive loss if enabled
-                if use_contrastive and g_embeddings is not None:
                     # Use raw dosages when available (needed if model input is GRM-standardized).
                     g_for_contrastive = xb.get("g_data_raw", xb["g_data"])
                     contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=g_for_contrastive)
-                    loss_total = loss_total + contrastive_weight * contrastive_loss
->>>>>>> 90da33c (added grm preproc for fullTF)
+                    # Ramp up contrastive weight linearly after warmup.
+                    warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
+                    effective_weight = contrastive_weight * warmup_factor
+                    loss_total = loss_total + effective_weight * contrastive_loss
                     loss_parts["contrastive"] = float(contrastive_loss.detach().item())
                     loss_parts["contrastive_weight_eff"] = effective_weight
                 elif use_contrastive:
@@ -577,16 +568,16 @@ def main():
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
-                "val_loss": val_total.item(),
-                "train_loss_epoch": train_total.item(),
-                "train/env_avg_pearson": train_env_pcc,
-                "val/env_avg_pearson": val_env_pcc,
                 "epoch": epoch_num,
+                "val_loss": val_total.item(),
+                "val_loss/env_avg_pearson": val_env_pcc,
             }
-            for k, v in train_parts.items():
-                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             for k, v in val_parts.items():
                 log_epoch_payload[f"val_loss/{k}"] = float(v)
+            log_epoch_payload["train_loss_epoch"] = train_total.item()
+            log_epoch_payload["train_loss_epoch/env_avg_pearson"] = train_env_pcc
+            for k, v in train_parts.items():
+                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
             val_loss_value = float(val_total.item())

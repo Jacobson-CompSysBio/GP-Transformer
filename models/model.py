@@ -48,10 +48,11 @@ class FullTransformer(nn.Module):
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
         if self.g_input_type == "tokens":
             self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
-            self.g_proj = None
+            self.g_scalar_proj = None
         else:
             self.g_embed = None
-            self.g_proj = nn.Linear(1, config.n_embd)
+            # Keep tokenizer projection separate from contrastive projection head.
+            self.g_scalar_proj = nn.Linear(1, config.n_embd)
         # project each scalar env feature to a token embedding
         self.e_proj = nn.Linear(1, config.n_embd)
 
@@ -111,7 +112,7 @@ class FullTransformer(nn.Module):
         if self.g_input_type == "tokens":
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
-            g_tok = self.g_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
+            g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
