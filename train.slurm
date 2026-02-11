@@ -71,6 +71,8 @@ export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable co
 export CONTRASTIVE_MODE=g+e  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
+export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
+export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
@@ -144,6 +146,8 @@ srun -N ${SLURM_NNODES} \
         --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
+        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \

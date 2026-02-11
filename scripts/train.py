@@ -71,6 +71,17 @@ def is_main(rank) -> bool:
     """check if current process is main"""
     return rank == 0
 
+def _normalize_choice(name: str, value, allowed: set[str], default: str) -> str:
+    """
+    Backward-compatible normalizer for legacy boolean-like CLI values.
+    """
+    v = str(value).strip().lower()
+    if v in {"", "false", "0", "off", "none", "no"}:
+        return default
+    if v not in allowed:
+        raise ValueError(f"Unsupported {name}='{value}'. Allowed: {sorted(allowed)}")
+    return v
+
 ### main ###
 def main():
     # setup
@@ -256,18 +267,29 @@ def main():
     loss_function = build_loss(args.loss, args.loss_weights)
     
     # contrastive objectives (ablation mode: none, g, e, g+e)
-    contrastive_mode = str(getattr(args, "contrastive_mode", "none")).lower()
-    if contrastive_mode not in {"none", "g", "e", "g+e"}:
-        raise ValueError(
-            f"Unsupported contrastive_mode='{contrastive_mode}'. Allowed: ['none', 'g', 'e', 'g+e']"
-        )
+    contrastive_mode = _normalize_choice(
+        "contrastive_mode",
+        getattr(args, "contrastive_mode", "none"),
+        {"none", "g", "e", "g+e"},
+        "none",
+    )
     use_g_contrastive = contrastive_mode in {"g", "g+e"}
     use_e_contrastive = contrastive_mode in {"e", "g+e"}
 
     contrastive_weight = float(getattr(args, "contrastive_weight", 0.1))
     contrastive_temperature = float(getattr(args, "contrastive_temperature", 0.1))
-    contrastive_sim_type = getattr(args, "contrastive_sim_type", "grm")
-    contrastive_loss_type = getattr(args, "contrastive_loss_type", "mse")
+    contrastive_sim_type = _normalize_choice(
+        "contrastive_sim_type",
+        getattr(args, "contrastive_sim_type", "grm"),
+        {"grm", "ibs"},
+        "grm",
+    )
+    contrastive_loss_type = _normalize_choice(
+        "contrastive_loss_type",
+        getattr(args, "contrastive_loss_type", "mse"),
+        {"mse", "cosine", "kl"},
+        "mse",
+    )
 
     env_contrastive_weight = float(getattr(args, "env_contrastive_weight", 0.1))
     env_contrastive_temperature = float(getattr(args, "env_contrastive_temperature", 0.5))

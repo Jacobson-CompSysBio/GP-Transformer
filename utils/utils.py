@@ -85,11 +85,9 @@ def parse_args():
     p.add_argument("--contrastive_temperature", type=float, default=0.1,
                    help="Temperature for contrastive loss softmax (default 0.1)")
     p.add_argument("--contrastive_sim_type", type=str, default="grm",
-                   choices=["grm", "ibs"],
-                   help="Genetic similarity type for contrastive loss: 'grm' (recommended) or 'ibs'")
+                   help="Genetic similarity type for contrastive loss: grm or ibs")
     p.add_argument("--contrastive_loss_type", type=str, default="mse",
-                   choices=["mse", "cosine", "kl"],
-                   help="Contrastive loss type: 'mse' (recommended), 'cosine', or 'kl' (original)")
+                   help="Contrastive loss type: mse, cosine, or kl")
     p.add_argument("--env_contrastive_weight", type=float, default=0.1,
                    help="Weight for environment contrastive loss")
     p.add_argument("--env_contrastive_temperature", type=float, default=0.5,

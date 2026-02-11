@@ -89,7 +89,7 @@ class FullTransformer(nn.Module):
         
         # Projection head for contrastive learning (like SimCLR)
         # Projects G embeddings to a space good for contrastive learning
-        self.g_proj = nn.Sequential(
+        self.g_contrast_proj = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd),
             nn.ReLU(),
             nn.Linear(config.n_embd, config.n_embd // 2),
@@ -140,7 +140,7 @@ class FullTransformer(nn.Module):
             g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             # Project through contrastive head (like SimCLR)
-            g_embed = self.g_proj(g_pooled)  # (B, C//2)
+            g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
         
         pred = self.head(tokens[:, 0])
         
@@ -183,7 +183,7 @@ class FullTransformerResidual(FullTransformer):
         self.ymean_head = nn.Linear(config.n_embd, 1)
         
         # Projection head for contrastive learning (like SimCLR)
-        self.g_proj = nn.Sequential(
+        self.g_contrast_proj = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd),
             nn.ReLU(),
             nn.Linear(config.n_embd, config.n_embd // 2),
@@ -211,7 +211,7 @@ class FullTransformerResidual(FullTransformer):
         if return_g_embeddings:
             g_tokens = tokens[:, 1:env_start, :]  # G tokens (excluding CLS)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
-            g_embed = self.g_proj(g_pooled)  # (B, C//2)
+            g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
         if not self.residual:
             if return_g_embeddings:
@@ -506,7 +506,7 @@ class GxE_ResidualTransformer(GxE_Transformer):
         self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
         
         # Projection head for contrastive learning (like SimCLR)
-        self.g_proj = nn.Sequential(
+        self.g_contrast_proj = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd),
             nn.ReLU(),
             nn.Linear(config.n_embd, config.n_embd // 2),
@@ -523,7 +523,7 @@ class GxE_ResidualTransformer(GxE_Transformer):
                     g_pooled = g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
                 else:
                     g_pooled = g_enc
-                g_embed = self.g_proj(g_pooled)  # (B, C//2)
+                g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
         # non-residual mode: final layer predicts total yield
         if not self.residual:
