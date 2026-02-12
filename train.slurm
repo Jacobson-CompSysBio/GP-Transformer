@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J grm-input
+#SBATCH -J gcontr
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -61,7 +61,7 @@ export HEADS=4
 export EMB_SIZE=256
 export SEED=1
 export SCALE_TARGETS=False
-export G_INPUT_TYPE=grm   # options: "tokens", "grm"
+export G_INPUT_TYPE=tokens   # options: "tokens", "grm"
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -69,7 +69,7 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_MODE=none  # ablation: none, g, e, g+e
+export CONTRASTIVE_MODE=g  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
 export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs

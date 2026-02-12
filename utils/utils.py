@@ -132,6 +132,15 @@ def make_run_name(args) -> str:
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
+    # Contrastive mode can come from args or environment.
+    # Keep this robust to legacy boolean-style values.
+    contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
+    contrastive_mode = str(contrastive_mode_raw).strip().lower()
+    if contrastive_mode in {"", "false", "0", "off", "none", "no"}:
+        contrastive_mode = "none"
+    elif contrastive_mode in {"true", "1", "on", "yes"}:
+        contrastive_mode = "g"
+
     if contrastive_mode == "g+e":
         contr = "contrge+"
     elif contrastive_mode == "g":
