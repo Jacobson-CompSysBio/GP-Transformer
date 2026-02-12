@@ -59,6 +59,7 @@ export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=256
+export SEED=1
 export SCALE_TARGETS=False
 export G_INPUT_TYPE=grm   # options: "tokens", "grm"
 
@@ -68,9 +69,13 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_LOSS=False
+export CONTRASTIVE_MODE=none  # ablation: none, g, e, g+e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
+export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
+export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
+export ENV_CONTRASTIVE_WEIGHT=0.1
+export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
@@ -88,7 +93,7 @@ export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${SLURM_JOB_ID}.txt"
 rm -f "$WANDB_RUN_ID_FILE" "$CHECKPOINT_DIR_FILE"
 
 ### network / rccl settings ###
-export MASTER_ADDR=$(hostname -i)
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
 export MASTER_PORT=6000
 export NCCL_SOCKET_IFNAME=hsn0
 
@@ -133,15 +138,19 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
-        --g_input_type $G_INPUT_TYPE \
+        --seed $SEED \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
-        --contrastive_loss $CONTRASTIVE_LOSS \
+        --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
+        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
+        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
+        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

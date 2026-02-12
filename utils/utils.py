@@ -79,18 +79,21 @@ def parse_args():
                    help="composite loss string, e.g. 'mse+envpcc'")
     p.add_argument("--loss_weights", type=str, default="1.0",
                    help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
-    p.add_argument("--contrastive_loss", type=str2bool, default=False,
-                   help="Add genomic contrastive loss to encourage G embeddings to reflect genetic similarity")
+    p.add_argument("--contrastive_mode", type=str, default="none",
+                   choices=["none", "g", "e", "g+e"],
+                   help="Contrastive ablation mode: none, g, e, or g+e")
     p.add_argument("--contrastive_weight", type=float, default=0.1,
                    help="Weight for genomic contrastive loss (default 0.1)")
     p.add_argument("--contrastive_temperature", type=float, default=0.1,
                    help="Temperature for contrastive loss softmax (default 0.1)")
     p.add_argument("--contrastive_sim_type", type=str, default="grm",
-                   choices=["grm", "ibs"],
-                   help="Genetic similarity type for contrastive loss: 'grm' (recommended) or 'ibs'")
+                   help="Genetic similarity type for contrastive loss: grm or ibs")
     p.add_argument("--contrastive_loss_type", type=str, default="mse",
-                   choices=["mse", "cosine", "kl"],
-                   help="Contrastive loss type: 'mse' (recommended), 'cosine', or 'kl' (original)")
+                   help="Contrastive loss type: mse, cosine, or kl")
+    p.add_argument("--env_contrastive_weight", type=float, default=0.1,
+                   help="Weight for environment contrastive loss")
+    p.add_argument("--env_contrastive_temperature", type=float, default=0.5,
+                   help="Temperature for environment contrastive loss")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
@@ -129,7 +132,15 @@ def make_run_name(args) -> str:
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
-    contr = "contr+" if getattr(args, "contrastive_loss", False) else ""
+    if contrastive_mode == "g+e":
+        contr = "contrge+"
+    elif contrastive_mode == "g":
+        contr = "contrg+"
+    elif contrastive_mode == "e":
+        contr = "contre+"
+    else:
+        contr = ""
+    
     ginput = "grm+" if getattr(args, "g_input_type", "tokens") == "grm" else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
@@ -138,6 +149,19 @@ def make_run_name(args) -> str:
         gxe = ""
 
     model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
+
+    # optional contrastive hyperparameter tag
+    contr_tag = ""
+    if contrastive_mode in {"g", "g+e"}:
+        c_w = short(getattr(args, "contrastive_weight", 0.1))
+        c_sim = str(getattr(args, "contrastive_sim_type", "grm")).lower()
+        c_lt = str(getattr(args, "contrastive_loss_type", "mse")).lower()
+        contr_tag += f"gcontr{c_w}{c_sim}-{c_lt}"
+    if contrastive_mode in {"e", "g+e"}:
+        e_w = short(getattr(args, "env_contrastive_weight", 0.1))
+        e_t = short(getattr(args, "env_contrastive_temperature", 0.5))
+        sep = "_" if contr_tag else ""
+        contr_tag += f"{sep}econtr{e_w}t{e_t}"
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
@@ -199,6 +223,7 @@ def make_run_name(args) -> str:
     )
     return (
         f"{model_type}"
+        f"{'_' + contr_tag if contr_tag else ''}"
         f"{'_' + moe_tag if moe_tag else ''}"
         f"{'_' + full_tag if full_tag else ''}"
         f"_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"

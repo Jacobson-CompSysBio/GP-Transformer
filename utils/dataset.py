@@ -201,6 +201,15 @@ class GxE_Dataset(Dataset):
         self.env_codes = pd.Categorical(self.meta['Env'].astype(str))
         self.env_id_tensor = torch.tensor(self.env_codes.codes, dtype=torch.long)
 
+        ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
+        # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
+        # Falls back to full id if no "-" separator is present
+        hybrid_names = self.meta['id'].astype(str).apply(
+            lambda x: x.split('-', 1)[1] if '-' in x else x
+        )
+        self.hybrid_codes = pd.Categorical(hybrid_names)
+        self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
+
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
         feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
@@ -353,8 +362,10 @@ class GxE_Dataset(Dataset):
         y_total = torch.tensor([self.total_series.iloc[index]], dtype=torch.float32)
         env_id = self.env_id_tensor[index]
 
+        hybrid_id = self.hybrid_id_tensor[index]
+
         if not self.residual_flag:
-            return x, {"y": y_total, "env_id": env_id}
+            return x, {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
 
         # residual out
         y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
@@ -363,6 +374,7 @@ class GxE_Dataset(Dataset):
             'total': y_total,
             'ymean': y_env_mean,
             'resid': y_residual,
-            'env_id': env_id
+            'env_id': env_id,
+            'hybrid_id': hybrid_id,
         }
         return x, targets

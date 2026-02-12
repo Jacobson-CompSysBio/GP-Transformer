@@ -622,78 +622,87 @@ class GenomicContrastiveLoss(nn.Module):
 
 class EnvironmentContrastiveLoss(nn.Module):
     """
-    Learn that similar environments should produce similar hybrid rankings.
-    
-    If E_a and E_b have similar features, and hybrid H1 > H2 in E_a,
-    then H1 should likely > H2 in E_b (assuming stable GxE patterns).
-    
-    This loss encourages the model to learn transferable environment effects.
+    Learn E embeddings where similar environments have similar embeddings.
+
+    Mirrors GenomicContrastiveLoss:
+    - target relationship matrix is computed from raw environment vectors
+    - learned relationship matrix is computed from environment embeddings
+    - the loss aligns those matrices (default: MSE on off-diagonal entries)
+
+    Args:
+        temperature: Softmax temperature for KL mode.
+        similarity_method: How to build target env similarity from e_data.
+            Supported: "cosine", "correlation".
+        loss_type: Alignment objective: "mse", "cosine", or "kl".
     """
-    
-    def __init__(self, temperature: float = 0.5):
+
+    def __init__(
+        self,
+        temperature: float = 0.5,
+        similarity_method: str = "cosine",
+        loss_type: str = "mse",
+    ):
         super().__init__()
         self.temperature = temperature
-    
+        self.similarity_method = similarity_method
+        self.loss_type = loss_type
+
     def forward(
         self,
-        predictions: torch.Tensor,  # (batch,) predicted yields
-        e_data: torch.Tensor,        # (batch, n_env_features) environment features
-        env_ids: torch.Tensor,       # (batch,) environment IDs
+        e_embeddings: torch.Tensor,            # (batch, d_model)
+        e_data: torch.Tensor = None,           # (batch, n_env_features)
+        env_similarity: torch.Tensor = None,   # (batch, batch), optional precomputed target sim
     ) -> torch.Tensor:
-        """
-        For pairs of samples from different environments:
-        - If environments are similar (cosine sim > threshold)
-        - Then prediction rankings should be consistent
-        """
-        predictions = predictions.squeeze(-1)
-        batch_size = predictions.size(0)
-        
-        # Compute environment similarity
-        env_sim = compute_env_similarity(e_data, method="cosine")
-        
-        # For each pair of environments, compare prediction consistency
-        # This is expensive, so we sample pairs
-        total_loss = torch.tensor(0.0, device=predictions.device)
-        n_pairs = 0
-        
-        unique_envs = env_ids.unique()
-        if len(unique_envs) < 2:
-            return total_loss
-        
-        # Sample pairs of different environments
-        for i, env_a in enumerate(unique_envs[:-1]):
-            for env_b in unique_envs[i+1:]:
-                mask_a = env_ids == env_a
-                mask_b = env_ids == env_b
-                
-                if mask_a.sum() < 2 or mask_b.sum() < 2:
-                    continue
-                
-                # Get a representative sample from each environment
-                idx_a = torch.where(mask_a)[0][0]
-                idx_b = torch.where(mask_b)[0][0]
-                
-                # Environment similarity
-                e_sim = env_sim[idx_a, idx_b]
-                
-                # If environments are similar, prediction distributions should be similar
-                pred_a = predictions[mask_a]
-                pred_b = predictions[mask_b]
-                
-                # Compare prediction statistics (mean, std)
-                # Similar environments should have similar yield distributions
-                mean_diff = (pred_a.mean() - pred_b.mean()).abs()
-                std_diff = (pred_a.std() - pred_b.std()).abs()
-                
-                # Weight by environment similarity
-                # High env similarity + high pred difference = high loss
-                pair_loss = e_sim * (mean_diff + 0.5 * std_diff)
-                total_loss = total_loss + pair_loss
-                n_pairs += 1
-        
-        if n_pairs > 0:
-            return total_loss / n_pairs
-        return total_loss
+        if e_embeddings is None:
+            raise ValueError("e_embeddings must be provided")
+
+        if e_embeddings.dim() > 2:
+            e_embeddings = e_embeddings.reshape(e_embeddings.size(0), -1)
+        if e_embeddings.dim() == 1:
+            e_embeddings = e_embeddings.unsqueeze(0)
+        e_embeddings = e_embeddings.float()
+
+        if e_embeddings.size(0) < 2:
+            return e_embeddings.sum() * 0.0
+
+        # Compute target environment similarity if not precomputed.
+        if env_similarity is None:
+            if e_data is None:
+                raise ValueError("Either e_data or env_similarity must be provided")
+            env_similarity = compute_env_similarity(
+                e_data,
+                method=self.similarity_method,
+            )
+        env_similarity = env_similarity.float().to(e_embeddings.device)
+
+        # Learn embedding similarity via cosine similarity.
+        e_norm = F.normalize(e_embeddings, dim=1)
+        embed_sim = torch.mm(e_norm, e_norm.t())
+
+        if self.loss_type == "mse":
+            # Align pairwise structure; ignore diagonal (trivially 1.0).
+            mask = ~torch.eye(embed_sim.size(0), dtype=torch.bool, device=embed_sim.device)
+            if not mask.any():
+                return e_embeddings.sum() * 0.0
+            target_sim = env_similarity.clamp(-1.0, 1.0)
+            loss = F.mse_loss(embed_sim[mask], target_sim[mask])
+        elif self.loss_type == "cosine":
+            embed_flat = embed_sim.flatten()
+            target_flat = env_similarity.flatten()
+            loss = 1.0 - F.cosine_similarity(
+                embed_flat.unsqueeze(0),
+                target_flat.unsqueeze(0),
+            ).squeeze()
+        elif self.loss_type == "kl":
+            temp = max(self.temperature, 1e-6)
+            embed_logits = embed_sim / temp
+            target_probs = F.softmax(env_similarity / temp, dim=1)
+            log_probs = F.log_softmax(embed_logits, dim=1)
+            loss = -torch.sum(target_probs * log_probs) / e_embeddings.size(0)
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+        return loss
 
 
 class TripletRankingLoss(nn.Module):
