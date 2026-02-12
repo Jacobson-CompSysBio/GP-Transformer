@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J fulltf,strat,contr,moe
+#SBATCH -J grm-input
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -35,8 +35,8 @@ export G_ENCODER_TYPE=moe  # options: "dense", "moe"
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
-export MOE_EXPERT_HIDDEN_DIM=320
-export MOE_SHARED_EXPERT_HIDDEN_DIM=320
+export MOE_EXPERT_HIDDEN_DIM=256
+export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
@@ -48,8 +48,8 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 
 export NUM_EPOCHS=3000
 export LR=1e-4
-export WEIGHT_DECAY=3e-5
-export DROPOUT=0.20
+export WEIGHT_DECAY=1e-5
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -58,7 +58,7 @@ export MLP_LAYERS=1
 export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
-export EMB_SIZE=320
+export EMB_SIZE=256
 export SCALE_TARGETS=False
 export G_INPUT_TYPE=grm   # options: "tokens", "grm"
 

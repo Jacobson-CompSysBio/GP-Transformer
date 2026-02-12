@@ -57,7 +57,7 @@ export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
-export G_INPUT_TYPE=tokens   # options: "tokens", "grm"
+export G_INPUT_TYPE=grm   # options: "tokens", "grm"
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
