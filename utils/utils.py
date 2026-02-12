@@ -49,6 +49,8 @@ def parse_args():
     p.add_argument("--full_transformer", type=str2bool, default=False)
     p.add_argument("--full_tf_mlp_type", type=str, default=None)
     p.add_argument("--residual", type=str2bool, default=False)
+    p.add_argument("--g_input_type", type=str, default="tokens", choices=["tokens", "grm"],
+                   help="Genotype input representation: tokenized markers ('tokens') or GRM-standardized features ('grm').")
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
@@ -128,13 +130,14 @@ def make_run_name(args) -> str:
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
     contr = "contr+" if getattr(args, "contrastive_loss", False) else ""
+    ginput = "grm+" if getattr(args, "g_input_type", "tokens") == "grm" else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
 
     # optional MoE encoder tag
     g_encoder_type = _get_arg_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
@@ -485,4 +488,3 @@ class HybridEnvSampler(Sampler[int]):
     
     def set_epoch(self, epoch: int):
         self.epoch = epoch
-

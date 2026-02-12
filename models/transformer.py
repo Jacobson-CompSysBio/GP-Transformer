@@ -185,6 +185,9 @@ class G_Encoder(nn.Module):
         self.moe_expert_hidden_dim = moe_expert_hidden_dim
         self.moe_shared_expert = moe_shared_expert
         self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
+        self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
+        if self.g_input_type not in {"tokens", "grm"}:
+            raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
 
         # learned CLS embedding (summary token)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -210,9 +213,14 @@ class G_Encoder(nn.Module):
             def build_block(i):
                 return TransformerBlock(config, drop_path=dpr[i])
 
+        embedding_layer = (
+            nn.Embedding(config.vocab_size, config.n_embd)
+            if self.g_input_type == "tokens"
+            else nn.Linear(1, config.n_embd)
+        )
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wte=embedding_layer,
                 wpe=PositionalEncoding(config),
                 h=nn.ModuleList([build_block(i) for i in range(config.n_g_layer)]),
                 ln_f=nn.LayerNorm(config.n_embd),
@@ -226,14 +234,18 @@ class G_Encoder(nn.Module):
         self.output_dim = config.n_embd
 
     # forward pass
-    def forward(self, idx, return_moe_loss: bool = False):
+    def forward(self, g_data, return_moe_loss: bool = False):
 
         # split idx into batch dim and sequence dim
-        B, T = idx.shape
+        B, T = g_data.shape
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}; block size is {self.config.block_size}"
 
         # token + positional embeddings
-        x = self.transformer.wpe(self.transformer.wte(idx)) # (B, T, C)
+        if self.g_input_type == "tokens":
+            g_embed = self.transformer.wte(g_data.long())
+        else:
+            g_embed = self.transformer.wte(g_data.float().unsqueeze(-1))
+        x = self.transformer.wpe(g_embed) # (B, T, C)
 
         # prepend CLS token (add small positional bias so it isn't identical to data tokens)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)  # (B, 1, C)

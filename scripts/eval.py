@@ -54,18 +54,32 @@ def _rebuild_y_scalers(payload: dict) -> dict | None:
         return None
     return {k: LabelScaler(v['mean'], v['std']) for k, v in payload.items()}
 
+def _rebuild_marker_stats(payload: dict) -> dict | None:
+    if not payload:
+        return None
+    return {
+        "p": np.asarray(payload["p"], dtype=np.float32),
+        "scale": np.asarray(payload["scale"], dtype=np.float32),
+        "valid": np.asarray(payload["valid"], dtype=np.float32),
+        "columns": list(payload["columns"]),
+    }
+
 def load_data(args,
               split: str = "test",
               batch_size: int = 32,
               env_scaler: StandardScaler | None = None,
-              y_scalers: dict | None = None):           # <— rename & type
+              y_scalers: dict | None = None,
+              marker_stats: dict | None = None,
+              g_input_type: str = "tokens"):
 
     ds = GxE_Dataset(
         split=split,
         data_path=DATA_DIR,
         scaler=env_scaler,
         y_scalers=y_scalers,                           # <— pass dict here
-        scale_targets=args.scale_targets
+        scale_targets=args.scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=marker_stats,
     )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
     return ds, loader
@@ -270,6 +284,7 @@ def load_model(device: torch.device,
     moe_shared_expert = config.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
     moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
     moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
+    g_input_type = config.get("g_input_type", getattr(args, "g_input_type", "tokens"))
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
@@ -281,8 +296,10 @@ def load_model(device: torch.device,
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
     y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
+    marker_stats = _rebuild_marker_stats(payload.get("marker_stats", None))
 
     config = Config(block_size=blk,
+                    g_input_type=g_input_type,
                     n_g_layer=g_layer,
                     n_ld_layer=ld_layer,
                     n_mlp_layer=mlp_layer,
@@ -357,7 +374,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type 
 
 def main():
     args = parse_args()
@@ -389,13 +406,15 @@ def main():
     torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type = load_model(device, args)    
     
     # load data
     print("Loading data...")
     test_data, test_loader = load_data(args,
                                     env_scaler=env_scaler,
                                     y_scalers=y_scalers,   # <— name matches
+                                    marker_stats=marker_stats,
+                                    g_input_type=g_input_type,
                                     split="test",
                                     batch_size=32)
 

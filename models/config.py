@@ -9,6 +9,7 @@ from dataclasses import dataclass
 class Config:
     block_size: int = 2024 # max sequence length
     vocab_size: int = 3 # 0, 0.5, 1
+    g_input_type: str = "tokens" # genotype input representation: "tokens" or "grm"
     n_g_layer: int = 1 # number of g_tf layers
     n_ld_layer: int = 1 # number of ld layers
     n_mlp_layer: int = 1 # num mlp layers

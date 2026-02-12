@@ -95,6 +95,7 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
@@ -107,12 +108,15 @@ def main():
         scaler=None,
         y_scalers=None, # train will fit the scalers
         scale_targets=args.scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=None,
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
+    marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
     
     if is_main(rank) and leo_val:
@@ -125,6 +129,8 @@ def main():
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
     )
@@ -187,6 +193,7 @@ def main():
 
     # set up config
     config = Config(block_size=train_ds.block_size,
+                    g_input_type=g_input_type,
                     n_head=args.heads,
                     n_g_layer=args.g_layers,
                     n_ld_layer=args.ld_layers,
@@ -329,13 +336,13 @@ def main():
         run.define_metric("epoch")
         run.define_metric("train_loss_epoch", step_metric="epoch")
         run.define_metric("val_loss", step_metric="epoch")
-        run.define_metric("train/env_avg_pearson", step_metric="epoch")
-        run.define_metric("val/env_avg_pearson", step_metric="epoch")
+        run.define_metric("train_loss_epoch/env_avg_pearson", step_metric="epoch")
+        run.define_metric("val_loss/env_avg_pearson", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
-                             "selection_metric": "val/env_avg_pearson",
+                             "selection_metric": "val_loss/env_avg_pearson",
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
                              "g_layers": args.g_layers,
@@ -360,6 +367,7 @@ def main():
                              "moe_shared_expert": moe_shared_expert,
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                              "moe_loss_weight": moe_loss_weight,
+                             "g_input_type": g_input_type,
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
@@ -382,7 +390,7 @@ def main():
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val/env_avg_pearson (maximize)")
+        print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -418,13 +426,13 @@ def main():
                     
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
                 
-                # Add contrastive loss if enabled (with warmup)
-                # Don't add contrastive loss until model has learned basic patterns
+                # Add contrastive loss if enabled (with warmup).
                 contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
                 if use_contrastive and g_embeddings is not None and epoch_num >= contrastive_warmup_epochs:
-                    # Pass raw genotype data - contrastive loss computes GRM/IBS internally
-                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
-                    # Ramp up contrastive weight linearly after warmup
+                    # Use raw dosages when available (needed if model input is GRM-standardized).
+                    g_for_contrastive = xb.get("g_data_raw", xb["g_data"])
+                    contrastive_loss = contrastive_loss_fn(g_embeddings, g_data=g_for_contrastive)
+                    # Ramp up contrastive weight linearly after warmup.
                     warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
                     effective_weight = contrastive_weight * warmup_factor
                     loss_total = loss_total + effective_weight * contrastive_loss
@@ -560,16 +568,16 @@ def main():
         # log eval / early stop (only rank 0)
         if is_main(rank):
             log_epoch_payload = {
-                "val_loss": val_total.item(),
-                "train_loss_epoch": train_total.item(),
-                "train/env_avg_pearson": train_env_pcc,
-                "val/env_avg_pearson": val_env_pcc,
                 "epoch": epoch_num,
+                "val_loss": val_total.item(),
+                "val_loss/env_avg_pearson": val_env_pcc,
             }
-            for k, v in train_parts.items():
-                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             for k, v in val_parts.items():
                 log_epoch_payload[f"val_loss/{k}"] = float(v)
+            log_epoch_payload["train_loss_epoch"] = train_total.item()
+            log_epoch_payload["train_loss_epoch/env_avg_pearson"] = train_env_pcc
+            for k, v in train_parts.items():
+                log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
             val_loss_value = float(val_total.item())
@@ -602,6 +610,14 @@ def main():
                         k: {"mean": float(v.mean), "std": float(v.std)}
                         for k, v in train_ds.label_scalers.items()
                     }
+                marker_stats_payload = None
+                if getattr(train_ds, "marker_stats", None):
+                    marker_stats_payload = {
+                        "p": train_ds.marker_stats["p"].tolist(),
+                        "scale": train_ds.marker_stats["scale"].tolist(),
+                        "valid": train_ds.marker_stats["valid"].tolist(),
+                        "columns": list(train_ds.marker_stats["columns"]),
+                    }
 
                 ckpt = {
                     "model": model.module.state_dict(),
@@ -631,12 +647,14 @@ def main():
                         "moe_shared_expert": moe_shared_expert,
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
+                        "g_input_type": g_input_type,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
+                    "marker_stats": marker_stats_payload,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }
