@@ -23,6 +23,39 @@ from transformers.models.bert.configuration_bert import BertConfig
 
 from .utils import *
 
+# categorical environment columns in X_* files
+ENV_CATEGORICAL_COLS = ("Irrigated", "Treatment", "Previous_Crop")
+ENV_CAT_UNK = "UNK"
+
+
+def _normalize_env_cat(s: pd.Series) -> pd.Series:
+    """Normalize categorical env values and map missing/empty to UNK."""
+    out = s.fillna(ENV_CAT_UNK).astype(str).str.strip()
+    return out.replace({"": ENV_CAT_UNK, "nan": ENV_CAT_UNK, "NaN": ENV_CAT_UNK, "None": ENV_CAT_UNK})
+
+
+def encode_env_categorical_features(e_block: pd.DataFrame) -> pd.DataFrame:
+    """
+    One-hot encode known categorical environment columns while preserving numeric env features.
+    Returns a float32 dataframe ready for scaling.
+    """
+    e_proc = e_block.copy()
+    present_cats = [c for c in ENV_CATEGORICAL_COLS if c in e_proc.columns]
+    for col in present_cats:
+        e_proc[col] = _normalize_env_cat(e_proc[col])
+
+    if present_cats:
+        e_proc = pd.get_dummies(
+            e_proc,
+            columns=present_cats,
+            prefix=present_cats,
+            prefix_sep="=",
+            dtype=np.float32,
+        )
+
+    e_proc = e_proc.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
+    return e_proc
+
 # ----------------------------------------------------------------
 # helper to get year from locations file
 def _env_year_from_str(env_str: str) -> int:
@@ -223,12 +256,20 @@ class GxE_Dataset(Dataset):
         g_block = feature_df.iloc[:, :-N_ENV].astype(np.float32)
         e_block = feature_df.iloc[:, -N_ENV:]
 
-        ######################
-        ### DROP COLS HERE ###
-        ######################        
-        e_block = e_block.drop(columns=["Irrigated", "Treatment", "Previous_Crop"])
-        #e_block = e_block.iloc[:, :2] # select only first two cols, lat/lon
-        
+        # Encode categorical management features instead of dropping them.
+        e_block = encode_env_categorical_features(e_block)
+        # Keep val/test schema aligned with the train-fitted scaler feature order.
+        if split != "train" and scaler is not None and hasattr(scaler, "feature_names_in_"):
+            ref_cols = [str(c) for c in scaler.feature_names_in_.tolist()]
+            e_block = e_block.reindex(columns=ref_cols, fill_value=0.0)
+        elif split != "train" and scaler is not None and hasattr(scaler, "n_features_in_"):
+            expected = int(scaler.n_features_in_)
+            if e_block.shape[1] != expected:
+                raise ValueError(
+                    f"Encoded env feature dimension mismatch: got {e_block.shape[1]}, expected {expected}. "
+                    "Use checkpoints/scalers that include feature_names_in for robust categorical alignment."
+                )
+
 
         # store for __getitem__
         # marker inputs can be either:
