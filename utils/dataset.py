@@ -77,6 +77,8 @@ class GxE_Dataset(Dataset):
                  val_year: int | None = None,
                  y_scalers: Optional[Dict[str, LabelScaler]] = None,
                  scale_targets: bool = True,
+                 g_input_type: str = "tokens",
+                 marker_stats: Optional[Dict[str, object]] = None,
                  leo_val: bool = False,
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
@@ -93,6 +95,8 @@ class GxE_Dataset(Dataset):
             val_year (int|None): if not None and split=='val', filter to this year
             y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
             scale_targets (bool): if True, scale targets using y_scalers
+            g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
+            marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
             leo_val (bool): if True, use Leave-Environment-Out validation
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
@@ -104,6 +108,9 @@ class GxE_Dataset(Dataset):
         self.residual_flag = residual
         self.leo_val = leo_val
         self.scale_targets = scale_targets
+        self.g_input_type = str(g_input_type).strip().lower()
+        if self.g_input_type not in {"tokens", "grm"}:
+            raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
         ############################################
         ### N_ENV FEATURES IN ORIGINAL DATA HERE ###
@@ -213,7 +220,7 @@ class GxE_Dataset(Dataset):
                              "Check your X_* file layout.")
         
         # genotype features (all but last N_ENV)
-        g_block = feature_df.iloc[:, :-N_ENV]
+        g_block = feature_df.iloc[:, :-N_ENV].astype(np.float32)
         e_block = feature_df.iloc[:, -N_ENV:]
 
         ######################
@@ -224,7 +231,45 @@ class GxE_Dataset(Dataset):
         
 
         # store for __getitem__
-        self.g_data = (g_block * 2).astype('int64') # 0, 0.5, 1 --> 0, 1, 2
+        # marker inputs can be either:
+        # - tokens: discrete dosages {0,1,2}
+        # - grm: standardized dosage features (x - 2p) / sqrt(2p(1-p))
+        g_dosage = (g_block * 2.0).astype(np.float32)  # convert from [0, 0.5, 1] -> [0, 1, 2]
+        self.g_raw_dosage = g_dosage
+        self.marker_stats = None
+        if self.g_input_type == "tokens":
+            self.g_data = g_dosage.round().astype('int64')
+        else:
+            if split == "train":
+                p = np.clip(g_dosage.mean(axis=0).to_numpy(dtype=np.float32) / 2.0, 0.0, 1.0)
+                scale = np.sqrt(2.0 * p * (1.0 - p)).astype(np.float32)
+                valid = (scale > 1e-8).astype(np.float32)
+                scale_safe = scale.copy()
+                scale_safe[valid < 0.5] = 1.0
+                self.marker_stats = {
+                    "p": p,
+                    "scale": scale_safe,
+                    "valid": valid,
+                    "columns": list(g_dosage.columns),
+                }
+            else:
+                if marker_stats is None:
+                    raise ValueError("For val/test/sub with g_input_type='grm', you must pass marker_stats from train.")
+                p = np.asarray(marker_stats["p"], dtype=np.float32)
+                scale_safe = np.asarray(marker_stats["scale"], dtype=np.float32)
+                valid = np.asarray(marker_stats["valid"], dtype=np.float32)
+                cols = list(marker_stats.get("columns", list(g_dosage.columns)))
+                if cols != list(g_dosage.columns):
+                    raise ValueError("marker_stats columns do not match current genotype columns.")
+                self.marker_stats = {
+                    "p": p,
+                    "scale": scale_safe,
+                    "valid": valid,
+                    "columns": cols,
+                }
+            g_scaled = (g_dosage.to_numpy(dtype=np.float32) - (2.0 * p)[None, :]) / scale_safe[None, :]
+            g_scaled = g_scaled * valid[None, :]
+            self.g_data = pd.DataFrame(g_scaled, columns=g_dosage.columns, index=g_dosage.index)
         self.e_cols = list(e_block.columns)
 
         # env scaling (fit on train, reuse elsewhere)
@@ -297,9 +342,14 @@ class GxE_Dataset(Dataset):
                 - for train/val: dict with 'y' (or residual pieces) and 'env_id'
                 - for test/sub: dict with 'Env', 'Hybrid', 'Yield_Mg_ha'
         """
-        tokens = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long)
+        if self.g_input_type == "tokens":
+            g_tensor = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.long)
+        else:
+            g_tensor = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
-        x = {'g_data': tokens, 'e_data': env_data}
+        x = {'g_data': g_tensor, 'e_data': env_data}
+        if self.g_input_type == "grm":
+            x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
         
         if self.split in ('sub', 'test'):
             row = self.y_data.iloc[index]

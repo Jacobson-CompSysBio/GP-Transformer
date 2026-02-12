@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J debug-contr
+#SBATCH -J debug-grm
 #SBATCH -N 1
 #SBATCH -t 00:15:00
 #SBATCH -p batch 
@@ -57,6 +57,7 @@ export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
+export G_INPUT_TYPE=grm   # options: "tokens", "grm"
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -124,6 +125,7 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --g_input_type $G_INPUT_TYPE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -175,6 +177,7 @@ python -u scripts/eval.py \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
+    --g_input_type $G_INPUT_TYPE \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS \

@@ -123,6 +123,7 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
@@ -136,12 +137,15 @@ def main():
         scaler=None,
         y_scalers=None,
         scale_targets=args.scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=None,
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
+    marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
     
     if is_main(rank) and leo_val:
@@ -155,6 +159,8 @@ def main():
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
     )
@@ -214,6 +220,7 @@ def main():
 
     # set up config
     config = Config(block_size=train_ds.block_size,
+                    g_input_type=g_input_type,
                     n_head=args.heads,
                     n_g_layer=args.g_layers,
                     n_ld_layer=args.ld_layers,
@@ -455,6 +462,7 @@ def main():
                              "moe_shared_expert": moe_shared_expert,
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                              "moe_loss_weight": moe_loss_weight,
+                             "g_input_type": g_input_type,
                              "full_tf_mlp_type": full_tf_mlp_type,
                              "full_transformer": args.full_transformer,
                              "contrastive_mode": contrastive_mode,
@@ -807,6 +815,14 @@ def main():
                         k: {"mean": float(v.mean), "std": float(v.std)}
                         for k, v in train_ds.label_scalers.items()
                     }
+                marker_stats_payload = None
+                if getattr(train_ds, "marker_stats", None):
+                    marker_stats_payload = {
+                        "p": train_ds.marker_stats["p"].tolist(),
+                        "scale": train_ds.marker_stats["scale"].tolist(),
+                        "valid": train_ds.marker_stats["valid"].tolist(),
+                        "columns": list(train_ds.marker_stats["columns"]),
+                    }
 
                 ckpt = {
                     "model": model.module.state_dict(),
@@ -834,6 +850,7 @@ def main():
                         "moe_shared_expert": moe_shared_expert,
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
+                        "g_input_type": g_input_type,
                         "full_tf_mlp_type": full_tf_mlp_type,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
@@ -846,6 +863,7 @@ def main():
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
+                    "marker_stats": marker_stats_payload,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }

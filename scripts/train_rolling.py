@@ -124,16 +124,21 @@ def main():
             train_year_max=train_year_max,
             y_scalers=None,
             scale_targets=args.scale_targets,
+            g_input_type=args.g_input_type,
+            marker_stats=None,
         )
         env_scaler = train_ds.scaler
         y_scalers = train_ds.label_scalers
+        marker_stats = train_ds.marker_stats
         val_ds = GxE_Dataset(
             split="val",
             data_path="data/maize_data_2014-2023_vs_2024_v2/",
             scaler=env_scaler,
             val_year=val_year,
             y_scalers=y_scalers,
-            scale_targets=args.scale_targets
+            scale_targets=args.scale_targets,
+            g_input_type=args.g_input_type,
+            marker_stats=marker_stats,
         )
 
         train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -152,6 +157,7 @@ def main():
 
         # set up config
         config = Config(block_size=train_ds.block_size,
+                        g_input_type=args.g_input_type,
                         n_head=args.heads,
                         n_g_layer=args.g_layers,
                         n_ld_layer=args.ld_layers,
@@ -332,7 +338,15 @@ def main():
                         label_scalers_payload = {
                             k: {"mean": float(v.mean), "std": float(v.std)}
                             for k, v in train_ds.label_scalers.items()
-                        }          
+                        }
+                    marker_stats_payload = None
+                    if getattr(train_ds, "marker_stats", None):
+                        marker_stats_payload = {
+                            "p": train_ds.marker_stats["p"].tolist(),
+                            "scale": train_ds.marker_stats["scale"].tolist(),
+                            "valid": train_ds.marker_stats["valid"].tolist(),
+                            "columns": list(train_ds.marker_stats["columns"]),
+                        }
 
                     ckpt = {
                         "model": model.module.state_dict(),
@@ -351,11 +365,13 @@ def main():
                             "gxe_layers": args.gxe_layers,
                             "n_head": args.heads,
                             "n_embd": args.emb_size,
+                            "g_input_type": args.g_input_type,
                             "loss": args.loss,
                             "alpha": args.alpha
                         },
                         "env_scaler": env_scaler_payload,
                         "label_scalers": label_scalers_payload,
+                        "marker_stats": marker_stats_payload,
                         "run": {"id": run.id if 'run' in locals() else None,
                                 "name": wandb_run_name}
                     }

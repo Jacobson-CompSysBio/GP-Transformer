@@ -39,11 +39,20 @@ class FullTransformer(nn.Module):
         self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
         self.moe_loss_weight = moe_loss_weight
         self.moe_aux_loss = None
+        self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
+        if self.g_input_type not in {"tokens", "grm"}:
+            raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
-        self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
+        if self.g_input_type == "tokens":
+            self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
+            self.g_scalar_proj = None
+        else:
+            self.g_embed = None
+            # Keep tokenizer projection separate from contrastive projection head.
+            self.g_scalar_proj = nn.Linear(1, config.n_embd)
         # project each scalar env feature to a token embedding
         self.e_proj = nn.Linear(1, config.n_embd)
 
@@ -100,7 +109,10 @@ class FullTransformer(nn.Module):
         e = x["e_data"]            # (B, Feats)
         B, Tm = g.shape
         # embeddings
-        g_tok = self.g_embed(g)                        # (B, Tm, C)
+        if self.g_input_type == "tokens":
+            g_tok = self.g_embed(g.long())             # (B, Tm, C)
+        else:
+            g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
@@ -296,6 +308,7 @@ class GxE_Transformer(nn.Module):
         self.moe_shared_expert = moe_shared_expert if moe_shared_expert is not None else getattr(config, "moe_shared_expert", False)
         self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim if moe_shared_expert_hidden_dim is not None else getattr(config, "moe_shared_expert_hidden_dim", None)
         self.moe_loss_weight = moe_loss_weight if moe_loss_weight is not None else getattr(config, "moe_loss_weight", 0.01)
+        self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
         self.moe_aux_loss = None
 
@@ -449,6 +462,8 @@ class GxE_Transformer(nn.Module):
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
         ld_enc = 0
         if self.ld_encoder:
+            if self.g_input_type != "tokens":
+                raise ValueError("LD encoder requires tokenized genotype inputs (g_input_type='tokens').")
             ld_feats = F.one_hot(x["g_data"].long(), num_classes=self.ld_encoder.input_dim)
             ld_enc = self.ld_encoder(ld_feats.float())
             # pad CLS for ld_enc to match g_enc length if needed
