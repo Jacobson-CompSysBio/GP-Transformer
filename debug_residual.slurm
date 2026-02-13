@@ -54,6 +54,9 @@ export HEADS=1
 export EMB_SIZE=128
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export ENV_FEATURE_ID_EMB=False
+export ENV_STAGE_ID_EMB=False
+export ENV_CAT_EMBEDDINGS=False
 export LOSS="mse+envpcc"
 export LOSS_WEIGHTS="0.01,1.0"
 export SCALE_TARGETS=False # whether to standardize the target values
@@ -114,6 +117,9 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --env_feature_id_emb $ENV_FEATURE_ID_EMB \
+        --env_stage_id_emb $ENV_STAGE_ID_EMB \
+        --env_cat_embeddings $ENV_CAT_EMBEDDINGS \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \

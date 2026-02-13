@@ -34,27 +34,66 @@ def _normalize_env_cat(s: pd.Series) -> pd.Series:
     return out.replace({"": ENV_CAT_UNK, "nan": ENV_CAT_UNK, "NaN": ENV_CAT_UNK, "None": ENV_CAT_UNK})
 
 
-def encode_env_categorical_features(e_block: pd.DataFrame) -> pd.DataFrame:
-    """
-    One-hot encode known categorical environment columns while preserving numeric env features.
-    Returns a float32 dataframe ready for scaling.
-    """
-    e_proc = e_block.copy()
-    present_cats = [c for c in ENV_CATEGORICAL_COLS if c in e_proc.columns]
-    for col in present_cats:
-        e_proc[col] = _normalize_env_cat(e_proc[col])
+def _build_env_cat_map(values: pd.Series) -> Dict[str, int]:
+    """Build a deterministic string->id map with UNK fixed at id=0."""
+    vals = _normalize_env_cat(values).astype(str)
+    uniq = sorted(set(vals.tolist()) - {ENV_CAT_UNK})
+    mapping: Dict[str, int] = {ENV_CAT_UNK: 0}
+    for token in uniq:
+        mapping[token] = len(mapping)
+    return mapping
 
-    if present_cats:
-        e_proc = pd.get_dummies(
-            e_proc,
-            columns=present_cats,
-            prefix=present_cats,
-            prefix_sep="=",
-            dtype=np.float32,
-        )
 
-    e_proc = e_proc.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
-    return e_proc
+def encode_env_categorical_ids(
+    e_block: pd.DataFrame,
+    env_cat_maps: Optional[Dict[str, Dict[str, int]]] = None,
+) -> tuple[pd.DataFrame, Dict[str, Dict[str, int]], list[int]]:
+    """
+    Encode known categorical environment columns into integer IDs.
+    Returns:
+        - DataFrame with columns in ENV_CATEGORICAL_COLS order
+        - mapping dict per column
+        - cardinality per categorical field (same order as ENV_CATEGORICAL_COLS)
+    """
+    cat_ids: Dict[str, pd.Series] = {}
+    out_maps: Dict[str, Dict[str, int]] = {}
+    cardinals: list[int] = []
+
+    for col in ENV_CATEGORICAL_COLS:
+        if col in e_block.columns:
+            values = _normalize_env_cat(e_block[col])
+        else:
+            values = pd.Series([ENV_CAT_UNK] * len(e_block), index=e_block.index, dtype=object)
+
+        if env_cat_maps is not None and col in env_cat_maps and env_cat_maps[col]:
+            # Reuse train-fitted map for val/test to keep token IDs aligned.
+            col_map = {str(k): int(v) for k, v in env_cat_maps[col].items()}
+            if ENV_CAT_UNK not in col_map:
+                col_map[ENV_CAT_UNK] = 0
+        else:
+            col_map = _build_env_cat_map(values)
+
+        unk_id = int(col_map.get(ENV_CAT_UNK, 0))
+        ids = values.astype(str).map(lambda v: int(col_map.get(v, unk_id))).astype(np.int64)
+
+        cat_ids[col] = ids
+        out_maps[col] = col_map
+        cardinals.append(int(max(col_map.values())) + 1 if col_map else 1)
+
+    cat_df = pd.DataFrame(cat_ids, index=e_block.index)
+    return cat_df, out_maps, cardinals
+
+
+def infer_env_stage_ids(env_columns: list[str]) -> list[int]:
+    """
+    Infer stage IDs from numeric env feature names.
+    Convention: trailing '_<int>' is interpreted as stage index; otherwise stage 0.
+    """
+    stage_ids: list[int] = []
+    for name in env_columns:
+        m = re.search(r'_(\d+)$', str(name).strip())
+        stage_ids.append(int(m.group(1)) if m else 0)
+    return stage_ids
 
 # ----------------------------------------------------------------
 # helper to get year from locations file
@@ -112,6 +151,7 @@ class GxE_Dataset(Dataset):
                  scale_targets: bool = True,
                  g_input_type: str = "tokens",
                  marker_stats: Optional[Dict[str, object]] = None,
+                 env_cat_maps: Optional[Dict[str, Dict[str, int]]] = None,
                  leo_val: bool = False,
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
@@ -130,6 +170,7 @@ class GxE_Dataset(Dataset):
             scale_targets (bool): if True, scale targets using y_scalers
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
+            env_cat_maps (Optional[Dict[str, Dict[str, int]]]): train-fitted categorical maps for env categorical fields
             leo_val (bool): if True, use Leave-Environment-Out validation
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
@@ -254,22 +295,33 @@ class GxE_Dataset(Dataset):
         
         # genotype features (all but last N_ENV)
         g_block = feature_df.iloc[:, :-N_ENV].astype(np.float32)
-        e_block = feature_df.iloc[:, -N_ENV:]
+        e_block = feature_df.iloc[:, -N_ENV:].copy()
 
-        # Encode categorical management features instead of dropping them.
-        e_block = encode_env_categorical_features(e_block)
+        # Split environment block into numeric and categorical parts.
+        e_num_block = e_block.drop(columns=[c for c in ENV_CATEGORICAL_COLS if c in e_block.columns], errors='ignore')
+        e_num_block = e_num_block.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
+
         # Keep val/test schema aligned with the train-fitted scaler feature order.
         if split != "train" and scaler is not None and hasattr(scaler, "feature_names_in_"):
             ref_cols = [str(c) for c in scaler.feature_names_in_.tolist()]
-            e_block = e_block.reindex(columns=ref_cols, fill_value=0.0)
+            e_num_block = e_num_block.reindex(columns=ref_cols, fill_value=0.0)
         elif split != "train" and scaler is not None and hasattr(scaler, "n_features_in_"):
             expected = int(scaler.n_features_in_)
-            if e_block.shape[1] != expected:
+            if e_num_block.shape[1] != expected:
                 raise ValueError(
-                    f"Encoded env feature dimension mismatch: got {e_block.shape[1]}, expected {expected}. "
+                    f"Encoded env feature dimension mismatch: got {e_num_block.shape[1]}, expected {expected}. "
                     "Use checkpoints/scalers that include feature_names_in for robust categorical alignment."
                 )
 
+        # Encode categorical env fields as IDs (always in ENV_CATEGORICAL_COLS order).
+        e_cat_df, e_cat_maps, e_cat_cardinalities = encode_env_categorical_ids(
+            e_block,
+            env_cat_maps=env_cat_maps,
+        )
+        self.env_cat_maps = e_cat_maps
+        self.env_cat_cardinalities = [int(v) for v in e_cat_cardinalities]
+        self.n_env_categorical = int(len(ENV_CATEGORICAL_COLS))
+        self.e_cat_data = e_cat_df.astype(np.int64)
 
         # store for __getitem__
         # marker inputs can be either:
@@ -311,17 +363,19 @@ class GxE_Dataset(Dataset):
             g_scaled = (g_dosage.to_numpy(dtype=np.float32) - (2.0 * p)[None, :]) / scale_safe[None, :]
             g_scaled = g_scaled * valid[None, :]
             self.g_data = pd.DataFrame(g_scaled, columns=g_dosage.columns, index=g_dosage.index)
-        self.e_cols = list(e_block.columns)
+        self.e_cols = [str(c) for c in e_num_block.columns]
 
         # env scaling (fit on train, reuse elsewhere)
         self.scaler = scaler if scaler is not None else StandardScaler()
         if split == 'train':
-            e_scaled = self.scaler.fit_transform(e_block)
+            e_scaled = self.scaler.fit_transform(e_num_block)
         else:
             if scaler is None:
                 raise ValueError("For val/test/sub you must pass a fitted scaler.")
-            e_scaled = self.scaler.transform(e_block)
+            e_scaled = self.scaler.transform(e_num_block)
         self.e_data = pd.DataFrame(e_scaled, columns=self.e_cols, index=self.g_data.index)
+        self.env_stage_ids = infer_env_stage_ids(self.e_cols)
+        self.n_env_stages = int(max(self.env_stage_ids, default=0) + 1)
 
         ### TARGETS / METADATA FOR OUTPUTS ###
         self.y_data = y_filt.reset_index(drop=True)
@@ -388,7 +442,8 @@ class GxE_Dataset(Dataset):
         else:
             g_tensor = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
-        x = {'g_data': g_tensor, 'e_data': env_data}
+        env_cat_data = torch.tensor(self.e_cat_data.iloc[index, :].values, dtype=torch.long)
+        x = {'g_data': g_tensor, 'e_data': env_data, 'e_cat_data': env_cat_data}
         if self.g_input_type == "grm":
             x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
         

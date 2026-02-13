@@ -70,6 +70,7 @@ def load_data(args,
               env_scaler: StandardScaler | None = None,
               y_scalers: dict | None = None,
               marker_stats: dict | None = None,
+              env_cat_maps: dict | None = None,
               g_input_type: str = "tokens"):
 
     ds = GxE_Dataset(
@@ -80,6 +81,7 @@ def load_data(args,
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
         marker_stats=marker_stats,
+        env_cat_maps=env_cat_maps,
     )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
     return ds, loader
@@ -285,6 +287,13 @@ def load_model(device: torch.device,
     moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
     moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
     g_input_type = config.get("g_input_type", getattr(args, "g_input_type", "tokens"))
+    env_stage_ids = config.get("env_stage_ids", None)
+    n_env_stages = int(config.get("n_env_stages", 1) or 1)
+    n_env_categorical = int(config.get("n_env_categorical", 0) or 0)
+    env_cat_cardinalities = config.get("env_cat_cardinalities", None)
+    env_feature_id_emb = bool(config.get("env_feature_id_emb", False))
+    env_stage_id_emb = bool(config.get("env_stage_id_emb", False))
+    env_cat_embeddings = bool(config.get("env_cat_embeddings", False))
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
@@ -295,8 +304,13 @@ def load_model(device: torch.device,
 
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
-    y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
+    y_scalers = _rebuild_y_scalers(payload.get("y_scalers", payload.get("label_scalers", None)))
     marker_stats = _rebuild_marker_stats(payload.get("marker_stats", None))
+    env_cat_maps = payload.get("env_cat_maps", None)
+    if n_env_fts is None and env_scaler is not None:
+        n_env_fts = int(getattr(env_scaler, "n_features_in_", 0) or 0)
+    if n_env_fts is None:
+        n_env_fts = 705
 
     config = Config(block_size=blk,
                     g_input_type=g_input_type,
@@ -306,7 +320,14 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    env_stage_ids=env_stage_ids,
+                    n_env_stages=n_env_stages,
+                    n_env_categorical=n_env_categorical,
+                    env_cat_cardinalities=env_cat_cardinalities,
+                    env_feature_id_emb=env_feature_id_emb,
+                    env_stage_id_emb=env_stage_id_emb,
+                    env_cat_embeddings=env_cat_embeddings)
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts
@@ -374,7 +395,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type 
+    return model, y_scalers, env_scaler, marker_stats, env_cat_maps, g_input_type 
 
 def main():
     args = parse_args()
@@ -406,7 +427,7 @@ def main():
     torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, env_cat_maps, g_input_type = load_model(device, args)    
     
     # load data
     print("Loading data...")
@@ -414,6 +435,7 @@ def main():
                                     env_scaler=env_scaler,
                                     y_scalers=y_scalers,   # <— name matches
                                     marker_stats=marker_stats,
+                                    env_cat_maps=env_cat_maps,
                                     g_input_type=g_input_type,
                                     split="test",
                                     batch_size=32)

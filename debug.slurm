@@ -58,6 +58,9 @@ export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
 export G_INPUT_TYPE=grm   # options: "tokens", "grm"
+export ENV_FEATURE_ID_EMB=False
+export ENV_STAGE_ID_EMB=False
+export ENV_CAT_EMBEDDINGS=False
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -125,6 +128,9 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --env_feature_id_emb $ENV_FEATURE_ID_EMB \
+        --env_stage_id_emb $ENV_STAGE_ID_EMB \
+        --env_cat_embeddings $ENV_CAT_EMBEDDINGS \
         --g_input_type $G_INPUT_TYPE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \

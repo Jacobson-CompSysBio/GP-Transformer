@@ -152,6 +152,7 @@ def main():
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
         marker_stats=marker_stats,
+        env_cat_maps=train_ds.env_cat_maps,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
     )
@@ -213,6 +214,9 @@ def main():
     )
 
     # set up config
+    env_feature_id_emb = _get_arg_or_env("env_feature_id_emb", "ENV_FEATURE_ID_EMB", False, str2bool)
+    env_stage_id_emb = _get_arg_or_env("env_stage_id_emb", "ENV_STAGE_ID_EMB", False, str2bool)
+    env_cat_embeddings = _get_arg_or_env("env_cat_embeddings", "ENV_CAT_EMBEDDINGS", False, str2bool)
     config = Config(block_size=train_ds.block_size,
                     g_input_type=g_input_type,
                     n_head=args.heads,
@@ -222,7 +226,14 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    env_stage_ids=list(train_ds.env_stage_ids),
+                    n_env_stages=int(train_ds.n_env_stages),
+                    n_env_categorical=int(train_ds.n_env_categorical),
+                    env_cat_cardinalities=list(train_ds.env_cat_cardinalities),
+                    env_feature_id_emb=env_feature_id_emb,
+                    env_stage_id_emb=env_stage_id_emb,
+                    env_cat_embeddings=env_cat_embeddings)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -272,6 +283,13 @@ def main():
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
               f"full_transformer={args.full_transformer}")
+        if args.full_transformer:
+            print(
+                f"[CONFIG] env_feature_id_emb={config.env_feature_id_emb}, "
+                f"env_stage_id_emb={config.env_stage_id_emb}, "
+                f"env_cat_embeddings={config.env_cat_embeddings}, "
+                f"n_env_categorical={config.n_env_categorical}, n_env_stages={config.n_env_stages}"
+            )
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -427,7 +445,12 @@ def main():
                              "moe_loss_weight": moe_loss_weight,
                              "g_input_type": g_input_type,
                              "full_transformer": args.full_transformer,
-                             "full_tf_mlp_type": full_tf_mlp_type},
+                             "full_tf_mlp_type": full_tf_mlp_type,
+                             "env_feature_id_emb": env_feature_id_emb,
+                             "env_stage_id_emb": env_stage_id_emb,
+                             "env_cat_embeddings": env_cat_embeddings,
+                             "n_env_stages": int(train_ds.n_env_stages),
+                             "n_env_categorical": int(train_ds.n_env_categorical)},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -526,6 +549,7 @@ def main():
                             e_contr = e_contrastive_loss_fn(
                                 e_embeddings,
                                 e_data=xb["e_data"],
+                                e_cat_data=xb.get("e_cat_data", None),
                             )
                             e_weight_eff = env_contrastive_weight * warmup_factor
                             loss_total = loss_total + e_weight_eff * e_contr
@@ -752,6 +776,13 @@ def main():
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
                         "g_input_type": g_input_type,
+                        "env_stage_ids": list(config.env_stage_ids) if config.env_stage_ids is not None else None,
+                        "n_env_stages": int(config.n_env_stages),
+                        "n_env_categorical": int(config.n_env_categorical),
+                        "env_cat_cardinalities": list(config.env_cat_cardinalities) if config.env_cat_cardinalities is not None else None,
+                        "env_feature_id_emb": bool(config.env_feature_id_emb),
+                        "env_stage_id_emb": bool(config.env_stage_id_emb),
+                        "env_cat_embeddings": bool(config.env_cat_embeddings),
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
@@ -759,6 +790,7 @@ def main():
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
                     "marker_stats": marker_stats_payload,
+                    "env_cat_maps": train_ds.env_cat_maps,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }

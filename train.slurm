@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envmse-scaling
+#SBATCH -J baseline
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -60,10 +60,13 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
+export ENV_FEATURE_ID_EMB=True
+export ENV_STAGE_ID_EMB=True
+export ENV_CAT_EMBEDDINGS=True
 
-export LOSS="envmse" # + separated list of losses
+export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
@@ -138,6 +141,9 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --env_feature_id_emb $ENV_FEATURE_ID_EMB \
+        --env_stage_id_emb $ENV_STAGE_ID_EMB \
+        --env_cat_embeddings $ENV_CAT_EMBEDDINGS \
         --seed $SEED \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \

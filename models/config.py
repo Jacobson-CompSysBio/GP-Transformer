@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import List, Optional
 
 @dataclass
 class Config:
@@ -18,3 +19,11 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+    # Optional metadata for richer environment tokenization in FullTransformer
+    env_stage_ids: Optional[List[int]] = None
+    n_env_stages: int = 1
+    n_env_categorical: int = 0
+    env_cat_cardinalities: Optional[List[int]] = None
+    env_feature_id_emb: bool = False
+    env_stage_id_emb: bool = False
+    env_cat_embeddings: bool = False

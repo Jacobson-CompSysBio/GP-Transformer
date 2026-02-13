@@ -497,7 +497,12 @@ def compute_grm_similarity(g_data: torch.Tensor, eps: float = 1e-6) -> torch.Ten
     return grm
 
 
-def compute_env_similarity(e_data: torch.Tensor, method: str = "cosine") -> torch.Tensor:
+def compute_env_similarity(
+    e_data: torch.Tensor,
+    method: str = "cosine",
+    e_cat_data: torch.Tensor = None,
+    e_cat_cardinalities: list[int] | None = None,
+) -> torch.Tensor:
     """
     Compute environment similarity for environment contrastive loss.
     
@@ -512,6 +517,22 @@ def compute_env_similarity(e_data: torch.Tensor, method: str = "cosine") -> torc
         (batch, batch) environment similarity matrix
     """
     e = e_data.float()
+
+    # Optionally include categorical env fields as one-hot blocks.
+    if e_cat_data is not None:
+        cat = e_cat_data.long()
+        if cat.dim() == 1:
+            cat = cat.unsqueeze(1)
+        cat_blocks = []
+        for j in range(cat.size(1)):
+            if e_cat_cardinalities is not None and j < len(e_cat_cardinalities):
+                n_classes = max(1, int(e_cat_cardinalities[j]))
+            else:
+                n_classes = int(cat[:, j].max().item()) + 1 if cat.size(0) > 0 else 1
+            ids = cat[:, j].clamp(min=0, max=n_classes - 1)
+            cat_blocks.append(F.one_hot(ids, num_classes=n_classes).float())
+        if cat_blocks:
+            e = torch.cat([e] + cat_blocks, dim=1)
     
     if method == "cosine":
         # L2 normalize then dot product
@@ -651,6 +672,8 @@ class EnvironmentContrastiveLoss(nn.Module):
         self,
         e_embeddings: torch.Tensor,            # (batch, d_model)
         e_data: torch.Tensor = None,           # (batch, n_env_features)
+        e_cat_data: torch.Tensor = None,       # (batch, n_env_categorical)
+        e_cat_cardinalities: list[int] | None = None,
         env_similarity: torch.Tensor = None,   # (batch, batch), optional precomputed target sim
     ) -> torch.Tensor:
         if e_embeddings is None:
@@ -672,6 +695,8 @@ class EnvironmentContrastiveLoss(nn.Module):
             env_similarity = compute_env_similarity(
                 e_data,
                 method=self.similarity_method,
+                e_cat_data=e_cat_data,
+                e_cat_cardinalities=e_cat_cardinalities,
             )
         env_similarity = env_similarity.float().to(e_embeddings.device)
 

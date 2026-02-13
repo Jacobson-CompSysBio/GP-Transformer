@@ -139,6 +139,7 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
             marker_stats=marker_stats,
+            env_cat_maps=train_ds.env_cat_maps,
         )
 
         train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -156,6 +157,9 @@ def main():
             pin_memory=True)
 
         # set up config
+        env_feature_id_emb = bool(getattr(args, "env_feature_id_emb", False))
+        env_stage_id_emb = bool(getattr(args, "env_stage_id_emb", False))
+        env_cat_embeddings = bool(getattr(args, "env_cat_embeddings", False))
         config = Config(block_size=train_ds.block_size,
                         g_input_type=args.g_input_type,
                         n_head=args.heads,
@@ -164,7 +168,15 @@ def main():
                         n_mlp_layer=args.mlp_layers,
                         n_gxe_layer=args.gxe_layers,
                         n_embd=args.emb_size,
-                        dropout=args.dropout)
+                        dropout=args.dropout,
+                        n_env_fts=train_ds.n_env_fts,
+                        env_stage_ids=list(train_ds.env_stage_ids),
+                        n_env_stages=int(train_ds.n_env_stages),
+                        n_env_categorical=int(train_ds.n_env_categorical),
+                        env_cat_cardinalities=list(train_ds.env_cat_cardinalities),
+                        env_feature_id_emb=env_feature_id_emb,
+                        env_stage_id_emb=env_stage_id_emb,
+                        env_cat_embeddings=env_cat_embeddings)
         model = GxE_Transformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
@@ -360,6 +372,7 @@ def main():
                             "ld_enc": args.ld_enc,
                             "gxe_enc": args.gxe_enc,
                             "block_size": config.block_size,
+                            "n_env_fts": config.n_env_fts,
                             "g_layers": args.g_layers,
                             "ld_layers": args.ld_layers,
                             "mlp_layers": args.mlp_layers,
@@ -367,12 +380,20 @@ def main():
                             "n_head": args.heads,
                             "n_embd": args.emb_size,
                             "g_input_type": args.g_input_type,
+                            "env_stage_ids": list(config.env_stage_ids) if config.env_stage_ids is not None else None,
+                            "n_env_stages": int(config.n_env_stages),
+                            "n_env_categorical": int(config.n_env_categorical),
+                            "env_cat_cardinalities": list(config.env_cat_cardinalities) if config.env_cat_cardinalities is not None else None,
+                            "env_feature_id_emb": bool(config.env_feature_id_emb),
+                            "env_stage_id_emb": bool(config.env_stage_id_emb),
+                            "env_cat_embeddings": bool(config.env_cat_embeddings),
                             "loss": args.loss,
                             "alpha": args.alpha
                         },
                         "env_scaler": env_scaler_payload,
                         "label_scalers": label_scalers_payload,
                         "marker_stats": marker_stats_payload,
+                        "env_cat_maps": train_ds.env_cat_maps,
                         "run": {"id": run.id if 'run' in locals() else None,
                                 "name": wandb_run_name}
                     }

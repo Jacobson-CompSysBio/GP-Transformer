@@ -56,8 +56,48 @@ class FullTransformer(nn.Module):
         # project each scalar env feature to a token embedding
         self.e_proj = nn.Linear(1, config.n_embd)
 
+        # Optional richer env tokenization for FullTransformer.
+        self.env_feature_id_emb = bool(getattr(config, "env_feature_id_emb", False))
+        self.env_stage_id_emb = bool(getattr(config, "env_stage_id_emb", False))
+        self.env_cat_embeddings = bool(getattr(config, "env_cat_embeddings", False))
+        self.n_env_categorical = int(getattr(config, "n_env_categorical", 0) or 0)
+
+        env_stage_ids = list(getattr(config, "env_stage_ids", []) or [])
+        if len(env_stage_ids) != int(config.n_env_fts):
+            env_stage_ids = [0] * int(config.n_env_fts)
+        self.register_buffer(
+            "env_stage_ids_tensor",
+            torch.tensor(env_stage_ids, dtype=torch.long),
+            persistent=False,
+        )
+
+        if self.env_feature_id_emb and int(config.n_env_fts) > 0:
+            self.e_feature_id_emb = nn.Embedding(int(config.n_env_fts), config.n_embd)
+        else:
+            self.e_feature_id_emb = None
+
+        n_env_stages = max(1, int(getattr(config, "n_env_stages", 1) or 1))
+        if self.env_stage_id_emb and int(config.n_env_fts) > 0:
+            self.e_stage_id_emb = nn.Embedding(n_env_stages, config.n_embd)
+        else:
+            self.e_stage_id_emb = None
+
+        env_cat_cards = list(getattr(config, "env_cat_cardinalities", []) or [])
+        if self.env_cat_embeddings and self.n_env_categorical > 0:
+            if len(env_cat_cards) < self.n_env_categorical:
+                env_cat_cards = env_cat_cards + [1] * (self.n_env_categorical - len(env_cat_cards))
+            else:
+                env_cat_cards = env_cat_cards[:self.n_env_categorical]
+            self.env_cat_cardinalities = [max(1, int(c)) for c in env_cat_cards]
+            self.e_cat_emb = nn.ModuleList(
+                [nn.Embedding(card, config.n_embd) for card in self.env_cat_cardinalities]
+            )
+        else:
+            self.env_cat_cardinalities = []
+            self.e_cat_emb = None
+
         # positional encoding for combined marker + env + cls tokens
-        max_len = config.block_size + config.n_env_fts + 1
+        max_len = config.block_size + config.n_env_fts + self.n_env_categorical + 1
         class _PE(nn.Module):
             def __init__(self, n_embd, max_len, dropout):
                 super().__init__()
@@ -113,9 +153,40 @@ class FullTransformer(nn.Module):
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
-        e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        e_tok = self.e_proj(e.float().unsqueeze(-1))   # (B, Feats, C)
+
+        # Add feature-identity embedding per numeric env token.
+        if self.e_feature_id_emb is not None and e_tok.size(1) > 0:
+            feat_idx = torch.arange(e_tok.size(1), device=e_tok.device)
+            e_tok = e_tok + self.e_feature_id_emb(feat_idx).unsqueeze(0)
+
+        # Add stage embedding inferred from env feature names.
+        if self.e_stage_id_emb is not None and e_tok.size(1) > 0:
+            if self.env_stage_ids_tensor.numel() == e_tok.size(1):
+                stage_idx = self.env_stage_ids_tensor.to(device=e_tok.device)
+            else:
+                stage_idx = torch.zeros(e_tok.size(1), dtype=torch.long, device=e_tok.device)
+            e_tok = e_tok + self.e_stage_id_emb(stage_idx).unsqueeze(0)
+
+        # Optional categorical env tokens (one token per categorical field).
+        e_cat_tok = None
+        if self.e_cat_emb is not None and "e_cat_data" in x:
+            e_cat = x["e_cat_data"]
+            if e_cat.dim() == 1:
+                e_cat = e_cat.unsqueeze(0)
+            e_cat = e_cat.long()
+            n_cat = min(e_cat.size(1), len(self.e_cat_emb))
+            if n_cat > 0:
+                cat_tokens = []
+                for i in range(n_cat):
+                    card = self.env_cat_cardinalities[i]
+                    ids = e_cat[:, i].clamp(min=0, max=card - 1)
+                    cat_tokens.append(self.e_cat_emb[i](ids).unsqueeze(1))
+                e_cat_tok = torch.cat(cat_tokens, dim=1) if cat_tokens else None
+
+        env_tok = e_tok if e_cat_tok is None else torch.cat([e_tok, e_cat_tok], dim=1)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
-        tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
+        tokens = torch.cat([cls, g_tok, env_tok], dim=1)  # (B, 1+Tm+Feats(+cat), C)
         tokens = self.wpe(tokens)
         env_start = 1 + Tm
         return tokens, env_start

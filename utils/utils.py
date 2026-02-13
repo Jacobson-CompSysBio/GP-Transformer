@@ -48,6 +48,12 @@ def parse_args():
     p.add_argument("--moe_loss_weight", type=float, default=None)
     p.add_argument("--full_transformer", type=str2bool, default=False)
     p.add_argument("--full_tf_mlp_type", type=str, default=None)
+    p.add_argument("--env_feature_id_emb", type=str2bool, default=False,
+                   help="FullTransformer only: add learned feature-ID embeddings to numeric env tokens.")
+    p.add_argument("--env_stage_id_emb", type=str2bool, default=False,
+                   help="FullTransformer only: add learned stage-ID embeddings to numeric env tokens.")
+    p.add_argument("--env_cat_embeddings", type=str2bool, default=False,
+                   help="FullTransformer only: encode categorical env fields as learned embedding tokens.")
     p.add_argument("--residual", type=str2bool, default=False)
     p.add_argument("--g_input_type", type=str, default="tokens", choices=["tokens", "grm"],
                    help="Genotype input representation: tokenized markers ('tokens') or GRM-standardized features ('grm').")
@@ -128,6 +134,17 @@ def make_run_name(args) -> str:
     e = "e+" if args.e_enc and not full_transformer else ""
     ld = "ld+" if args.ld_enc and not full_transformer else ""
     full = "fulltf+" if full_transformer else ""
+    envtok = ""
+    if full_transformer:
+        envtok_bits = []
+        if bool(getattr(args, "env_feature_id_emb", False)):
+            envtok_bits.append("fid")
+        if bool(getattr(args, "env_stage_id_emb", False)):
+            envtok_bits.append("sid")
+        if bool(getattr(args, "env_cat_embeddings", False)):
+            envtok_bits.append("cat")
+        if envtok_bits:
+            envtok = f"envtok{'-'.join(envtok_bits)}+"
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
@@ -157,7 +174,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
+    model_type = (full + envtok + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""
