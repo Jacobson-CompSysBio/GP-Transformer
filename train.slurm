@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J pcc+rmse-maxxing
+#SBATCH -J envmse-scaling
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -60,11 +60,11 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=False
+export SCALE_TARGETS=True
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 
-export LOSS="pcc+mse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
+export LOSS="envmse" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
