@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J baseline
 #SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -t 12:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -64,7 +64,7 @@ export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_FEATURE_ID_EMB=True
 export ENV_STAGE_ID_EMB=True
-export ENV_CAT_EMBEDDINGS=True
+export ENV_CAT_EMBEDDINGS=False
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
