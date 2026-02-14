@@ -4,7 +4,7 @@
 #SBATCH -N 2
 #SBATCH -t 02:00:00
 #SBATCH -p batch
-#SBATCH -q debug
+##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
 #SBATCH --open-mode=truncate
@@ -19,6 +19,9 @@ module load craype-accel-amd-gfx90a
 
 source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.sh
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
+
+# Rolling CV guide:
+#   - See ROLLING_TRAINING.md for variable semantics + launch recipes.
 
 ### first rolling test: best-model-like hyperparams, recent folds only ###
 export G_ENC=True
@@ -81,16 +84,98 @@ export CONTRASTIVE_LOSS_TYPE=mse
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
-# recent folds only for a tractable first comparison
+# Fold construction (applies when ROLLING_PARALLEL_OUTER_FOLDS=False):
+#   - ROLLING_FULL_CV=True:
+#       Use all forward folds in [ROLLING_TRAIN_START_YEAR, ROLLING_TRAIN_END_YEAR),
+#       e.g. 2014->2023 means val years 2015..2023.
+#   - ROLLING_FULL_CV=False + ROLLING_VAL_YEARS="2021,2022,2023":
+#       Use only those val years.
+#   - ROLLING_RECENT_FIRST=True:
+#       Reverse fold order before truncation.
+#   - ROLLING_MAX_FOLDS=K:
+#       Keep first K folds after ordering.
+#   - ROLLING_SINGLE_VAL_YEAR=YYYY:
+#       Run exactly one fold (overrides ROLLING_MAX_FOLDS).
+# This debug preset runs recent folds only.
+export ROLLING_FULL_CV=False
 export ROLLING_VAL_YEARS="2021,2022,2023"
 export ROLLING_MAX_FOLDS=3
 export ROLLING_RECENT_FIRST=True
+export ROLLING_SINGLE_VAL_YEAR=""
+export ROLLING_WANDB_NAME_SUFFIX=""
+
+# Outer-fold parallel mode (submit as SLURM array):
+#   - Each array task trains exactly one fold.
+#   - ROLLING_PARALLEL_VAL_YEARS controls mapped val years. If empty,
+#     fallback is ROLLING_VAL_YEARS, else full [start+1 .. end] range.
+#   - ROLLING_PARALLEL_MAX_CONCURRENT is used in the printed resubmit hint.
+export ROLLING_PARALLEL_OUTER_FOLDS=False
+export ROLLING_PARALLEL_MAX_CONCURRENT=2
+export ROLLING_PARALLEL_VAL_YEARS=""
 
 # rolling test-eval controls
 # options: none | best_fold | latest_fold | best_and_latest | all_folds | year:2023
+# recommendation:
+#   - keep ROLLING_TEST_EVAL_MODE=none for debug/smoke runs
 export ROLLING_TEST_EVAL_MODE=none
 export ROLLING_TEST_BATCH_SIZE=32
 export ROLLING_TEST_PRIMARY=none
+
+is_true() {
+    case "${1,,}" in
+        1|true|yes|y|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if is_true "${ROLLING_PARALLEL_OUTER_FOLDS:-False}"; then
+    declare -a VAL_YEARS=()
+    years_src="${ROLLING_PARALLEL_VAL_YEARS:-}"
+    if [ -z "${years_src//[[:space:]]/}" ]; then
+        years_src="${ROLLING_VAL_YEARS:-}"
+    fi
+
+    if [ -n "${years_src//[[:space:]]/}" ]; then
+        IFS=',' read -r -a _raw_years <<< "$years_src"
+        for _year in "${_raw_years[@]}"; do
+            _year="${_year//[[:space:]]/}"
+            [ -n "$_year" ] && VAL_YEARS+=("$_year")
+        done
+    else
+        for ((y=ROLLING_TRAIN_START_YEAR + 1; y<=ROLLING_TRAIN_END_YEAR; y++)); do
+            VAL_YEARS+=("$y")
+        done
+    fi
+
+    if [ "${#VAL_YEARS[@]}" -eq 0 ]; then
+        echo "[ERROR] ROLLING_PARALLEL_OUTER_FOLDS=True but no val years were resolved."
+        exit 2
+    fi
+
+    if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+        max_idx=$((${#VAL_YEARS[@]} - 1))
+        echo "[ERROR] Parallel outer-fold mode requires SLURM array submission."
+        echo "[INFO] Resubmit using:"
+        echo "       sbatch --array=0-${max_idx}%${ROLLING_PARALLEL_MAX_CONCURRENT} $0"
+        echo "[INFO] Resolved val years: ${VAL_YEARS[*]}"
+        exit 2
+    fi
+
+    fold_idx=${SLURM_ARRAY_TASK_ID}
+    if [ "$fold_idx" -lt 0 ] || [ "$fold_idx" -ge "${#VAL_YEARS[@]}" ]; then
+        echo "[ERROR] SLURM_ARRAY_TASK_ID=$fold_idx out of range for ${#VAL_YEARS[@]} folds."
+        exit 2
+    fi
+
+    export ROLLING_SINGLE_VAL_YEAR="${VAL_YEARS[$fold_idx]}"
+    export ROLLING_FULL_CV=False
+    export ROLLING_VAL_YEARS="${ROLLING_SINGLE_VAL_YEAR}"
+    export ROLLING_MAX_FOLDS=1
+    export ROLLING_RECENT_FIRST=False
+    export ROLLING_WANDB_NAME_SUFFIX="outer${ROLLING_SINGLE_VAL_YEAR}"
+
+    echo "[INFO] Parallel outer-fold mode: task ${fold_idx} -> val year ${ROLLING_SINGLE_VAL_YEAR}"
+fi
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -98,9 +183,10 @@ export http_proxy=$https_proxy
 export WANDB_HTTP_TIMEOUT=90
 
 mkdir -p logs/ckpt_ids logs/run_ids checkpoints data/results
-export WANDB_RUN_ID_FILE="logs/run_ids/wandb_run_id_${SLURM_JOB_ID}.txt"
-export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${SLURM_JOB_ID}.txt"
-export ROLLING_SELECTED_CHECKPOINT_FILE="logs/ckpt_ids/selected_checkpoint_${SLURM_JOB_ID}.txt"
+RUN_TAG="${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-na}"
+export WANDB_RUN_ID_FILE="logs/run_ids/wandb_run_id_${RUN_TAG}.txt"
+export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${RUN_TAG}.txt"
+export ROLLING_SELECTED_CHECKPOINT_FILE="logs/ckpt_ids/selected_checkpoint_${RUN_TAG}.txt"
 rm -f "$WANDB_RUN_ID_FILE" "$CHECKPOINT_DIR_FILE"
 rm -f "$ROLLING_SELECTED_CHECKPOINT_FILE"
 

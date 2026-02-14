@@ -98,30 +98,46 @@ def _build_rolling_folds() -> list[tuple[int, int]]:
     """
     Default: train<=2014..2022, val=2015..2023.
     Optional overrides via env:
+      - ROLLING_FULL_CV=True                      # force all folds in [start_year, end_year)
       - ROLLING_VAL_YEARS="2021,2022,2023"
       - ROLLING_TRAIN_START_YEAR=2014
       - ROLLING_TRAIN_END_YEAR=2023
       - ROLLING_MAX_FOLDS=3
       - ROLLING_RECENT_FIRST=True
+      - ROLLING_SINGLE_VAL_YEAR=2023             # run only one fold (train<=2022, val=2023)
     """
+    start_year = int(os.getenv("ROLLING_TRAIN_START_YEAR", "2014"))
+    end_year = int(os.getenv("ROLLING_TRAIN_END_YEAR", "2023"))
+    if end_year <= start_year:
+        raise ValueError("ROLLING_TRAIN_END_YEAR must be > ROLLING_TRAIN_START_YEAR")
+
+    full_cv = str2bool(os.getenv("ROLLING_FULL_CV", "False"))
     val_years_raw = os.getenv("ROLLING_VAL_YEARS", "").strip()
-    if val_years_raw:
+    if full_cv:
+        folds = [(t, t + 1) for t in range(start_year, end_year)]
+    elif val_years_raw:
         val_years = sorted({int(x.strip()) for x in val_years_raw.split(",") if x.strip()})
         folds = [(y - 1, y) for y in val_years]
     else:
-        start_year = int(os.getenv("ROLLING_TRAIN_START_YEAR", "2014"))
-        end_year = int(os.getenv("ROLLING_TRAIN_END_YEAR", "2023"))
-        if end_year <= start_year:
-            raise ValueError("ROLLING_TRAIN_END_YEAR must be > ROLLING_TRAIN_START_YEAR")
         folds = [(t, t + 1) for t in range(start_year, end_year)]
 
     if str2bool(os.getenv("ROLLING_RECENT_FIRST", "False")):
         folds = list(reversed(folds))
 
-    max_folds_raw = os.getenv("ROLLING_MAX_FOLDS", "").strip()
-    if max_folds_raw:
-        max_folds = max(1, int(max_folds_raw))
-        folds = folds[:max_folds]
+    single_val_year_raw = os.getenv("ROLLING_SINGLE_VAL_YEAR", "").strip()
+    if single_val_year_raw:
+        single_val_year = int(single_val_year_raw)
+        folds = [f for f in folds if f[1] == single_val_year]
+        if not folds:
+            raise ValueError(
+                f"ROLLING_SINGLE_VAL_YEAR={single_val_year} not in configured fold years. "
+                f"Configured val years: {[f[1] for f in [(t, t + 1) for t in range(start_year, end_year)]]}"
+            )
+    else:
+        max_folds_raw = os.getenv("ROLLING_MAX_FOLDS", "").strip()
+        if max_folds_raw:
+            max_folds = max(1, int(max_folds_raw))
+            folds = folds[:max_folds]
 
     return folds
 
@@ -444,7 +460,14 @@ def _select_eval_records(
 ### main ###
 def main():
     args = parse_args()
-    wandb_run_name = make_run_name(args) + "+rolling"
+    single_val_year_for_name = os.getenv("ROLLING_SINGLE_VAL_YEAR", "").strip()
+    run_suffix_parts = ["rolling"]
+    if single_val_year_for_name:
+        run_suffix_parts.append(f"fold{single_val_year_for_name}")
+    wandb_extra_suffix = os.getenv("ROLLING_WANDB_NAME_SUFFIX", "").strip().strip("+")
+    if wandb_extra_suffix:
+        run_suffix_parts.append(wandb_extra_suffix)
+    wandb_run_name = make_run_name(args) + "+" + "+".join(run_suffix_parts)
 
     device, local_rank, rank, world_size = setup_ddp()
 
