@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J react-norm
+#SBATCH -J group-dro-env
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -78,7 +78,7 @@ export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # OOD / robust training options
-export REACTION_NORM=True
+export REACTION_NORM=False
 export REACTION_NORM_RANK=32
 export REACTION_NORM_WEIGHT=1.0
 
@@ -90,12 +90,12 @@ export SHIFT_WEIGHT_MARKER_DIM=512
 export SHIFT_WEIGHT_CLIP_MIN=0.1
 export SHIFT_WEIGHT_CLIP_MAX=10.0
 export SHIFT_WEIGHT_POWER=1.0
+export SHIFT_LOSS_WEIGHT=0.05
 
-export SHIFT_LOSS_WEIGHT=0.0
-export GROUP_DRO=False
-export GROUP_DRO_GROUP_BY=env   # env or year
+export GROUP_DRO=True
+export GROUP_DRO_GROUP_BY=year   # env or year
 export GROUP_DRO_STEP_SIZE=0.01
-export GROUP_DRO_WEIGHT=0.0
+export GROUP_DRO_WEIGHT=0.05
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
