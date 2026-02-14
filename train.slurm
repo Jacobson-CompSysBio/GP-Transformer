@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envmse-scaling
+#SBATCH -J react-norm
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -77,6 +77,26 @@ export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
+# OOD / robust training options
+export REACTION_NORM=True
+export REACTION_NORM_RANK=32
+export REACTION_NORM_WEIGHT=1.0
+
+export SHIFT_WEIGHTING=False
+export SHIFT_WEIGHT_USE_GENOTYPE=False
+export SHIFT_WEIGHT_MAX_TRAIN_SAMPLES=50000
+export SHIFT_WEIGHT_MAX_TEST_SAMPLES=50000
+export SHIFT_WEIGHT_MARKER_DIM=512
+export SHIFT_WEIGHT_CLIP_MIN=0.1
+export SHIFT_WEIGHT_CLIP_MAX=10.0
+export SHIFT_WEIGHT_POWER=1.0
+
+export SHIFT_LOSS_WEIGHT=0.0
+export GROUP_DRO=False
+export GROUP_DRO_GROUP_BY=env   # env or year
+export GROUP_DRO_STEP_SIZE=0.01
+export GROUP_DRO_WEIGHT=0.0
+
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
@@ -142,6 +162,7 @@ srun -N ${SLURM_NNODES} \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
+        --g_input_type $G_INPUT_TYPE \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
         --contrastive_mode $CONTRASTIVE_MODE \
@@ -151,6 +172,22 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --reaction_norm $REACTION_NORM \
+        --reaction_norm_rank $REACTION_NORM_RANK \
+        --reaction_norm_weight $REACTION_NORM_WEIGHT \
+        --shift_weighting $SHIFT_WEIGHTING \
+        --shift_weight_use_genotype $SHIFT_WEIGHT_USE_GENOTYPE \
+        --shift_weight_max_train_samples $SHIFT_WEIGHT_MAX_TRAIN_SAMPLES \
+        --shift_weight_max_test_samples $SHIFT_WEIGHT_MAX_TEST_SAMPLES \
+        --shift_weight_marker_dim $SHIFT_WEIGHT_MARKER_DIM \
+        --shift_weight_clip_min $SHIFT_WEIGHT_CLIP_MIN \
+        --shift_weight_clip_max $SHIFT_WEIGHT_CLIP_MAX \
+        --shift_weight_power $SHIFT_WEIGHT_POWER \
+        --shift_loss_weight $SHIFT_LOSS_WEIGHT \
+        --group_dro $GROUP_DRO \
+        --group_dro_group_by $GROUP_DRO_GROUP_BY \
+        --group_dro_step_size $GROUP_DRO_STEP_SIZE \
+        --group_dro_weight $GROUP_DRO_WEIGHT \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
@@ -193,6 +230,9 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --g_input_type $G_INPUT_TYPE \
+    --reaction_norm $REACTION_NORM \
+    --reaction_norm_rank $REACTION_NORM_RANK \
+    --reaction_norm_weight $REACTION_NORM_WEIGHT \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

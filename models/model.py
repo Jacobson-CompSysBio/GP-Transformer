@@ -12,6 +12,29 @@ from models.cnn import *
 from models.mlp import *
 from models.transformer import * 
 
+
+class ReactionNormHead(nn.Module):
+    """
+    Low-rank bilinear interaction head: f(g, e) = W_o(phi_g(g) ⊙ phi_e(e)).
+    This is a reaction-norm style interaction term added on top of base prediction.
+    """
+
+    def __init__(self, in_dim: int, rank: int = 32, dropout: float = 0.0, weight: float = 1.0):
+        super().__init__()
+        self.weight = float(weight)
+        self.g_proj = nn.Linear(in_dim, rank)
+        self.e_proj = nn.Linear(in_dim, rank)
+        self.out = nn.Linear(rank, 1)
+        self.dropout = nn.Dropout(dropout)
+        nn.init.normal_(self.out.weight, std=0.01)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, g_repr: torch.Tensor, e_repr: torch.Tensor) -> torch.Tensor:
+        z = torch.tanh(self.g_proj(g_repr)) * torch.tanh(self.e_proj(e_repr))
+        z = self.dropout(z)
+        return self.out(z) * self.weight
+
+
 # ----------------------------------------------------------------
 # Full transformer that treats markers + env covariates as tokens
 class FullTransformer(nn.Module):
@@ -23,7 +46,10 @@ class FullTransformer(nn.Module):
                  moe_expert_hidden_dim: Optional[int] = None,
                  moe_shared_expert: bool = False,
                  moe_shared_expert_hidden_dim: Optional[int] = None,
-                 moe_loss_weight: float = 0.01):
+                 moe_loss_weight: float = 0.01,
+                 reaction_norm: bool = False,
+                 reaction_norm_rank: int = 32,
+                 reaction_norm_weight: float = 1.0):
         super().__init__()
         self.config = config
         if isinstance(mlp_type, str):
@@ -39,6 +65,9 @@ class FullTransformer(nn.Module):
         self.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
         self.moe_loss_weight = moe_loss_weight
         self.moe_aux_loss = None
+        self.reaction_norm = bool(reaction_norm)
+        self.reaction_norm_rank = int(reaction_norm_rank)
+        self.reaction_norm_weight = float(reaction_norm_weight)
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
@@ -95,6 +124,15 @@ class FullTransformer(nn.Module):
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+        self.reaction_head = (
+            ReactionNormHead(
+                config.n_embd,
+                rank=self.reaction_norm_rank,
+                dropout=config.dropout,
+                weight=self.reaction_norm_weight,
+            )
+            if self.reaction_norm else None
+        )
         
         # Projection head for contrastive learning (like SimCLR)
         # Projects G embeddings to a space good for contrastive learning
@@ -150,22 +188,25 @@ class FullTransformer(nn.Module):
         tokens, env_start = self._build_tokens(x)
         tokens = self._encode_tokens(tokens)
 
+        g_tokens = tokens[:, 1:env_start, :]
+        g_pooled = g_tokens.mean(dim=1) if g_tokens.size(1) > 0 else tokens[:, 0]
+        e_tokens = tokens[:, env_start:, :] if env_start < tokens.size(1) else None
+        e_pooled = e_tokens.mean(dim=1) if isinstance(e_tokens, torch.Tensor) and e_tokens.numel() > 0 else None
+
         # Extract G embeddings AFTER transformer (for contrastive loss)
         # This is crucial - now the embeddings contain learned representations
         g_embed = None
         if return_g_embeddings:
-            # G tokens are from index 1 to env_start (excluding CLS at 0)
-            g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
-            g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             # Project through contrastive head (like SimCLR)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
         e_embed = None
-        if return_e_embeddings and env_start < tokens.size(1):
-            e_tokens = tokens[:, env_start:, :]  # (B, Feats, C)
-            e_embed = e_tokens.mean(dim=1)       # (B, C)
+        if return_e_embeddings and e_pooled is not None:
+            e_embed = e_pooled
 
         pred = self.head(tokens[:, 0])
+        if self.reaction_head is not None and e_pooled is not None:
+            pred = pred + self.reaction_head(g_pooled, e_pooled)
 
         if return_g_embeddings and return_e_embeddings:
             return pred, g_embed, e_embed
@@ -194,7 +235,10 @@ class FullTransformerResidual(FullTransformer):
                  moe_shared_expert: bool = False,
                  moe_shared_expert_hidden_dim: Optional[int] = None,
                  moe_loss_weight: float = 0.01,
-                 residual: bool = False):
+                 residual: bool = False,
+                 reaction_norm: bool = False,
+                 reaction_norm_rank: int = 32,
+                 reaction_norm_weight: float = 1.0):
         super().__init__(
             config=config,
             mlp_type=mlp_type,
@@ -204,6 +248,9 @@ class FullTransformerResidual(FullTransformer):
             moe_shared_expert=moe_shared_expert,
             moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
             moe_loss_weight=moe_loss_weight,
+            reaction_norm=reaction_norm,
+            reaction_norm_rank=reaction_norm_rank,
+            reaction_norm_weight=reaction_norm_weight,
         )
         self.residual = residual
         self.detach_ymean_in_sum = False
@@ -239,12 +286,16 @@ class FullTransformerResidual(FullTransformer):
         if ymean_pred is None:
             ymean_pred = torch.zeros_like(resid_pred)
         
-        # Extract G embeddings for contrastive loss
+        # Extract G embeddings for contrastive loss / reaction-norm
+        g_tokens = tokens[:, 1:env_start, :]
+        g_pooled = g_tokens.mean(dim=1) if g_tokens.size(1) > 0 else tokens[:, 0]
+
         g_embed = None
         if return_g_embeddings:
-            g_tokens = tokens[:, 1:env_start, :]  # G tokens (excluding CLS)
-            g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
+
+        if self.reaction_head is not None and env_repr is not None:
+            resid_pred = resid_pred + self.reaction_head(g_pooled, env_repr)
 
         e_embed = env_repr if return_e_embeddings else None
 
@@ -292,6 +343,9 @@ class GxE_Transformer(nn.Module):
                  moe_shared_expert: bool = None,
                  moe_shared_expert_hidden_dim: int = None,
                  moe_loss_weight: float = None,
+                 reaction_norm: bool = False,
+                 reaction_norm_rank: int = 32,
+                 reaction_norm_weight: float = 1.0,
                  config = None
                  ):
         super().__init__()
@@ -311,6 +365,9 @@ class GxE_Transformer(nn.Module):
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
         self.moe_aux_loss = None
+        self.reaction_norm = bool(reaction_norm)
+        self.reaction_norm_rank = int(reaction_norm_rank)
+        self.reaction_norm_weight = float(reaction_norm_weight)
 
         # set attributes
         self.g_encoder = (
@@ -379,6 +436,15 @@ class GxE_Transformer(nn.Module):
         # initialize final layer with small weights for stable training
         nn.init.normal_(self.final_layer.weight, std=0.01)
         nn.init.zeros_(self.final_layer.bias)
+        self.reaction_head = (
+            ReactionNormHead(
+                config.n_embd,
+                rank=self.reaction_norm_rank,
+                dropout=config.dropout,
+                weight=self.reaction_norm_weight,
+            )
+            if self.reaction_norm else None
+        )
 
     # concat now uses softmax to augment moe weights proportionally 
     def _concat(self, g_enc, e_enc, ld_enc):
@@ -481,6 +547,13 @@ class GxE_Transformer(nn.Module):
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
 
         return rep, e_enc, g_enc
+
+    def _pool_g_repr(self, g_enc):
+        if not isinstance(g_enc, torch.Tensor):
+            return None
+        if g_enc.dim() == 3:
+            return g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
+        return g_enc
     
     def forward(
         self,
@@ -490,16 +563,16 @@ class GxE_Transformer(nn.Module):
     ):
         rep, e_enc, g_enc = self._encode(x)
         pred = self.final_layer(self.final_dropout(rep))
+        g_repr = self._pool_g_repr(g_enc)
+        e_repr = e_enc if isinstance(e_enc, torch.Tensor) else None
+        if self.reaction_head is not None and g_repr is not None and e_repr is not None:
+            pred = pred + self.reaction_head(g_repr, e_repr)
 
         g_embed = None
         if return_g_embeddings:
             # Return pooled G embedding for contrastive loss
-            if isinstance(g_enc, torch.Tensor):
-                if g_enc.dim() == 3:
-                    # Take CLS token or mean pool
-                    g_embed = g_enc[:, 0] if g_enc.size(1) > 1 else g_enc.mean(dim=1)
-                else:
-                    g_embed = g_enc
+            if g_repr is not None:
+                g_embed = g_repr
         e_embed = e_enc if (return_e_embeddings and isinstance(e_enc, torch.Tensor)) else None
 
         if return_g_embeddings and return_e_embeddings:
@@ -541,6 +614,9 @@ class GxE_ResidualTransformer(GxE_Transformer):
                  moe_shared_expert: bool = None,
                  moe_shared_expert_hidden_dim: int = None,
                  moe_loss_weight: float = None,
+                 reaction_norm: bool = False,
+                 reaction_norm_rank: int = 32,
+                 reaction_norm_weight: float = 1.0,
                  config = None
                  ):
         super().__init__(
@@ -556,6 +632,9 @@ class GxE_ResidualTransformer(GxE_Transformer):
             moe_shared_expert=moe_shared_expert,
             moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
             moe_loss_weight=moe_loss_weight,
+            reaction_norm=reaction_norm,
+            reaction_norm_rank=reaction_norm_rank,
+            reaction_norm_weight=reaction_norm_weight,
             config=config,
         )
         self.residual = residual
@@ -602,6 +681,9 @@ class GxE_ResidualTransformer(GxE_Transformer):
         # residual mode:
         ymean_pred = self.ymean_head(e_enc) if self.ymean_head is not None else 0
         resid_pred = self.final_layer(self.final_dropout(rep))
+        g_repr = self._pool_g_repr(g_enc)
+        if self.reaction_head is not None and g_repr is not None and isinstance(e_enc, torch.Tensor):
+            resid_pred = resid_pred + self.reaction_head(g_repr, e_enc)
 
         # option: detach ymean_pred to prevent env head from learning residual signal
         if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):

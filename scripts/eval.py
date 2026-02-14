@@ -292,6 +292,9 @@ def load_model(device: torch.device,
         full_tf_mlp_type = full_tf_mlp_type.lower()
     else:
         full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+    reaction_norm = bool(config.get("reaction_norm", getattr(args, "reaction_norm", False)))
+    reaction_norm_rank = int(config.get("reaction_norm_rank", getattr(args, "reaction_norm_rank", 32)))
+    reaction_norm_weight = float(config.get("reaction_norm_weight", getattr(args, "reaction_norm_weight", 1.0)))
 
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
@@ -328,6 +331,9 @@ def load_model(device: torch.device,
                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                 moe_loss_weight=moe_loss_weight,
                 residual=residual,
+                reaction_norm=reaction_norm,
+                reaction_norm_rank=reaction_norm_rank,
+                reaction_norm_weight=reaction_norm_weight,
             ).to(device)
             model.detach_ymean_in_sum = args.detach_ymean
         else:
@@ -340,6 +346,9 @@ def load_model(device: torch.device,
                 moe_shared_expert=moe_shared_expert,
                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                 moe_loss_weight=moe_loss_weight,
+                reaction_norm=reaction_norm,
+                reaction_norm_rank=reaction_norm_rank,
+                reaction_norm_weight=reaction_norm_weight,
             ).to(device)
     elif residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
@@ -355,6 +364,9 @@ def load_model(device: torch.device,
                                         moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                         moe_loss_weight=moe_loss_weight,
                                         residual=residual,
+                                        reaction_norm=reaction_norm,
+                                        reaction_norm_rank=reaction_norm_rank,
+                                        reaction_norm_weight=reaction_norm_weight,
                                         config=config).to(device)
         model.detach_ymean_in_sum = args.detach_ymean
     else:
@@ -370,6 +382,9 @@ def load_model(device: torch.device,
                                 moe_shared_expert=moe_shared_expert,
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
+                                reaction_norm=reaction_norm,
+                                reaction_norm_rank=reaction_norm_rank,
+                                reaction_norm_weight=reaction_norm_weight,
                                 config=config).to(device)
     model.load_state_dict(state, strict=False)
     model.eval()

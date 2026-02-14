@@ -228,6 +228,7 @@ class GxE_Dataset(Dataset):
 
         # separate metadata
         self.meta = x_filt[['id', 'Env', 'Year']].copy()
+        self.year_tensor = torch.tensor(self.meta['Year'].astype(int).to_numpy(), dtype=torch.long)
 
         ### CATEGORICAL ENV MAPPING FOR ENVWISE LOSSES ###
         # use *only* filtered envs so codes match indices
@@ -406,7 +407,13 @@ class GxE_Dataset(Dataset):
         hybrid_id = self.hybrid_id_tensor[index]
 
         if not self.residual_flag:
-            return x, {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
+            return x, {
+                "y": y_total,
+                "env_id": env_id,
+                "hybrid_id": hybrid_id,
+                "year": self.year_tensor[index],
+                "sample_idx": torch.tensor(index, dtype=torch.long),
+            }
 
         # residual out
         y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
@@ -417,5 +424,7 @@ class GxE_Dataset(Dataset):
             'resid': y_residual,
             'env_id': env_id,
             'hybrid_id': hybrid_id,
+            'year': self.year_tensor[index],
+            'sample_idx': torch.tensor(index, dtype=torch.long),
         }
         return x, targets

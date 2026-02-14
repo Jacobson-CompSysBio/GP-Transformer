@@ -28,6 +28,12 @@ from utils.loss import (
     compute_grm_similarity,
     macro_env_pearson,
 )
+from utils.ood import (
+    GroupDROObjective,
+    ShiftWeightConfig,
+    build_train_covariate_shift_weights,
+    weighted_mse,
+)
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -159,6 +165,55 @@ def main():
     if is_main(rank) and leo_val:
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
 
+    # OOD robust training options
+    shift_weighting = bool(getattr(args, "shift_weighting", False))
+    shift_loss_weight = float(getattr(args, "shift_loss_weight", 0.0))
+    if shift_loss_weight > 0.0 and not shift_weighting:
+        shift_weighting = True
+        if is_main(rank):
+            print("[INFO] Enabling shift weighting because shift_loss_weight > 0.")
+
+    group_dro_enabled = bool(getattr(args, "group_dro", False))
+    group_dro_weight = float(getattr(args, "group_dro_weight", 0.0))
+    if group_dro_weight > 0.0 and not group_dro_enabled:
+        group_dro_enabled = True
+        if is_main(rank):
+            print("[INFO] Enabling GroupDRO because group_dro_weight > 0.")
+    group_dro_group_by = str(getattr(args, "group_dro_group_by", "env")).lower().strip()
+    group_dro_step_size = float(getattr(args, "group_dro_step_size", 0.01))
+
+    train_shift_weights_cpu = torch.ones(len(train_ds), dtype=torch.float32)
+    shift_stats = {}
+    if shift_weighting:
+        if is_main(rank):
+            cfg = ShiftWeightConfig(
+                max_train_samples=int(getattr(args, "shift_weight_max_train_samples", 50000)),
+                max_test_samples=int(getattr(args, "shift_weight_max_test_samples", 50000)),
+                use_genotype=bool(getattr(args, "shift_weight_use_genotype", False)),
+                genotype_marker_dim=int(getattr(args, "shift_weight_marker_dim", 512)),
+                clip_min=float(getattr(args, "shift_weight_clip_min", 0.1)),
+                clip_max=float(getattr(args, "shift_weight_clip_max", 10.0)),
+                power=float(getattr(args, "shift_weight_power", 1.0)),
+                seed=int(args.seed),
+            )
+            train_shift_weights_cpu, shift_stats = build_train_covariate_shift_weights(
+                train_ds,
+                data_path='data/maize_data_2014-2023_vs_2024_v2/',
+                cfg=cfg,
+            )
+        # Broadcast pre-computed train weights from rank 0.
+        shift_buf = train_shift_weights_cpu.to(device=device, dtype=torch.float32)
+        dist.broadcast(shift_buf, src=0)
+        train_shift_weights_cpu = shift_buf.cpu()
+        if is_main(rank):
+            print(
+                "[INFO] Shift weights ready: "
+                f"min={shift_stats.get('weights_min', float('nan')):.4f}, "
+                f"max={shift_stats.get('weights_max', float('nan')):.4f}, "
+                f"std={shift_stats.get('weights_std', float('nan')):.4f}, "
+                f"domain_auc={shift_stats.get('domain_auc_fit', float('nan')):.4f}"
+            )
+
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
     
@@ -252,6 +307,9 @@ def main():
             moe_shared_expert=moe_shared_expert,
             moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
             moe_loss_weight=moe_loss_weight,
+            reaction_norm=bool(getattr(args, "reaction_norm", False)),
+            reaction_norm_rank=int(getattr(args, "reaction_norm_rank", 32)),
+            reaction_norm_weight=float(getattr(args, "reaction_norm_weight", 1.0)),
         ).to(device)
     else:
         model = GxE_Transformer(g_enc=args.g_enc,
@@ -266,6 +324,9 @@ def main():
                                 moe_shared_expert=moe_shared_expert,
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
+                                reaction_norm=bool(getattr(args, "reaction_norm", False)),
+                                reaction_norm_rank=int(getattr(args, "reaction_norm_rank", 32)),
+                                reaction_norm_weight=float(getattr(args, "reaction_norm_weight", 1.0)),
                                 config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
@@ -281,6 +342,22 @@ def main():
     
     # build loss
     loss_function = build_loss(args.loss, args.loss_weights)
+    train_shift_weights = train_shift_weights_cpu.to(device=device, dtype=torch.float32)
+
+    group_dro_obj = None
+    group_base_year = int(train_ds.meta["Year"].min()) if "Year" in train_ds.meta.columns else 0
+    if group_dro_enabled:
+        if group_dro_group_by == "env":
+            num_groups = int(train_ds.env_id_tensor.max().item()) + 1
+        elif group_dro_group_by == "year":
+            year_ids = train_ds.meta["Year"].astype(int).to_numpy() - group_base_year
+            num_groups = int(year_ids.max()) + 1
+        else:
+            raise ValueError("group_dro_group_by must be one of ['env', 'year']")
+        group_dro_obj = GroupDROObjective(
+            num_groups=num_groups,
+            step_size=group_dro_step_size,
+        ).to(device)
     
     # contrastive objectives (ablation mode: none, g, e, g+e)
     contrastive_mode = _normalize_choice(
@@ -418,6 +495,22 @@ def main():
                              "e_contrastive_enabled": use_e_contrastive,
                              "e_contrastive_weight": env_contrastive_weight if use_e_contrastive else None,
                              "e_contrastive_temperature": env_contrastive_temperature if use_e_contrastive else None,
+                             "reaction_norm": bool(getattr(args, "reaction_norm", False)),
+                             "reaction_norm_rank": int(getattr(args, "reaction_norm_rank", 32)),
+                             "reaction_norm_weight": float(getattr(args, "reaction_norm_weight", 1.0)),
+                             "shift_weighting": shift_weighting,
+                             "shift_loss_weight": shift_loss_weight,
+                             "shift_weight_use_genotype": bool(getattr(args, "shift_weight_use_genotype", False)),
+                             "shift_weight_max_train_samples": int(getattr(args, "shift_weight_max_train_samples", 50000)),
+                             "shift_weight_max_test_samples": int(getattr(args, "shift_weight_max_test_samples", 50000)),
+                             "shift_weight_marker_dim": int(getattr(args, "shift_weight_marker_dim", 512)),
+                             "shift_weight_clip_min": float(getattr(args, "shift_weight_clip_min", 0.1)),
+                             "shift_weight_clip_max": float(getattr(args, "shift_weight_clip_max", 10.0)),
+                             "shift_weight_power": float(getattr(args, "shift_weight_power", 1.0)),
+                             "group_dro": group_dro_enabled,
+                             "group_dro_group_by": group_dro_group_by,
+                             "group_dro_step_size": group_dro_step_size,
+                             "group_dro_weight": group_dro_weight,
                              "g_encoder_type": g_encoder_type,
                              "moe_num_experts": moe_num_experts,
                              "moe_top_k": moe_top_k,
@@ -429,10 +522,22 @@ def main():
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
+        if shift_stats:
+            wandb.config.update(
+                {f"shift_stats/{k}": v for k, v in shift_stats.items()},
+                allow_val_change=True,
+            )
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if shift_weighting:
+            run.define_metric("train_loss/shift_mse", step_metric="iter_num")
+        if group_dro_enabled:
+            run.define_metric("train_loss/group_dro", step_metric="iter_num")
+            run.define_metric("train_loss/group_dro_q_max", step_metric="iter_num")
+            run.define_metric("train_loss/group_dro_q_min", step_metric="iter_num")
+            run.define_metric("train_loss/group_dro_groups_in_batch", step_metric="iter_num")
         if use_g_contrastive:
             run.define_metric("train_loss/contrastive_g", step_metric="iter_num")
             run.define_metric("train_loss_epoch/contrastive_g", step_metric="epoch")
@@ -481,6 +586,8 @@ def main():
                 xb[k] = v.to(device, non_blocking=True)
             y_true = yb["y"].to(device, non_blocking=True).float()
             env_id = yb["env_id"].to(device, non_blocking=True).long()
+            sample_idx = yb["sample_idx"].to(device, non_blocking=True).long()
+            year_id = yb["year"].to(device, non_blocking=True).long() - group_base_year
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -502,6 +609,28 @@ def main():
                     e_embeddings = None
                     
                 loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+
+                # OOD robust auxiliaries (operate on per-sample squared error).
+                pred_flat = preds.squeeze(-1)
+                target_flat = y_true.squeeze(-1)
+                se_sample = (pred_flat.float() - target_flat.float()) ** 2
+                if shift_weighting and shift_loss_weight > 0.0:
+                    shift_w = train_shift_weights[sample_idx]
+                    shift_mse = weighted_mse(pred_flat, target_flat, shift_w)
+                    loss_total = loss_total + (shift_loss_weight * shift_mse)
+                    loss_parts["shift_mse"] = float(shift_mse.detach().item())
+                elif shift_weighting:
+                    loss_parts["shift_mse"] = 0.0
+
+                if group_dro_obj is not None and group_dro_weight > 0.0:
+                    group_ids = env_id if group_dro_group_by == "env" else year_id
+                    group_dro_term, gd_stats = group_dro_obj(se_sample, group_ids)
+                    loss_total = loss_total + (group_dro_weight * group_dro_term)
+                    loss_parts["group_dro"] = float(group_dro_term.detach().item())
+                    for k, v in gd_stats.items():
+                        loss_parts[k] = float(v)
+                elif group_dro_obj is not None:
+                    loss_parts["group_dro"] = 0.0
                 
                 # Add contrastive loss if enabled (with warmup).
                 contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
@@ -751,6 +880,9 @@ def main():
                         "moe_shared_expert": moe_shared_expert,
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
+                        "reaction_norm": bool(getattr(args, "reaction_norm", False)),
+                        "reaction_norm_rank": int(getattr(args, "reaction_norm_rank", 32)),
+                        "reaction_norm_weight": float(getattr(args, "reaction_norm_weight", 1.0)),
                         "g_input_type": g_input_type,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,

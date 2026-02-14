@@ -102,6 +102,38 @@ def parse_args():
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--reaction_norm", type=str2bool, default=False,
+                   help="Enable reaction-norm style GxE interaction head.")
+    p.add_argument("--reaction_norm_rank", type=int, default=32,
+                   help="Low-rank factor size for reaction-norm interaction.")
+    p.add_argument("--reaction_norm_weight", type=float, default=1.0,
+                   help="Scale applied to reaction-norm interaction contribution.")
+    p.add_argument("--shift_weighting", type=str2bool, default=False,
+                   help="Enable covariate-shift importance weighting using unlabeled test covariates.")
+    p.add_argument("--shift_weight_use_genotype", type=str2bool, default=False,
+                   help="Use genotype markers in the domain classifier for shift weighting.")
+    p.add_argument("--shift_weight_max_train_samples", type=int, default=50000,
+                   help="Max train samples used to fit domain classifier for shift weighting.")
+    p.add_argument("--shift_weight_max_test_samples", type=int, default=50000,
+                   help="Max test samples used to fit domain classifier for shift weighting.")
+    p.add_argument("--shift_weight_marker_dim", type=int, default=512,
+                   help="Number of marker columns used when shift_weight_use_genotype=True.")
+    p.add_argument("--shift_weight_clip_min", type=float, default=0.1,
+                   help="Lower clip bound for shift weights.")
+    p.add_argument("--shift_weight_clip_max", type=float, default=10.0,
+                   help="Upper clip bound for shift weights.")
+    p.add_argument("--shift_weight_power", type=float, default=1.0,
+                   help="Power transform applied to density-ratio weights before clipping.")
+    p.add_argument("--shift_loss_weight", type=float, default=0.0,
+                   help="Auxiliary weighted-MSE coefficient using shift weights.")
+    p.add_argument("--group_dro", type=str2bool, default=False,
+                   help="Enable GroupDRO robust objective.")
+    p.add_argument("--group_dro_group_by", type=str, default="env", choices=["env", "year"],
+                   help="Grouping variable for GroupDRO.")
+    p.add_argument("--group_dro_step_size", type=float, default=0.01,
+                   help="Exponentiated-gradient step size for GroupDRO q update.")
+    p.add_argument("--group_dro_weight", type=float, default=0.0,
+                   help="Auxiliary GroupDRO coefficient on per-sample squared error.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     return p.parse_args()
@@ -151,13 +183,14 @@ def make_run_name(args) -> str:
         contr = ""
     
     ginput = "grm+" if getattr(args, "g_input_type", "tokens") == "grm" else ""
-    
+    rn = "rn+" if getattr(args, "reaction_norm", False) else ""
+
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + rn).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""
@@ -208,6 +241,26 @@ def make_run_name(args) -> str:
             moe_tag += f"_shared{shared_dim}h"
         moe_tag += f"_lb{short(moe_loss_weight)}"
 
+    # optional reaction-norm detail tag
+    rn_tag = ""
+    if getattr(args, "reaction_norm", False):
+        rn_rank = int(getattr(args, "reaction_norm_rank", 32))
+        rn_weight = short(getattr(args, "reaction_norm_weight", 1.0))
+        rn_tag = f"rn{rn_rank}r{rn_weight}w"
+
+    # optional OOD robust objective tag
+    ood_tag = ""
+    if getattr(args, "shift_weighting", False):
+        sw = short(getattr(args, "shift_loss_weight", 0.0))
+        sp = short(getattr(args, "shift_weight_power", 1.0))
+        ood_tag += f"sw{sw}p{sp}"
+    if getattr(args, "group_dro", False):
+        gdw = short(getattr(args, "group_dro_weight", 0.0))
+        gde = short(getattr(args, "group_dro_step_size", 0.01))
+        gdb = str(getattr(args, "group_dro_group_by", "env")).lower()
+        sep = "_" if ood_tag else ""
+        ood_tag += f"{sep}gdro{gdb}{gdw}w{gde}eta"
+
     full_tag = ""
 
     # loss tag
@@ -234,6 +287,8 @@ def make_run_name(args) -> str:
         f"{model_type}"
         f"{'_' + contr_tag if contr_tag else ''}"
         f"{'_' + moe_tag if moe_tag else ''}"
+        f"{'_' + rn_tag if rn_tag else ''}"
+        f"{'_' + ood_tag if ood_tag else ''}"
         f"{'_' + full_tag if full_tag else ''}"
         f"_{loss_tag}_{args.gbs}gbs_{args.lr}lr_{args.weight_decay}wd_"
         f"{args.num_epochs}epochs_{args.early_stop}es_"
