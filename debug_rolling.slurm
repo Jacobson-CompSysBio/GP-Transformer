@@ -45,7 +45,7 @@ MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Debug rolling test with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=10
+export NUM_EPOCHS=1
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
@@ -86,6 +86,12 @@ export ROLLING_VAL_YEARS="2021,2022,2023"
 export ROLLING_MAX_FOLDS=3
 export ROLLING_RECENT_FIRST=True
 
+# rolling test-eval controls
+# options: none | best_fold | latest_fold | best_and_latest | all_folds | year:2023
+export ROLLING_TEST_EVAL_MODE=none
+export ROLLING_TEST_BATCH_SIZE=32
+export ROLLING_TEST_PRIMARY=none
+
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
@@ -94,7 +100,9 @@ export WANDB_HTTP_TIMEOUT=90
 mkdir -p logs/ckpt_ids logs/run_ids checkpoints data/results
 export WANDB_RUN_ID_FILE="logs/run_ids/wandb_run_id_${SLURM_JOB_ID}.txt"
 export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${SLURM_JOB_ID}.txt"
+export ROLLING_SELECTED_CHECKPOINT_FILE="logs/ckpt_ids/selected_checkpoint_${SLURM_JOB_ID}.txt"
 rm -f "$WANDB_RUN_ID_FILE" "$CHECKPOINT_DIR_FILE"
+rm -f "$ROLLING_SELECTED_CHECKPOINT_FILE"
 
 ### network / rccl settings ###
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)

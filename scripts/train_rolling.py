@@ -5,12 +5,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 import subprocess
+import numpy as np
 import wandb
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
+from sklearn.preprocessing import StandardScaler
 
 # add parent directory (one level up) to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -124,6 +126,321 @@ def _build_rolling_folds() -> list[tuple[int, int]]:
     return folds
 
 
+def _safe_pcc_np(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size < 2:
+        return float("nan")
+    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
+        return float("nan")
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _rebuild_env_scaler(payload: dict | None) -> StandardScaler | None:
+    if not payload:
+        return None
+    scaler = StandardScaler()
+    scaler.mean_ = np.asarray(payload["mean"], dtype=float)
+    scaler.scale_ = np.asarray(payload["scale"], dtype=float)
+    scaler.var_ = np.asarray(payload["var"], dtype=float)
+    scaler.n_features_in_ = int(payload["n_features_in"])
+    if "feature_names_in" in payload:
+        scaler.feature_names_in_ = np.asarray(payload["feature_names_in"], dtype=object)
+    return scaler
+
+
+def _rebuild_y_scalers(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    return {k: LabelScaler(v["mean"], v["std"]) for k, v in payload.items()}
+
+
+def _rebuild_marker_stats(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    return {
+        "p": np.asarray(payload["p"], dtype=np.float32),
+        "scale": np.asarray(payload["scale"], dtype=np.float32),
+        "valid": np.asarray(payload["valid"], dtype=np.float32),
+        "columns": list(payload["columns"]),
+    }
+
+
+def _build_model_from_checkpoint_payload(
+    payload: dict,
+    args,
+    device: torch.device,
+):
+    cfg = payload.get("config", {})
+
+    g_enc = cfg.get("g_enc", args.g_enc)
+    e_enc = cfg.get("e_enc", args.e_enc)
+    ld_enc = cfg.get("ld_enc", args.ld_enc)
+    gxe_enc = cfg.get("gxe_enc", args.gxe_enc)
+    residual = bool(cfg.get("residual", args.residual))
+    full_transformer = bool(cfg.get("full_transformer", args.full_transformer))
+    g_encoder_type = cfg.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
+    g_input_type = cfg.get("g_input_type", getattr(args, "g_input_type", "tokens"))
+    full_tf_mlp_type = cfg.get("full_tf_mlp_type", g_encoder_type)
+    if isinstance(full_tf_mlp_type, str):
+        full_tf_mlp_type = full_tf_mlp_type.lower()
+    else:
+        full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+
+    moe_num_experts = int(cfg.get("moe_num_experts", getattr(args, "moe_num_experts", 4)))
+    moe_top_k = int(cfg.get("moe_top_k", getattr(args, "moe_top_k", 2)))
+    moe_expert_hidden_dim = cfg.get("moe_expert_hidden_dim", getattr(args, "moe_expert_hidden_dim", None))
+    moe_shared_expert = bool(cfg.get("moe_shared_expert", getattr(args, "moe_shared_expert", False)))
+    moe_shared_expert_hidden_dim = cfg.get(
+        "moe_shared_expert_hidden_dim",
+        getattr(args, "moe_shared_expert_hidden_dim", None),
+    )
+    moe_loss_weight = float(cfg.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01)))
+
+    config = Config(
+        block_size=int(cfg["block_size"]),
+        g_input_type=str(g_input_type).lower(),
+        n_head=int(cfg.get("n_head", args.heads)),
+        n_g_layer=int(cfg.get("g_layers", args.g_layers)),
+        n_ld_layer=int(cfg.get("ld_layers", args.ld_layers)),
+        n_mlp_layer=int(cfg.get("mlp_layers", args.mlp_layers)),
+        n_gxe_layer=int(cfg.get("gxe_layers", args.gxe_layers)),
+        n_embd=int(cfg.get("n_embd", args.emb_size)),
+        dropout=float(cfg.get("dropout", args.dropout)),
+        n_env_fts=int(cfg["n_env_fts"]),
+    )
+
+    if full_transformer:
+        if residual:
+            model = FullTransformerResidual(
+                config,
+                mlp_type=full_tf_mlp_type,
+                moe_num_experts=moe_num_experts,
+                moe_top_k=moe_top_k,
+                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                moe_shared_expert=moe_shared_expert,
+                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                moe_loss_weight=moe_loss_weight,
+                residual=residual,
+            ).to(device)
+            model.detach_ymean_in_sum = bool(cfg.get("detach_ymean", getattr(args, "detach_ymean", True)))
+        else:
+            model = FullTransformer(
+                config,
+                mlp_type=full_tf_mlp_type,
+                moe_num_experts=moe_num_experts,
+                moe_top_k=moe_top_k,
+                moe_expert_hidden_dim=moe_expert_hidden_dim,
+                moe_shared_expert=moe_shared_expert,
+                moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+                moe_loss_weight=moe_loss_weight,
+            ).to(device)
+    elif residual:
+        model = GxE_ResidualTransformer(
+            g_enc=g_enc,
+            e_enc=e_enc,
+            ld_enc=ld_enc,
+            gxe_enc=gxe_enc,
+            moe=cfg.get("wg", cfg.get("moe", args.wg)),
+            g_encoder_type=g_encoder_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+            residual=residual,
+            config=config,
+        ).to(device)
+        model.detach_ymean_in_sum = bool(cfg.get("detach_ymean", getattr(args, "detach_ymean", True)))
+    else:
+        model = GxE_Transformer(
+            g_enc=g_enc,
+            e_enc=e_enc,
+            ld_enc=ld_enc,
+            gxe_enc=gxe_enc,
+            moe=cfg.get("wg", cfg.get("moe", args.wg)),
+            g_encoder_type=g_encoder_type,
+            moe_num_experts=moe_num_experts,
+            moe_top_k=moe_top_k,
+            moe_expert_hidden_dim=moe_expert_hidden_dim,
+            moe_shared_expert=moe_shared_expert,
+            moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
+            moe_loss_weight=moe_loss_weight,
+            config=config,
+        ).to(device)
+
+    model.load_state_dict(payload["model"], strict=False)
+    model.eval()
+    return model, cfg
+
+
+def _evaluate_checkpoint_on_test(
+    checkpoint_path: str,
+    args,
+    device: torch.device,
+    batch_size: int,
+) -> tuple[dict, list[tuple[str, float, int]]]:
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    model, cfg = _build_model_from_checkpoint_payload(payload, args, device)
+
+    env_scaler = _rebuild_env_scaler(payload.get("env_scaler"))
+    y_scalers = _rebuild_y_scalers(payload.get("y_scalers"))
+    marker_stats = _rebuild_marker_stats(payload.get("marker_stats"))
+    if env_scaler is None:
+        raise ValueError(f"Checkpoint missing env_scaler payload: {checkpoint_path}")
+
+    g_input_type = str(cfg.get("g_input_type", getattr(args, "g_input_type", "tokens"))).lower()
+    residual = bool(cfg.get("residual", getattr(args, "residual", False)))
+    scale_targets = bool(cfg.get("scale_targets", getattr(args, "scale_targets", True)))
+
+    test_ds = GxE_Dataset(
+        split="test",
+        data_path="data/maize_data_2014-2023_vs_2024_v2/",
+        residual=residual,
+        scaler=env_scaler,
+        y_scalers=y_scalers,
+        scale_targets=scale_targets,
+        g_input_type=g_input_type,
+        marker_stats=marker_stats,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=max(1, int(batch_size)),
+        shuffle=False,
+        pin_memory=True,
+        num_workers=0,
+    )
+
+    all_env = []
+    all_true = []
+    all_pred = []
+
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb = _move_to_device(xb, device)
+            out = model(xb)
+            if isinstance(out, dict):
+                out = out["total"]
+            pred = out.squeeze(-1).detach().cpu().numpy().astype(float)
+            if y_scalers and ("total" in y_scalers):
+                pred = y_scalers["total"].inverse_transform(pred)
+
+            actual = np.asarray(yb["Yield_Mg_ha"], dtype=float)
+            env = np.asarray(yb.get("Env", ["UNK"] * len(pred))).astype(str)
+
+            all_pred.append(pred)
+            all_true.append(actual)
+            all_env.append(env)
+
+    y_pred = np.concatenate(all_pred) if all_pred else np.asarray([], dtype=float)
+    y_true = np.concatenate(all_true) if all_true else np.asarray([], dtype=float)
+    env_arr = np.concatenate(all_env) if all_env else np.asarray([], dtype=str)
+
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[valid]
+    y_pred = y_pred[valid]
+    env_arr = env_arr[valid]
+
+    if y_true.size == 0:
+        return {
+            "global_pcc": float("nan"),
+            "global_mse": float("nan"),
+            "env_pcc": float("nan"),
+            "env_mse": float("nan"),
+            "env_pcc_weighted": float("nan"),
+            "n_test": 0,
+        }, []
+
+    global_pcc = _safe_pcc_np(y_true, y_pred)
+    global_mse = float(np.mean((y_true - y_pred) ** 2))
+
+    uniq_env, env_ids = np.unique(env_arr, return_inverse=True)
+    env_pcc_t = macro_env_pearson(
+        pred=torch.tensor(y_pred, dtype=torch.float32, device=device),
+        target=torch.tensor(y_true, dtype=torch.float32, device=device),
+        env_id=torch.tensor(env_ids, dtype=torch.long, device=device),
+        min_samples=2,
+    )
+    env_pcc = float(env_pcc_t.item()) if bool(torch.isfinite(env_pcc_t).item()) else float("nan")
+
+    pcc_rows: list[tuple[str, float, int]] = []
+    weighted_num = 0.0
+    weighted_den = 0
+    env_mse_vals = []
+    for i, env_name in enumerate(uniq_env):
+        mask = env_ids == i
+        n = int(mask.sum())
+        if n < 2:
+            continue
+        yt = y_true[mask]
+        yp = y_pred[mask]
+        pcc_i = _safe_pcc_np(yt, yp)
+        mse_i = float(np.mean((yt - yp) ** 2))
+        if math.isfinite(pcc_i):
+            pcc_rows.append((str(env_name), float(pcc_i), n))
+            weighted_num += float(pcc_i) * n
+            weighted_den += n
+        env_mse_vals.append(mse_i)
+
+    env_pcc_weighted = (weighted_num / weighted_den) if weighted_den > 0 else float("nan")
+    env_mse = float(np.mean(env_mse_vals)) if env_mse_vals else float("nan")
+
+    return {
+        "global_pcc": global_pcc,
+        "global_mse": global_mse,
+        "env_pcc": env_pcc,
+        "env_mse": env_mse,
+        "env_pcc_weighted": env_pcc_weighted,
+        "n_test": int(y_true.size),
+    }, pcc_rows
+
+
+def _select_eval_records(
+    fold_records: list[dict],
+    mode: str,
+) -> list[tuple[str, dict]]:
+    mode = str(mode).strip().lower()
+    if mode in {"", "none", "off", "false", "0", "no"}:
+        return []
+
+    def _score(r):
+        pcc = r["best_val_env_avg_pearson"]
+        loss = r["best_val_loss"]
+        pcc_score = pcc if math.isfinite(pcc) else -float("inf")
+        loss_score = -loss if math.isfinite(loss) else -float("inf")
+        return (pcc_score, loss_score)
+
+    latest = max(fold_records, key=lambda r: r["val_year"])
+    best = max(fold_records, key=_score)
+
+    if mode == "best_fold":
+        candidates = [("best_fold", best)]
+    elif mode == "latest_fold":
+        candidates = [("latest_fold", latest)]
+    elif mode in {"best_and_latest", "best+latest", "both"}:
+        candidates = [("best_fold", best), ("latest_fold", latest)]
+    elif mode == "all_folds":
+        candidates = [(f"fold_{r['val_year']}", r) for r in sorted(fold_records, key=lambda x: x["val_year"])]
+    elif mode.startswith("year:"):
+        val_year = int(mode.split(":", 1)[1].strip())
+        found = [r for r in fold_records if r["val_year"] == val_year]
+        candidates = [(f"fold_{val_year}", found[0])] if found else []
+    else:
+        raise ValueError(
+            "ROLLING_TEST_EVAL_MODE must be one of: "
+            "none, best_fold, latest_fold, best_and_latest, all_folds, year:<YYYY>"
+        )
+
+    selected = []
+    seen = set()
+    for tag, rec in candidates:
+        ckpt = rec.get("best_checkpoint")
+        if not ckpt or ckpt in seen:
+            continue
+        seen.add(ckpt)
+        selected.append((tag, rec))
+    return selected
+
+
 ### main ###
 def main():
     args = parse_args()
@@ -211,6 +528,11 @@ def main():
     if not folds:
         raise ValueError("No rolling folds configured. Check ROLLING_* environment variables.")
 
+    rolling_test_eval_mode = str(os.getenv("ROLLING_TEST_EVAL_MODE", "best_fold")).strip().lower()
+    rolling_test_batch_size = int(os.getenv("ROLLING_TEST_BATCH_SIZE", "32"))
+    rolling_test_primary = str(os.getenv("ROLLING_TEST_PRIMARY", "best_fold")).strip().lower()
+    rolling_selected_ckpt_file = os.getenv("ROLLING_SELECTED_CHECKPOINT_FILE", "").strip()
+
     if is_main(rank):
         print(f"[INFO] Rolling folds: {folds}")
 
@@ -221,23 +543,78 @@ def main():
         run_ckpt_dir.mkdir(parents=True, exist_ok=True)
     dist.barrier()
 
+    loss_names = build_loss(args.loss, args.loss_weights).names
+
     run = None
     if is_main(rank):
         run = wandb.init(
-            project=os.getenv("WANDB_PROJECT"),
+            project="gxe-transformer-rolling",
             entity=os.getenv("WANDB_ENTITY"),
             name=wandb_run_name,
         )
-        run.define_metric("fold/iter")
-        run.define_metric("fold/epoch")
-        run.define_metric("fold/*", step_metric="fold/iter")
-        run.define_metric("fold/epoch/*", step_metric="fold/epoch")
+
+        run_id_file = os.environ.get("WANDB_RUN_ID_FILE")
+        if run_id_file:
+            with open(run_id_file, "w") as f:
+                f.write(run.id.strip())
+            print(f"[INFO] WandB run id written to {run_id_file}: {run.id}")
+
+        cdir_file = os.environ.get("CHECKPOINT_DIR_FILE")
+        if cdir_file:
+            with open(cdir_file, "w") as f:
+                f.write(str(run_ckpt_dir.resolve()))
+            print(f"[INFO] Checkpoint dir written to {cdir_file}: {run_ckpt_dir.resolve()}")
+
+        # Match non-rolling tracking so overlays are easy.
+        run.define_metric("iter_num")
+        run.define_metric("train_loss", step_metric="iter_num")
+        run.define_metric("learning_rate", step_metric="iter_num")
+
+        run.define_metric("epoch")
+        run.define_metric("train_loss_epoch", step_metric="epoch")
+        run.define_metric("val_loss", step_metric="epoch")
+        run.define_metric("train_loss_epoch/env_avg_pearson", step_metric="epoch")
+        run.define_metric("val_loss/env_avg_pearson", step_metric="epoch")
+        # aliases to match residual script naming
+        run.define_metric("train/env_avg_pearson", step_metric="epoch")
+        run.define_metric("val/env_avg_pearson", step_metric="epoch")
+
+        for name in loss_names:
+            run.define_metric(f"train_loss/{name}", step_metric="iter_num")
+            run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
+            run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if use_g_contrastive:
+            run.define_metric("train_loss/contrastive_g", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive_g", step_metric="epoch")
+            run.define_metric("train_loss/contrastive_weight_eff_g", step_metric="iter_num")
+        if use_e_contrastive:
+            run.define_metric("train_loss/contrastive_e", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive_e", step_metric="epoch")
+            run.define_metric("train_loss/contrastive_weight_eff_e", step_metric="iter_num")
+        if use_g_contrastive or use_e_contrastive:
+            run.define_metric("train_loss/contrastive", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/contrastive", step_metric="epoch")
+        if args.residual:
+            run.define_metric("aux_ymean_loss", step_metric="iter_num")
+            run.define_metric("aux_resid_loss", step_metric="iter_num")
+            run.define_metric("aux_ymean_mse_epoch", step_metric="epoch")
+            run.define_metric("aux_resid_mse_epoch", step_metric="epoch")
+        if moe_encoder_enabled:
+            run.define_metric("train_loss/moe_lb", step_metric="iter_num")
+            run.define_metric("train_loss_epoch/moe_lb", step_metric="epoch")
+            run.define_metric("val_loss/moe_lb", step_metric="epoch")
+
+        # Keep fold metadata separate to avoid noisy primary charts.
+        run.define_metric("rolling/fold_idx", step_metric="epoch")
+        run.define_metric("rolling/epoch_in_fold", step_metric="epoch")
+        run.define_metric("rolling/val_year", step_metric="epoch")
+        run.define_metric("rolling/iter_in_fold", step_metric="iter_num")
 
         wandb.config.update({
             "rolling_folds": folds,
             "loss": args.loss,
             "loss_weights": args.loss_weights,
-            "selection_metric": "fold/epoch/val_env_avg_pearson",
+            "selection_metric": "val_loss/env_avg_pearson",
             "residual": args.residual,
             "full_transformer": args.full_transformer,
             "g_encoder_type": g_encoder_type,
@@ -266,9 +643,14 @@ def main():
             "emb_size": args.emb_size,
             "dropout": args.dropout,
             "scale_targets": args.scale_targets,
+            "rolling_test_eval_mode": rolling_test_eval_mode,
+            "rolling_test_batch_size": rolling_test_batch_size,
+            "rolling_test_primary": rolling_test_primary,
         }, allow_val_change=True)
 
     fold_records = []
+    iter_num_global = 0
+    epoch_global = 0
 
     for fold_idx, (train_year_max, val_year) in enumerate(folds, start=1):
         if is_main(rank):
@@ -447,6 +829,7 @@ def main():
         best_val_loss = float("inf")
         best_val_env_pcc = -float("inf")
         best_ckpt_path = None
+        best_epoch = -1
         last_improved = 0
         iter_in_fold = 0
 
@@ -538,20 +921,21 @@ def main():
 
                 if is_main(rank):
                     payload = {
-                        "fold/iter": iter_in_fold,
-                        "fold/year": val_year,
-                        "fold/train_loss": float(loss.item()),
-                        "fold/lr": float(lr),
+                        "iter_num": iter_num_global,
+                        "train_loss": float(loss.item()),
+                        "learning_rate": float(lr),
+                        "rolling/iter_in_fold": int(iter_in_fold),
                     }
                     for k, v in loss_parts.items():
-                        payload[f"fold/loss_parts/{k}"] = float(v)
+                        payload[f"train_loss/{k}"] = float(v)
                     if loss_aux_ymean is not None:
-                        payload["fold/aux_ymean_loss"] = float(loss_aux_ymean.detach().item())
+                        payload["aux_ymean_loss"] = float(loss_aux_ymean.detach().item())
                     if loss_aux_resid is not None:
-                        payload["fold/aux_resid_loss"] = float(loss_aux_resid.detach().item())
+                        payload["aux_resid_loss"] = float(loss_aux_resid.detach().item())
                     wandb.log(payload)
 
                 iter_in_fold += 1
+                iter_num_global += 1
                 pbar.update(1)
             pbar.close()
 
@@ -648,20 +1032,24 @@ def main():
 
             if is_main(rank):
                 payload = {
-                    "fold/epoch": epoch_num,
-                    "fold/year": val_year,
-                    "fold/epoch/train_loss": float(train_total.item()),
-                    "fold/epoch/val_loss": float(val_total.item()),
-                    "fold/epoch/train_env_avg_pearson": float(train_env_pcc),
-                    "fold/epoch/val_env_avg_pearson": float(val_env_pcc),
+                    "epoch": epoch_global,
+                    "train_loss_epoch": float(train_total.item()),
+                    "val_loss": float(val_total.item()),
+                    "train_loss_epoch/env_avg_pearson": float(train_env_pcc),
+                    "val_loss/env_avg_pearson": float(val_env_pcc),
+                    "train/env_avg_pearson": float(train_env_pcc),
+                    "val/env_avg_pearson": float(val_env_pcc),
+                    "rolling/fold_idx": int(fold_idx),
+                    "rolling/epoch_in_fold": int(epoch_num),
+                    "rolling/val_year": int(val_year),
                 }
                 for k, v in train_parts.items():
-                    payload[f"fold/epoch/train_parts/{k}"] = float(v)
+                    payload[f"train_loss_epoch/{k}"] = float(v)
                 for k, v in val_parts.items():
-                    payload[f"fold/epoch/val_parts/{k}"] = float(v)
+                    payload[f"val_loss/{k}"] = float(v)
                 if args.residual:
-                    payload["fold/epoch/aux_ymean_mse"] = float(aux_val_ymean)
-                    payload["fold/epoch/aux_resid_mse"] = float(aux_val_resid)
+                    payload["aux_ymean_mse_epoch"] = float(aux_val_ymean)
+                    payload["aux_resid_mse_epoch"] = float(aux_val_resid)
                 wandb.log(payload)
 
                 val_loss_value = float(val_total.item())
@@ -677,6 +1065,7 @@ def main():
                 if improved:
                     best_val_loss = val_loss_value
                     best_val_env_pcc = val_env_pcc
+                    best_epoch = epoch_num
                     last_improved = 0
 
                     env_scaler_payload = {
@@ -743,6 +1132,7 @@ def main():
                             "detach_ymean": args.detach_ymean,
                             "scale_targets": args.scale_targets,
                             "contrastive_mode": contrastive_mode,
+                            "dropout": args.dropout,
                         },
                         "env_scaler": env_scaler_payload,
                         "y_scalers": label_scalers_payload,
@@ -765,6 +1155,7 @@ def main():
                     last_improved += 1
                     print(f"Fold {val_year} has not improved in {last_improved} epochs")
 
+            epoch_global += 1
             stop_flag = torch.tensor([0], device=device)
             if is_main(rank) and last_improved > args.early_stop:
                 print(f"*** fold {val_year}: no improvement for {args.early_stop} epochs, stopping ***")
@@ -785,15 +1176,17 @@ def main():
                 "fold_idx": fold_idx,
                 "train_year_max": train_year_max,
                 "val_year": val_year,
+                "best_epoch": int(best_epoch),
                 "best_val_loss": float(best_val_loss),
                 "best_val_env_avg_pearson": float(best_val_env_pcc),
                 "best_checkpoint": best_ckpt_path,
             }
             fold_records.append(fold_record)
             wandb.log({
-                "fold/final/year": val_year,
-                "fold/final/best_val_loss": float(best_val_loss),
-                "fold/final/best_val_env_avg_pearson": float(best_val_env_pcc),
+                "rolling/fold/final/val_year": int(val_year),
+                "rolling/fold/final/best_epoch": int(best_epoch),
+                "rolling/fold/final/best_val_loss": float(best_val_loss),
+                "rolling/fold/final/best_val_env_avg_pearson": float(best_val_env_pcc),
             })
 
         dist.barrier()
@@ -801,19 +1194,26 @@ def main():
         torch.cuda.empty_cache()
 
     if is_main(rank) and fold_records:
-        import numpy as np
-
         mean_val_loss = float(np.mean([r["best_val_loss"] for r in fold_records]))
         std_val_loss = float(np.std([r["best_val_loss"] for r in fold_records]))
         mean_val_env_pcc = float(np.mean([r["best_val_env_avg_pearson"] for r in fold_records]))
         std_val_env_pcc = float(np.std([r["best_val_env_avg_pearson"] for r in fold_records]))
 
-        best_fold = max(fold_records, key=lambda r: r["best_val_env_avg_pearson"])
+        def _score(r):
+            pcc = r["best_val_env_avg_pearson"]
+            loss = r["best_val_loss"]
+            pcc_score = pcc if math.isfinite(pcc) else -float("inf")
+            loss_score = -loss if math.isfinite(loss) else -float("inf")
+            return (pcc_score, loss_score)
+
+        best_fold = max(fold_records, key=_score)
+        latest_fold = max(fold_records, key=lambda r: r["val_year"])
 
         table = wandb.Table(columns=[
             "fold_idx",
             "train_year_max",
             "val_year",
+            "best_epoch",
             "best_val_loss",
             "best_val_env_avg_pearson",
             "best_checkpoint",
@@ -823,6 +1223,7 @@ def main():
                 r["fold_idx"],
                 r["train_year_max"],
                 r["val_year"],
+                r["best_epoch"],
                 r["best_val_loss"],
                 r["best_val_env_avg_pearson"],
                 r["best_checkpoint"],
@@ -837,6 +1238,8 @@ def main():
             "cv/best_fold_val_year": best_fold["val_year"],
             "cv/best_fold_env_avg_pearson": best_fold["best_val_env_avg_pearson"],
             "cv/best_fold_checkpoint": best_fold["best_checkpoint"],
+            "cv/latest_fold_val_year": latest_fold["val_year"],
+            "cv/latest_fold_checkpoint": latest_fold["best_checkpoint"],
         })
 
         run.summary["cv/mean_val_loss"] = mean_val_loss
@@ -846,6 +1249,106 @@ def main():
         run.summary["cv/best_fold_val_year"] = best_fold["val_year"]
         run.summary["cv/best_fold_env_avg_pearson"] = best_fold["best_val_env_avg_pearson"]
         run.summary["cv/best_fold_checkpoint"] = best_fold["best_checkpoint"]
+        run.summary["cv/latest_fold_val_year"] = latest_fold["val_year"]
+        run.summary["cv/latest_fold_checkpoint"] = latest_fold["best_checkpoint"]
+
+        run.summary["rolling/test_eval_mode"] = rolling_test_eval_mode
+        run.summary["rolling/test_batch_size"] = int(rolling_test_batch_size)
+        run.summary["rolling/test_primary"] = rolling_test_primary
+
+        eval_records = _select_eval_records(fold_records, rolling_test_eval_mode)
+
+        def _finite_or_none(x):
+            x = float(x)
+            return x if math.isfinite(x) else None
+
+        if eval_records:
+            eval_metrics = {}
+            eval_record_map = {}
+            for tag, rec in eval_records:
+                ckpt_path = rec["best_checkpoint"]
+                if not ckpt_path:
+                    print(f"[WARN] No checkpoint path for selection tag '{tag}', skipping test eval.")
+                    continue
+                print(f"[TEST] Evaluating {tag} checkpoint: {ckpt_path}")
+                try:
+                    metrics, pcc_rows = _evaluate_checkpoint_on_test(
+                        checkpoint_path=ckpt_path,
+                        args=args,
+                        device=device,
+                        batch_size=rolling_test_batch_size,
+                    )
+                except Exception as e:
+                    print(f"[WARN] Test evaluation failed for {tag} ({ckpt_path}): {e}")
+                    continue
+
+                eval_metrics[tag] = metrics
+                eval_record_map[tag] = rec
+
+                tag_payload = {
+                    f"rolling/test/{tag}/pearson": _finite_or_none(metrics["global_pcc"]),
+                    f"rolling/test/{tag}/mse": _finite_or_none(metrics["global_mse"]),
+                    f"rolling/test/{tag}/env_avg_pearson": _finite_or_none(metrics["env_pcc"]),
+                    f"rolling/test/{tag}/env_avg_mse": _finite_or_none(metrics["env_mse"]),
+                    f"rolling/test/{tag}/env_avg_pearson_weighted": _finite_or_none(metrics["env_pcc_weighted"]),
+                    f"rolling/test/{tag}/n_test": int(metrics["n_test"]),
+                }
+                wandb.log({k: v for k, v in tag_payload.items() if v is not None})
+                for k, v in tag_payload.items():
+                    if v is not None:
+                        run.summary[k] = v
+                run.summary[f"rolling/test/{tag}/checkpoint"] = ckpt_path
+                run.summary[f"rolling/test/{tag}/val_year"] = int(rec["val_year"])
+                run.summary[f"rolling/test/{tag}/best_val_env_avg_pearson"] = float(rec["best_val_env_avg_pearson"])
+
+                if pcc_rows:
+                    pcc_table = wandb.Table(columns=["Env", "PCC", "Count"])
+                    for env_name, env_pcc_i, env_count in pcc_rows:
+                        pcc_table.add_data(env_name, float(env_pcc_i), int(env_count))
+                    wandb.log({f"rolling/test/{tag}/pcc_by_env": pcc_table})
+
+                print(
+                    f"[TEST] {tag}: "
+                    f"env_avg_pearson={metrics['env_pcc']:.5f}, "
+                    f"weighted_env_avg_pearson={metrics['env_pcc_weighted']:.5f}, "
+                    f"mse={metrics['global_mse']:.5f}, n={metrics['n_test']}"
+                )
+
+            primary_tag = None
+            if rolling_test_primary in eval_metrics:
+                primary_tag = rolling_test_primary
+            elif "best_fold" in eval_metrics:
+                primary_tag = "best_fold"
+            elif len(eval_metrics):
+                primary_tag = next(iter(eval_metrics.keys()))
+
+            if primary_tag is not None:
+                primary_metrics = eval_metrics[primary_tag]
+                primary_rec = eval_record_map[primary_tag]
+                primary_payload = {
+                    "test/pearson": _finite_or_none(primary_metrics["global_pcc"]),
+                    "test/mse": _finite_or_none(primary_metrics["global_mse"]),
+                    "test/env_avg_pearson": _finite_or_none(primary_metrics["env_pcc"]),
+                    "test/env_avg_mse": _finite_or_none(primary_metrics["env_mse"]),
+                    "test/env_avg_pearson_weighted": _finite_or_none(primary_metrics["env_pcc_weighted"]),
+                }
+                wandb.log({k: v for k, v in primary_payload.items() if v is not None})
+                for k, v in primary_payload.items():
+                    if v is not None:
+                        run.summary[k] = v
+                run.summary["test/source"] = f"rolling:{primary_tag}"
+                run.summary["test/source_checkpoint"] = primary_rec["best_checkpoint"]
+                run.summary["test/source_val_year"] = int(primary_rec["val_year"])
+                run.summary["test/source_best_val_env_avg_pearson"] = float(primary_rec["best_val_env_avg_pearson"])
+
+                if rolling_selected_ckpt_file:
+                    try:
+                        Path(rolling_selected_ckpt_file).parent.mkdir(parents=True, exist_ok=True)
+                        with open(rolling_selected_ckpt_file, "w") as f:
+                            f.write(primary_rec["best_checkpoint"])
+                        print(f"[INFO] Selected rolling checkpoint written to {rolling_selected_ckpt_file}")
+                    except Exception as e:
+                        print(f"[WARN] Failed writing selected checkpoint file '{rolling_selected_ckpt_file}': {e}")
 
     dist.barrier()
     if is_main(rank) and run is not None:
