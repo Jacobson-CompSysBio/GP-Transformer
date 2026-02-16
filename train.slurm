@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J group-dro-env
+#SBATCH -J baseline
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -60,10 +60,10 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 
-export LOSS="envmse" # + separated list of losses
+export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
@@ -92,7 +92,7 @@ export SHIFT_WEIGHT_CLIP_MAX=10.0
 export SHIFT_WEIGHT_POWER=1.0
 export SHIFT_LOSS_WEIGHT=0.05
 
-export GROUP_DRO=True
+export GROUP_DRO=False
 export GROUP_DRO_GROUP_BY=year   # env or year
 export GROUP_DRO_STEP_SIZE=0.01
 export GROUP_DRO_WEIGHT=0.05

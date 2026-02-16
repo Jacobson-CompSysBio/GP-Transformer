@@ -177,17 +177,17 @@ def main():
     # OOD robust training options
     shift_weighting = bool(getattr(args, "shift_weighting", False))
     shift_loss_weight = float(getattr(args, "shift_loss_weight", 0.0))
-    if shift_loss_weight > 0.0 and not shift_weighting:
-        shift_weighting = True
+    if not shift_weighting and shift_loss_weight != 0.0:
         if is_main(rank):
-            print("[INFO] Enabling shift weighting because shift_loss_weight > 0.")
+            print("[INFO] shift_weighting=false; ignoring shift_loss_weight and setting it to 0.0.")
+        shift_loss_weight = 0.0
 
     group_dro_enabled = bool(getattr(args, "group_dro", False))
     group_dro_weight = float(getattr(args, "group_dro_weight", 0.0))
-    if group_dro_weight > 0.0 and not group_dro_enabled:
-        group_dro_enabled = True
+    if not group_dro_enabled and group_dro_weight != 0.0:
         if is_main(rank):
-            print("[INFO] Enabling GroupDRO because group_dro_weight > 0.")
+            print("[INFO] group_dro=false; ignoring group_dro_weight and setting it to 0.0.")
+        group_dro_weight = 0.0
     group_dro_group_by = str(getattr(args, "group_dro_group_by", "env")).lower().strip()
     group_dro_step_size = float(getattr(args, "group_dro_step_size", 0.01))
 
