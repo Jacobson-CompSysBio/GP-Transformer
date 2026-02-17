@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J cmix-lite
+#SBATCH -J baseline
 #SBATCH -N 4
-#SBATCH -t 6:00:00
-#SBATCH -p extended
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -39,7 +39,7 @@ export MOE_EXPERT_HIDDEN_DIM=256
 export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
-# calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
+# calculate microbatch size given global batch size of ___ and N nodes * 8 gpus/node = 32 gpusextended
 export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
@@ -60,8 +60,9 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
+export ENV_CATEGORICAL_MODE=drop  # "drop" matches jacd5n45 baseline; "onehot" enables added categorical features
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -82,10 +83,10 @@ export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
 
 # C-Mixup selective regression mixup (within-environment target-aware pairing)
-export C_MIXUP=True
+export C_MIXUP=False
 export C_MIXUP_PROB=0.2
 export C_MIXUP_ALPHA=0.2
-export C_MIXUP_WEIGHT=0.1
+export C_MIXUP_WEIGHT=0.2
 export C_MIXUP_TEMP=0.25
 export C_MIXUP_TOPK=8
 export C_MIXUP_WARMUP_EPOCHS=20
@@ -148,6 +149,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --seed $SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -209,6 +212,7 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

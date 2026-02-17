@@ -125,6 +125,7 @@ def main():
             y_scalers=None,
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
+            env_categorical_mode=args.env_categorical_mode,
             marker_stats=None,
         )
         env_scaler = train_ds.scaler
@@ -138,6 +139,7 @@ def main():
             y_scalers=y_scalers,
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
+            env_categorical_mode=args.env_categorical_mode,
             marker_stats=marker_stats,
         )
 

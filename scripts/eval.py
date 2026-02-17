@@ -70,7 +70,8 @@ def load_data(args,
               env_scaler: StandardScaler | None = None,
               y_scalers: dict | None = None,
               marker_stats: dict | None = None,
-              g_input_type: str = "tokens"):
+              g_input_type: str = "tokens",
+              env_categorical_mode: str = "drop"):
 
     ds = GxE_Dataset(
         split=split,
@@ -79,6 +80,7 @@ def load_data(args,
         y_scalers=y_scalers,                           # <— pass dict here
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
+        env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
     )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
@@ -285,6 +287,11 @@ def load_model(device: torch.device,
     moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
     moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
     g_input_type = config.get("g_input_type", getattr(args, "g_input_type", "tokens"))
+    env_categorical_mode = config.get(
+        "env_categorical_mode",
+        ("onehot" if bool(config.get("env_cat_embeddings", False)) else getattr(args, "env_categorical_mode", "drop")),
+    )
+    env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
@@ -374,7 +381,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode
 
 def main():
     args = parse_args()
@@ -406,7 +413,7 @@ def main():
     torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)
     
     # load data
     print("Loading data...")
@@ -415,6 +422,7 @@ def main():
                                     y_scalers=y_scalers,   # <— name matches
                                     marker_stats=marker_stats,
                                     g_input_type=g_input_type,
+                                    env_categorical_mode=env_categorical_mode,
                                     split="test",
                                     batch_size=32)
 

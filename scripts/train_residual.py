@@ -125,10 +125,15 @@ def main():
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
+    env_categorical_mode = normalize_env_categorical_mode(
+        _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
+    )
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
         print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank):
+        print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
@@ -139,6 +144,7 @@ def main():
         y_scalers=None,
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
+        env_categorical_mode=env_categorical_mode,
         marker_stats=None,
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
@@ -161,6 +167,7 @@ def main():
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
+        env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
@@ -494,6 +501,8 @@ def main():
                              "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                              "moe_loss_weight": moe_loss_weight,
                              "g_input_type": g_input_type,
+                             "env_categorical_mode": env_categorical_mode,
+                             "env_cat_embeddings": (env_categorical_mode == "onehot"),
                              "full_tf_mlp_type": full_tf_mlp_type,
                              "full_transformer": args.full_transformer,
                              "contrastive_mode": contrastive_mode,
@@ -957,6 +966,8 @@ def main():
                         "c_mixup_topk": c_mixup_topk,
                         "c_mixup_warmup_epochs": c_mixup_warmup_epochs,
                         "g_input_type": g_input_type,
+                        "env_categorical_mode": env_categorical_mode,
+                        "env_cat_embeddings": (env_categorical_mode == "onehot"),
                         "full_tf_mlp_type": full_tf_mlp_type,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,

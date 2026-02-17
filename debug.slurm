@@ -58,6 +58,7 @@ export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export SCALE_TARGETS=False
 export G_INPUT_TYPE=grm   # options: "tokens", "grm"
+export ENV_CATEGORICAL_MODE=drop  # "drop" matches jacd5n45 baseline; "onehot" enables added categorical features
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -126,6 +127,7 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -178,6 +180,7 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS \
