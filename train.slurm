@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envmse-scaling
+#SBATCH -J cmix-lite
 #SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -t 6:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -63,7 +63,7 @@ export SEED=1
 export SCALE_TARGETS=True
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 
-export LOSS="envmse" # + separated list of losses
+export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
@@ -80,6 +80,15 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+
+# C-Mixup selective regression mixup (within-environment target-aware pairing)
+export C_MIXUP=True
+export C_MIXUP_PROB=0.2
+export C_MIXUP_ALPHA=0.2
+export C_MIXUP_WEIGHT=0.1
+export C_MIXUP_TEMP=0.25
+export C_MIXUP_TOPK=8
+export C_MIXUP_WARMUP_EPOCHS=20
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -151,6 +160,13 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --c_mixup $C_MIXUP \
+        --c_mixup_prob $C_MIXUP_PROB \
+        --c_mixup_alpha $C_MIXUP_ALPHA \
+        --c_mixup_weight $C_MIXUP_WEIGHT \
+        --c_mixup_temp $C_MIXUP_TEMP \
+        --c_mixup_topk $C_MIXUP_TOPK \
+        --c_mixup_warmup_epochs $C_MIXUP_WARMUP_EPOCHS \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

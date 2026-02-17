@@ -28,6 +28,7 @@ from utils.loss import (
     compute_grm_similarity,
     macro_env_pearson,
 )
+from utils.cmixup import sample_cmixup_pairs, mix_batch_inputs, mix_targets
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
@@ -379,6 +380,36 @@ def main():
                 f"temperature={env_contrastive_temperature}"
             )
 
+    # C-Mixup selective regression mixup
+    c_mixup_enabled = bool(getattr(args, "c_mixup", False))
+    c_mixup_prob = float(getattr(args, "c_mixup_prob", 0.3))
+    c_mixup_alpha = float(getattr(args, "c_mixup_alpha", 0.2))
+    c_mixup_weight = float(getattr(args, "c_mixup_weight", 0.2))
+    c_mixup_temp = float(getattr(args, "c_mixup_temp", 0.25))
+    c_mixup_topk = int(getattr(args, "c_mixup_topk", 8))
+    c_mixup_warmup_epochs = max(int(getattr(args, "c_mixup_warmup_epochs", 20)), 0)
+
+    if not c_mixup_enabled:
+        if (c_mixup_weight != 0.0) or (c_mixup_prob != 0.0):
+            if is_main(rank):
+                print("[INFO] c_mixup=false; ignoring C-Mixup weight/probability and disabling feature.")
+        c_mixup_weight = 0.0
+        c_mixup_prob = 0.0
+    elif c_mixup_weight <= 0.0 or c_mixup_prob <= 0.0 or c_mixup_alpha <= 0.0:
+        c_mixup_enabled = False
+        c_mixup_weight = 0.0
+        c_mixup_prob = 0.0
+        if is_main(rank):
+            print("[INFO] C-Mixup disabled because weight/prob/alpha are non-positive.")
+
+    if is_main(rank):
+        print(
+            "[INFO] C-Mixup: "
+            f"enabled={c_mixup_enabled}, prob={c_mixup_prob}, alpha={c_mixup_alpha}, "
+            f"weight={c_mixup_weight}, temp={c_mixup_temp}, topk={c_mixup_topk}, "
+            f"warmup_epochs={c_mixup_warmup_epochs}"
+        )
+
     # other options
     batches_per_epoch = len(train_loader)
     batches_per_eval = len(val_loader)
@@ -473,7 +504,14 @@ def main():
                              "g_contrastive_loss_type": contrastive_loss_type if use_g_contrastive else None,
                              "e_contrastive_enabled": use_e_contrastive,
                              "e_contrastive_weight": env_contrastive_weight if use_e_contrastive else None,
-                             "e_contrastive_temperature": env_contrastive_temperature if use_e_contrastive else None,},
+                             "e_contrastive_temperature": env_contrastive_temperature if use_e_contrastive else None,
+                             "c_mixup": c_mixup_enabled,
+                             "c_mixup_prob": c_mixup_prob,
+                             "c_mixup_alpha": c_mixup_alpha,
+                             "c_mixup_weight": c_mixup_weight,
+                             "c_mixup_temp": c_mixup_temp,
+                             "c_mixup_topk": c_mixup_topk,
+                             "c_mixup_warmup_epochs": c_mixup_warmup_epochs,},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -492,6 +530,10 @@ def main():
         if use_g_contrastive or use_e_contrastive:
             run.define_metric("train_loss/contrastive", step_metric="iter_num")
             run.define_metric("train_loss_epoch/contrastive", step_metric="epoch")
+        if c_mixup_enabled:
+            run.define_metric("train_loss/cmixup", step_metric="iter_num")
+            run.define_metric("train_loss/cmixup_weight_eff", step_metric="iter_num")
+            run.define_metric("train_loss/cmixup_active_frac", step_metric="iter_num")
 
         # track residual losses
         if args.residual:
@@ -608,6 +650,62 @@ def main():
                             loss_parts["contrastive_e"] = 0.0
                             loss_parts["contrastive_weight_eff_e"] = 0.0
                         loss_parts["contrastive"] = 0.0
+
+                if c_mixup_enabled:
+                    if c_mixup_warmup_epochs > 0:
+                        mix_warmup_factor = min(1.0, float(epoch_num) / float(c_mixup_warmup_epochs))
+                    else:
+                        mix_warmup_factor = 1.0
+
+                    if mix_warmup_factor > 0.0:
+                        mix_target = yb["total"] if args.residual else yb["y"]
+                        partner_idx, mix_lam, mix_active = sample_cmixup_pairs(
+                            y=mix_target.squeeze(-1),
+                            env_id=yb["env_id"],
+                            prob=c_mixup_prob,
+                            alpha=c_mixup_alpha,
+                            temperature=c_mixup_temp,
+                            topk=c_mixup_topk,
+                        )
+                        active_count = int(mix_active.sum().item())
+                        if active_count > 0:
+                            xb_mix = mix_batch_inputs(xb, partner_idx, mix_lam)
+                            if args.residual:
+                                logits_mix = model(xb_mix)
+                                y_total_mix = mix_targets(yb["total"], partner_idx, mix_lam)
+                                ymean_mix = mix_targets(yb["ymean"], partner_idx, mix_lam)
+                                resid_mix = mix_targets(yb["resid"], partner_idx, mix_lam)
+
+                                mix_main, _ = loss_function(
+                                    logits_mix["total"],
+                                    y_total_mix,
+                                    env_id=yb["env_id"],
+                                )
+                                mix_aux_ymean = F.mse_loss(logits_mix["ymean"], ymean_mix)
+                                mix_aux_resid = F.mse_loss(logits_mix["resid"], resid_mix)
+                                mix_loss = (
+                                    mix_main
+                                    + (args.lambda_ymean * mix_aux_ymean)
+                                    + (args.lambda_resid * mix_aux_resid)
+                                )
+                            else:
+                                logits_mix = model(xb_mix)
+                                y_mix = mix_targets(yb["y"], partner_idx, mix_lam)
+                                mix_loss, _ = loss_function(logits_mix, y_mix, env_id=yb["env_id"])
+
+                            mix_weight_eff = c_mixup_weight * mix_warmup_factor
+                            loss = loss + (mix_weight_eff * mix_loss)
+                            loss_parts["cmixup"] = float(mix_loss.detach().item())
+                            loss_parts["cmixup_weight_eff"] = float(mix_weight_eff)
+                            loss_parts["cmixup_active_frac"] = float(active_count / max(1, mix_target.size(0)))
+                        else:
+                            loss_parts["cmixup"] = 0.0
+                            loss_parts["cmixup_weight_eff"] = 0.0
+                            loss_parts["cmixup_active_frac"] = 0.0
+                    else:
+                        loss_parts["cmixup"] = 0.0
+                        loss_parts["cmixup_weight_eff"] = 0.0
+                        loss_parts["cmixup_active_frac"] = 0.0
 
                 moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
                 if moe_aux_loss is not None:
@@ -851,6 +949,13 @@ def main():
                         "moe_shared_expert": moe_shared_expert,
                         "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
                         "moe_loss_weight": moe_loss_weight,
+                        "c_mixup": c_mixup_enabled,
+                        "c_mixup_prob": c_mixup_prob,
+                        "c_mixup_alpha": c_mixup_alpha,
+                        "c_mixup_weight": c_mixup_weight,
+                        "c_mixup_temp": c_mixup_temp,
+                        "c_mixup_topk": c_mixup_topk,
+                        "c_mixup_warmup_epochs": c_mixup_warmup_epochs,
                         "g_input_type": g_input_type,
                         "full_tf_mlp_type": full_tf_mlp_type,
                         "loss": args.loss,

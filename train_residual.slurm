@@ -83,6 +83,15 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
 
+# C-Mixup selective regression mixup (within-environment target-aware pairing)
+export C_MIXUP=False
+export C_MIXUP_PROB=0.3
+export C_MIXUP_ALPHA=0.2
+export C_MIXUP_WEIGHT=0.2
+export C_MIXUP_TEMP=0.25
+export C_MIXUP_TOPK=8
+export C_MIXUP_WARMUP_EPOCHS=20
+
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
@@ -148,6 +157,13 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --c_mixup $C_MIXUP \
+        --c_mixup_prob $C_MIXUP_PROB \
+        --c_mixup_alpha $C_MIXUP_ALPHA \
+        --c_mixup_weight $C_MIXUP_WEIGHT \
+        --c_mixup_temp $C_MIXUP_TEMP \
+        --c_mixup_topk $C_MIXUP_TOPK \
+        --c_mixup_warmup_epochs $C_MIXUP_WARMUP_EPOCHS \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 

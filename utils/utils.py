@@ -98,6 +98,20 @@ def parse_args():
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
+    p.add_argument("--c_mixup", type=str2bool, default=False,
+                   help="Enable C-Mixup style selective mixup for regression")
+    p.add_argument("--c_mixup_prob", type=float, default=0.3,
+                   help="Per-sample probability of applying C-Mixup")
+    p.add_argument("--c_mixup_alpha", type=float, default=0.2,
+                   help="Beta(alpha, alpha) parameter for mixup coefficient")
+    p.add_argument("--c_mixup_weight", type=float, default=0.2,
+                   help="Weight for C-Mixup auxiliary loss term")
+    p.add_argument("--c_mixup_temp", type=float, default=0.25,
+                   help="Temperature for target-similarity partner sampling")
+    p.add_argument("--c_mixup_topk", type=int, default=8,
+                   help="Choose mixup partner from top-k closest targets within environment (0 = all)")
+    p.add_argument("--c_mixup_warmup_epochs", type=int, default=20,
+                   help="Linearly ramp C-Mixup weight for this many initial epochs")
     p.add_argument("--leo_val", type=str2bool, default=False,
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
@@ -151,13 +165,14 @@ def make_run_name(args) -> str:
         contr = ""
     
     ginput = "grm+" if getattr(args, "g_input_type", "tokens") == "grm" else ""
+    cmix = "cmix+" if getattr(args, "c_mixup", False) else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + cmix).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""
@@ -209,6 +224,14 @@ def make_run_name(args) -> str:
         moe_tag += f"_lb{short(moe_loss_weight)}"
 
     full_tag = ""
+    if getattr(args, "c_mixup", False):
+        full_tag = (
+            f"cmixw{short(getattr(args, 'c_mixup_weight', 0.2))}"
+            f"p{short(getattr(args, 'c_mixup_prob', 0.3))}"
+            f"a{short(getattr(args, 'c_mixup_alpha', 0.2))}"
+            f"t{short(getattr(args, 'c_mixup_temp', 0.25))}"
+            f"k{int(getattr(args, 'c_mixup_topk', 8))}"
+        )
 
     # loss tag
     terms = [t.strip().lower() for t in args.loss.split("+")]
