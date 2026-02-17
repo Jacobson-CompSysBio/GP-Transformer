@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J baseline
-#SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -J gbs2048
+#SBATCH -N 1
+#SBATCH -t 6:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -40,14 +40,14 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of ___ and N nodes * 8 gpus/node = 32 gpusextended
-export GBS=8192
+export GBS=512
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=1e-4
+export LR=5e-5
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -86,7 +86,7 @@ export LEO_VAL_FRACTION=0.15
 export C_MIXUP=False
 export C_MIXUP_PROB=0.2
 export C_MIXUP_ALPHA=0.2
-export C_MIXUP_WEIGHT=0.2
+export C_MIXUP_WEIGHT=0.5
 export C_MIXUP_TEMP=0.25
 export C_MIXUP_TOPK=8
 export C_MIXUP_WARMUP_EPOCHS=20
