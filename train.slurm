@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J gbs2048
-#SBATCH -N 1
-#SBATCH -t 6:00:00
-#SBATCH -p extended
+#SBATCH -J ada+xfuse
+#SBATCH -N 4
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -28,7 +28,7 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=True  # use FullTransformer architecture
+export FULL_TRANSFORMER=False  # use FullTransformer architecture
 
 # MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
@@ -40,14 +40,14 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of ___ and N nodes * 8 gpus/node = 32 gpusextended
-export GBS=512
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=5e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -65,10 +65,10 @@ export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches jacd5n45 baseline; "onehot" enables added categorical features
 
 # 3-branch-only architecture additions (ignored when FULL_TRANSFORMER=True)
-export ADAPTIVE_BRANCH_GATING=False
+export ADAPTIVE_BRANCH_GATING=True
 export BRANCH_GATE_HIDDEN=128
 export BRANCH_GATE_DROPOUT=0.0
-export CROSS_RESIDUAL_FUSION=False
+export CROSS_RESIDUAL_FUSION=True
 export CROSS_RESIDUAL_HIDDEN=256
 export CROSS_RESIDUAL_DROPOUT=0.1
 export CROSS_RESIDUAL_SCALE_INIT=0.0

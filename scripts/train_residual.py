@@ -263,6 +263,12 @@ def main():
         or (bool(args.g_enc) and str(g_encoder_type).lower() == "moe")
     )
 
+    if args.full_transformer and (adaptive_branch_gating or cross_residual_fusion):
+        raise ValueError(
+            "adaptive_branch_gating/cross_residual_fusion are implemented only for 3-branch models. "
+            "Set full_transformer=False to use them."
+        )
+
     if args.full_transformer:
         if args.residual:
             model = FullTransformerResidual(
@@ -288,8 +294,6 @@ def main():
                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                 moe_loss_weight=moe_loss_weight,
             ).to(device)
-        if is_main(rank) and (adaptive_branch_gating or cross_residual_fusion):
-            print("[INFO] adaptive_branch_gating/cross_residual_fusion are 3-branch-only features; ignoring because full_transformer=True.")
     elif args.residual:
         model = GxE_ResidualTransformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
