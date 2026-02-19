@@ -62,6 +62,7 @@ export EMB_SIZE=256
 export SEED=1
 export SCALE_TARGETS=True
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
+export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
 export LOSS="envmse" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -139,6 +140,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --seed $SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -193,6 +196,7 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

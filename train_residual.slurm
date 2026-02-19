@@ -57,6 +57,8 @@ export HEADS=4
 export EMB_SIZE=256
 export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb dim
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
+export G_INPUT_TYPE=tokens
+export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 export LOSS="envpcc+envmse+pcc+mse"
 export LOSS_WEIGHTS="1.0,0.1,0.1,0.1"
 export SCALE_TARGETS=False
@@ -136,6 +138,8 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -190,6 +194,8 @@ python -u scripts/eval.py \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
+    --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
