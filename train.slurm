@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J ada+xfuse
+#SBATCH -J ada+xfuse 
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -52,10 +52,10 @@ export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
 
-export G_LAYERS=1
-export LD_LAYERS=1
-export MLP_LAYERS=1
-export GXE_LAYERS=1 # applies to FullTF if used
+export G_LAYERS=2
+export LD_LAYERS=2
+export MLP_LAYERS=2
+export GXE_LAYERS=2 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=256
@@ -66,11 +66,11 @@ export ENV_CATEGORICAL_MODE=drop  # "drop" matches jacd5n45 baseline; "onehot" e
 
 # 3-branch-only architecture additions (ignored when FULL_TRANSFORMER=True)
 export ADAPTIVE_BRANCH_GATING=True
-export BRANCH_GATE_HIDDEN=128
-export BRANCH_GATE_DROPOUT=0.0
+export BRANCH_GATE_HIDDEN=256
+export BRANCH_GATE_DROPOUT=0.15
 export CROSS_RESIDUAL_FUSION=True
 export CROSS_RESIDUAL_HIDDEN=256
-export CROSS_RESIDUAL_DROPOUT=0.1
+export CROSS_RESIDUAL_DROPOUT=0.15
 export CROSS_RESIDUAL_SCALE_INIT=0.0
 
 export LOSS="envpcc" # + separated list of losses
