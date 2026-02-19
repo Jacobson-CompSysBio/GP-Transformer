@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
@@ -86,6 +86,121 @@ def preprocess_env_features(e_block: pd.DataFrame, env_categorical_mode: str) ->
         return e_proc.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
     return encode_env_categorical_features(e_block)
 
+
+def _extract_env_feature_block(
+    x_raw: pd.DataFrame,
+    n_env: int = 705,
+    env_categorical_mode: str = "drop",
+) -> pd.DataFrame:
+    """
+    Extract and preprocess environment feature columns from a raw X dataframe.
+    """
+    feature_df = x_raw.drop(columns=["id", "Env", "Year", "Hybrid", "Yield_Mg_ha"], errors="ignore")
+    if feature_df.shape[1] < n_env:
+        raise ValueError(
+            f"Feature matrix has fewer columns ({feature_df.shape[1]}) than n_env ({n_env}). "
+            "Check your X_* file layout."
+        )
+    e_block = feature_df.iloc[:, -n_env:]
+    return preprocess_env_features(e_block, env_categorical_mode)
+
+
+def compute_env_shift_scores(
+    x_raw: pd.DataFrame,
+    test_year: int = 2024,
+    env_categorical_mode: str = "drop",
+    n_env: int = 705,
+    use_test_covariates: bool = True,
+    eps: float = 1e-12,
+) -> pd.DataFrame:
+    """
+    Score each pre-test environment by covariate similarity to a reference pool.
+
+    If use_test_covariates=True, the reference pool is test_year and later envs.
+    Otherwise, the reference pool is the latest pre-test year (typically 2023).
+
+    Returns columns:
+      Env, Year, nearest_ref_env, distance_to_reference, similarity_to_reference
+    """
+    if "Env" not in x_raw.columns:
+        raise ValueError("X_* file must contain an 'Env' column.")
+
+    df = x_raw.copy()
+    if "Year" not in df.columns:
+        df["Year"] = df["Env"].astype(str).apply(_env_year_from_str)
+    else:
+        year = pd.to_numeric(df["Year"], errors="coerce")
+        missing = year.isna()
+        if missing.any():
+            year.loc[missing] = df.loc[missing, "Env"].astype(str).apply(_env_year_from_str).astype(float)
+        df["Year"] = year.astype(int)
+    df["Env"] = df["Env"].astype(str)
+
+    e_block = _extract_env_feature_block(
+        df,
+        n_env=n_env,
+        env_categorical_mode=env_categorical_mode,
+    )
+    e_block = e_block.copy()
+    e_block["Env"] = df["Env"].values
+
+    env_centroids = e_block.groupby("Env", sort=False).mean(numeric_only=True)
+    env_year = (
+        df[["Env", "Year"]]
+        .drop_duplicates(subset=["Env"])
+        .set_index("Env")["Year"]
+        .astype(int)
+    )
+    env_year = env_year.reindex(env_centroids.index)
+
+    pre_mask = env_year < test_year
+    if use_test_covariates:
+        ref_mask = env_year >= test_year
+    else:
+        if not pre_mask.any():
+            raise ValueError("No pre-test environments available for shift scoring.")
+        latest_pre_year = int(env_year[pre_mask].max())
+        ref_mask = env_year == latest_pre_year
+
+    pre_envs = env_centroids.loc[pre_mask]
+    ref_envs = env_centroids.loc[ref_mask]
+    if pre_envs.empty:
+        raise ValueError("No pre-test environments available for shift scoring.")
+    if ref_envs.empty:
+        raise ValueError(
+            "No reference environments available for shift scoring. "
+            f"test_year={test_year}, use_test_covariates={use_test_covariates}"
+        )
+
+    # Standardize on combined candidate+reference env centroids.
+    combined = pd.concat([pre_envs, ref_envs], axis=0)
+    scaler = StandardScaler()
+    combined_scaled = scaler.fit_transform(combined.to_numpy(dtype=np.float32))
+    n_pre = pre_envs.shape[0]
+    pre_scaled = combined_scaled[:n_pre]
+    ref_scaled = combined_scaled[n_pre:]
+
+    # Pairwise Euclidean distances: each pre env -> all reference envs.
+    diff = pre_scaled[:, None, :] - ref_scaled[None, :, :]
+    dists = np.sqrt(np.maximum((diff * diff).sum(axis=2), 0.0))
+
+    nearest_idx = dists.argmin(axis=1)
+    nearest_dist = dists[np.arange(n_pre), nearest_idx]
+    ref_names = ref_envs.index.to_numpy(dtype=object)
+    nearest_ref = ref_names[nearest_idx]
+
+    out = pd.DataFrame(
+        {
+            "Env": pre_envs.index.astype(str),
+            "Year": env_year.loc[pre_envs.index].astype(int).values,
+            "nearest_ref_env": nearest_ref.astype(str),
+            "distance_to_reference": nearest_dist.astype(float),
+        }
+    )
+    out["similarity_to_reference"] = 1.0 / (out["distance_to_reference"] + eps)
+    out = out.sort_values(["distance_to_reference", "Env"], ascending=[True, True]).reset_index(drop=True)
+    return out
+
 # ----------------------------------------------------------------
 # helper to get year from locations file
 def _env_year_from_str(env_str: str) -> int:
@@ -103,7 +218,12 @@ def compute_leo_val_envs(
     test_year: int = 2024,
     val_fraction: float = 0.15,
     seed: int = 42,
-) -> set:
+    strategy: str = "random",
+    env_categorical_mode: str = "drop",
+    n_env: int = 705,
+    use_test_covariates: bool = False,
+    return_shift_scores: bool = False,
+) -> set | Tuple[set, Optional[pd.DataFrame]]:
     """
     Compute which environments should be held out for LEO validation.
     
@@ -111,20 +231,49 @@ def compute_leo_val_envs(
     These environments are entirely held out from training to better
     simulate generalization to unseen environments (like the test set).
     """
+    strategy_norm = str(strategy).strip().lower()
     rng = np.random.default_rng(seed)
-    
-    # Get environments from years before test_year
-    x_raw = x_raw.copy()
-    x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
-    train_val_mask = x_raw['Year'] < test_year
-    
-    # Get unique environments from train/val pool
-    all_envs = x_raw.loc[train_val_mask, 'Env'].unique()
+
+    x_local = x_raw.copy()
+    if "Year" not in x_local.columns:
+        x_local["Year"] = x_local["Env"].astype(str).apply(_env_year_from_str)
+    else:
+        year = pd.to_numeric(x_local["Year"], errors="coerce")
+        missing = year.isna()
+        if missing.any():
+            year.loc[missing] = x_local.loc[missing, "Env"].astype(str).apply(_env_year_from_str).astype(float)
+        x_local["Year"] = year.astype(int)
+
+    train_val_mask = x_local["Year"] < test_year
+    all_envs = x_local.loc[train_val_mask, "Env"].astype(str).unique()
+    if len(all_envs) == 0:
+        raise ValueError("No pre-test environments available to build LEO split.")
     n_val_envs = max(1, int(len(all_envs) * val_fraction))
-    
-    # Randomly select environments for validation
-    val_envs = set(rng.choice(all_envs, size=n_val_envs, replace=False))
-    
+
+    shift_scores = None
+    if strategy_norm == "random":
+        val_envs = set(rng.choice(all_envs, size=n_val_envs, replace=False))
+    elif strategy_norm == "shift_aware":
+        shift_scores = compute_env_shift_scores(
+            x_local,
+            test_year=test_year,
+            env_categorical_mode=env_categorical_mode,
+            n_env=n_env,
+            use_test_covariates=use_test_covariates,
+        )
+        # Deterministic tie-break on distance using a seeded shuffle before stable sort.
+        shift_ranked = shift_scores.sample(frac=1.0, random_state=seed).sort_values(
+            ["distance_to_reference", "Env"],
+            kind="mergesort",
+        )
+        val_envs = set(shift_ranked.head(n_val_envs)["Env"].astype(str).tolist())
+    else:
+        raise ValueError(
+            f"Unsupported leo strategy '{strategy}'. Allowed: ['random', 'shift_aware']"
+        )
+
+    if return_shift_scores:
+        return val_envs, shift_scores
     return val_envs
 
 
@@ -147,6 +296,8 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 leo_val_strategy: str = "random",
+                 leo_shift_use_test_covariates: bool = False,
                  ):
         
         """
@@ -166,12 +317,17 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            leo_val_strategy (str): LEO env selection strategy: "random" or "shift_aware"
+            leo_shift_use_test_covariates (bool): when strategy="shift_aware", compare against test-year env covariates
         """
         super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
         self.leo_val = leo_val
+        self.leo_val_strategy = str(leo_val_strategy).strip().lower()
+        self.leo_shift_use_test_covariates = bool(leo_shift_use_test_covariates)
+        self.leo_shift_scores: Optional[pd.DataFrame] = None
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
@@ -223,10 +379,32 @@ class GxE_Dataset(Dataset):
         if leo_val and split in ("train", "val"):
             # Compute or use provided LEO val environments
             if leo_val_envs is None:
+                leo_source = x_raw
+                if self.leo_val_strategy == "shift_aware" and self.leo_shift_use_test_covariates:
+                    # Include test covariates for shift scoring while still filtering
+                    # train/val rows from pre-test years for actual dataset contents.
+                    x_test_path = data_path + "X_test.csv"
+                    if Path(x_test_path).exists():
+                        x_test_raw = pd.read_csv(x_test_path)
+                        x_test_raw = x_test_raw.loc[:, ~x_test_raw.columns.str.contains(r'^Unnamed')]
+                        if "Env" in x_test_raw.columns:
+                            leo_source = pd.concat([x_raw, x_test_raw], ignore_index=True, sort=False)
                 # First call (train split) - compute the held-out environments
-                leo_val_envs = compute_leo_val_envs(
-                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                leo_val_envs, shift_scores = compute_leo_val_envs(
+                    leo_source,
+                    test_year=2024,
+                    val_fraction=leo_val_fraction,
+                    seed=leo_seed,
+                    strategy=self.leo_val_strategy,
+                    env_categorical_mode=self.env_categorical_mode,
+                    n_env=N_ENV,
+                    use_test_covariates=self.leo_shift_use_test_covariates,
+                    return_shift_scores=True,
                 )
+                if shift_scores is not None:
+                    shift_scores = shift_scores.copy()
+                    shift_scores["is_leo_val"] = shift_scores["Env"].astype(str).isin(set(leo_val_envs))
+                self.leo_shift_scores = shift_scores
             self.leo_val_envs = leo_val_envs
             
             # Filter to years before test (2014-2023)

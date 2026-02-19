@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J longtest
-#SBATCH -N 2
-#SBATCH -t 24:00:00
-#SBATCH -p extended
+#SBATCH -N 4
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -40,14 +40,14 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
-export GBS=1024
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=5e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -65,6 +65,7 @@ export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
 export LOSS="envpcc" # + separated list of losses
+# conservative alternative: export LOSS="envpccw"
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
@@ -81,6 +82,8 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+export LEO_VAL_STRATEGY=shift_aware   # options: random, shift_aware
+export LEO_SHIFT_USE_TEST_COVARIATES=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -155,7 +158,9 @@ srun -N ${SLURM_NNODES} \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --leo_val_strategy $LEO_VAL_STRATEGY \
+        --leo_shift_use_test_covariates $LEO_SHIFT_USE_TEST_COVARIATES
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

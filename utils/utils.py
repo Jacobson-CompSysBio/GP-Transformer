@@ -81,7 +81,7 @@ def parse_args():
     p.add_argument("--scale_targets", type=str2bool, default=False)
 
     p.add_argument("--loss", type=str, default="pcc",
-                   help="composite loss string, e.g. 'mse+envpcc'")
+                   help="composite loss string, e.g. 'mse+envpcc' (supports envpccw).")
     p.add_argument("--loss_weights", type=str, default="1.0",
                    help="comma separated list of weights for each loss, e.g. '1.0,0.5'")
     p.add_argument("--contrastive_mode", type=str, default="none",
@@ -100,13 +100,17 @@ def parse_args():
     p.add_argument("--env_contrastive_temperature", type=float, default=0.5,
                    help="Temperature for environment contrastive loss")
     p.add_argument("--env_stratified", type=str2bool, default=False,
-                   help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
+                   help="Use environment-stratified sampling for envwise losses (recommended for envpcc/envpccw)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
     p.add_argument("--leo_val", type=str2bool, default=False,
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--leo_val_strategy", type=str, default="random", choices=["random", "shift_aware"],
+                   help="LEO env selection strategy: random or shift_aware (closest pre-test envs to reference covariates).")
+    p.add_argument("--leo_shift_use_test_covariates", type=str2bool, default=False,
+                   help="With leo_val_strategy=shift_aware, use test-year covariates as the reference pool.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
@@ -141,6 +145,12 @@ def make_run_name(args) -> str:
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
     leo = "leo+" if getattr(args, "leo_val", False) else ""
+    leo_strategy = str(_get_arg_env("leo_val_strategy", "LEO_VAL_STRATEGY", "random", str)).strip().lower()
+    leo_shift_use_test_covariates = _get_arg_env(
+        "leo_shift_use_test_covariates", "LEO_SHIFT_USE_TEST_COVARIATES", False, str2bool
+    )
+    leo_shift = "leoshift+" if (leo and leo_strategy == "shift_aware") else ""
+    leo_test = "leotest+" if (leo_shift and bool(leo_shift_use_test_covariates)) else ""
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -175,7 +185,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + leo_shift + leo_test + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

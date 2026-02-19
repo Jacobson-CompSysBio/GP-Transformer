@@ -75,6 +75,8 @@ export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+export LEO_VAL_STRATEGY=shift_aware   # options: random, shift_aware
+export LEO_SHIFT_USE_TEST_COVARIATES=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -139,7 +141,9 @@ srun -N ${SLURM_NNODES} \
         --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --leo_val_strategy $LEO_VAL_STRATEGY \
+        --leo_shift_use_test_covariates $LEO_SHIFT_USE_TEST_COVARIATES
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

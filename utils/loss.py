@@ -221,6 +221,64 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     return 1.0 - r_bar
 
 
+def envwise_pcc_weighted(
+    pred,
+    target,
+    env_id,
+    eps: float = 1e-8,
+    min_samples: int = 4,
+    weight_exponent: float = 1.0,
+):
+    """
+    Weighted per-environment Pearson loss.
+
+    Same per-env correlation computation as envwise_pcc, but aggregates
+    correlations with weights proportional to env sample count^weight_exponent.
+    This is a conservative variant that reduces high-variance influence from
+    tiny environments while staying environment-aware.
+    """
+    pred = pred.squeeze(-1).float()
+    target = target.squeeze(-1).float()
+    device = pred.device
+    env_id = env_id.to(device)
+
+    max_env = int(env_id.max().item()) + 1
+
+    def _accumulate(vec: torch.Tensor) -> torch.Tensor:
+        buf = vec.new_zeros(max_env)
+        return buf.scatter_add(0, env_id, vec)
+
+    ones = torch.ones_like(pred)
+    count = _accumulate(ones)
+    sx = _accumulate(pred)
+    sy = _accumulate(target)
+    sxx = _accumulate(pred ** 2)
+    syy = _accumulate(target ** 2)
+    sxy = _accumulate(pred * target)
+
+    n = count.clamp_min(1.0)
+    mean_x = sx / n
+    mean_y = sy / n
+    cov = sxy / n - mean_x * mean_y
+    var_x = (sxx / n - mean_x ** 2).clamp_min(eps)
+    var_y = (syy / n - mean_y ** 2).clamp_min(eps)
+
+    r_per_env = cov / (var_x.sqrt() * var_y.sqrt() + eps)
+    r_per_env = r_per_env.clamp(-1.0, 1.0)
+
+    valid = (count >= min_samples) & (var_x > eps) & (var_y > eps)
+    if not valid.any():
+        r = torch_pearsonr(pred, target)
+        if not torch.isfinite(r).all():
+            return (pred.sum() * 0.0) + 1.0
+        return 1.0 - r
+
+    r_valid = r_per_env[valid]
+    w_valid = count[valid].float().pow(float(weight_exponent)).clamp_min(eps)
+    r_bar = (r_valid * w_valid).sum() / w_valid.sum()
+    return 1.0 - r_bar
+
+
 ### other losses ### 
 def torch_spearmanr(pred: torch.Tensor,
                     target: torch.Tensor,
@@ -884,7 +942,7 @@ class CompositeLoss(nn.Module):
 # loss builder
 def build_loss(name: str, weights: str = None) -> CompositeLoss:
     """
-    name: string like "mse", "pcc", "mse+pcc", "envmse+tau+xi", etc.
+    name: string like "mse", "pcc", "mse+pcc", "envmse+envpccw", etc.
     weights: comma-separated weights for each loss term, in order (e.g. "1.0,0.5,0.1")
     returns a CompositeLoss instance
     """
@@ -907,6 +965,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
         if term == "envpcc":
             return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
+        if term == "envpccw":
+            return term, _CallableLoss(envwise_pcc_weighted, expects_env=True, name=term)
         if term == "envspearman":
             return term, _CallableLoss(envwise_spearman, expects_env=True, name=term)
         if term == "ktau":

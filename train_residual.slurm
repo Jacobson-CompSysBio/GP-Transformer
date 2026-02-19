@@ -60,6 +60,7 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 export LOSS="envpcc+envmse+pcc+mse"
+# conservative alternative for primary env term: envpccw
 export LOSS_WEIGHTS="1.0,0.1,0.1,0.1"
 export SCALE_TARGETS=False
 
@@ -84,6 +85,8 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # This better simulates test performance on unseen environments
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
+export LEO_VAL_STRATEGY=shift_aware   # options: random, shift_aware
+export LEO_SHIFT_USE_TEST_COVARIATES=True
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -153,7 +156,9 @@ srun -N ${SLURM_NNODES} \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --leo_val_strategy $LEO_VAL_STRATEGY \
+        --leo_shift_use_test_covariates $LEO_SHIFT_USE_TEST_COVARIATES
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

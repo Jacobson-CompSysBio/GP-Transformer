@@ -123,14 +123,28 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    leo_val_strategy = str(
+        _get_arg_or_env("leo_val_strategy", "LEO_VAL_STRATEGY", "random", str)
+    ).strip().lower()
+    leo_shift_use_test_covariates = _get_arg_or_env(
+        "leo_shift_use_test_covariates", "LEO_SHIFT_USE_TEST_COVARIATES", False, str2bool
+    )
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
+    if leo_val_strategy not in {"random", "shift_aware"}:
+        raise ValueError(
+            f"Unsupported leo_val_strategy='{leo_val_strategy}'. Allowed: ['random', 'shift_aware']"
+        )
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
         print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+        print(
+            f"[INFO] LEO strategy: {leo_val_strategy} "
+            f"(use_test_covariates={bool(leo_shift_use_test_covariates)})"
+        )
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -148,6 +162,8 @@ def main():
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
+        leo_val_strategy=leo_val_strategy,
+        leo_shift_use_test_covariates=leo_shift_use_test_covariates,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
@@ -157,6 +173,16 @@ def main():
     if is_main(rank) and leo_val:
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
         print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+        shift_scores = getattr(train_ds, "leo_shift_scores", None)
+        if shift_scores is not None and len(shift_scores):
+            held = shift_scores.loc[shift_scores["is_leo_val"]]
+            keep = shift_scores.loc[~shift_scores["is_leo_val"]]
+            held_mean = float(held["distance_to_reference"].mean()) if len(held) else float("nan")
+            keep_mean = float(keep["distance_to_reference"].mean()) if len(keep) else float("nan")
+            print(
+                "[INFO] LEO shift score (distance_to_reference, lower=more test-like): "
+                f"held_mean={held_mean:.4f}, kept_mean={keep_mean:.4f}"
+            )
     
     val_ds = GxE_Dataset(
         split="val",
@@ -170,6 +196,8 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        leo_val_strategy=leo_val_strategy,
+        leo_shift_use_test_covariates=leo_shift_use_test_covariates,
     )
     
     if is_main(rank) and leo_val:
@@ -445,7 +473,7 @@ def main():
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
-                             "selection_metric": "val/env_avg_pearson",
+                             "selection_metric": "val/env_avg_pearson (macro; tie-break val_loss)",
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
@@ -472,6 +500,10 @@ def main():
                              "g_input_type": g_input_type,
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                             "leo_val": bool(leo_val),
+                             "leo_val_fraction": float(leo_val_fraction),
+                             "leo_val_strategy": leo_val_strategy,
+                             "leo_shift_use_test_covariates": bool(leo_shift_use_test_covariates),
                              "full_tf_mlp_type": full_tf_mlp_type,
                              "full_transformer": args.full_transformer,
                              "contrastive_mode": contrastive_mode,
@@ -520,7 +552,10 @@ def main():
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val/env_avg_pearson (maximize)")
+        print(
+            "[INFO] Checkpoint/early-stop selection metric: "
+            "val/env_avg_pearson (macro, maximize; tie-break lower val_loss)"
+        )
 
     ### training loop ###
     for epoch_num in range(max_epochs):
