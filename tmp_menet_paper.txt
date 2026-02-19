@@ -1,0 +1,747 @@
+                   Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                   Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                 Plant Communications                                                                                                                                 llll
+                 Resource article
+                 MeNet:  A mixed-effect                                                     deep  neural  network                                                 for  
+                 multi-envi                      ronment                      genomic                        prediction                         of 
+                 agronom                       ic traits
+                                 1,4                          1,4                   1                     1                         2,3,                                     1,2, 
+                                                                                                                                         *                                        *
+                 Yanhui Li  , Shengjie Ren  , Jixiang Li , Jiyong Lee , Jianmin Wan                                                        and Xiangchao Gan 
+                 1 
+                  State Key Laboratory for Crop Genetics and Germplasm Enhancement and Utilization, Jiangsu Nanjing National Field Scientific Observation and Research Station 
+                 for Rice Germplasm, Key Laboratory of Biology, Genetics and Breeding of Japonica Rice in Mid-lower Yangtze River, Ministry of Agriculture and Rural Affairs, 
+                 Academy for Advanced Interdisciplinary Studies, Nanjing Agricultural University, Nanjing 210095, China
+                 2 
+                  Zhongshan Biological Breeding Laboratory, Nanjing 210095, China
+                 3 
+                  State Key Laboratory of Crop Gene Resources and Breeding, Institute of Crop Sciences, Chinese Academy of Agricultural Sciences, Beijing, China
+                 4 
+                  These authors contributed equally to this article.
+                 *Correspondence: Jianmin Wan (wanjianmin@caas.cn), Xiangchao Gan (gan@njau.edu.cn)
+                 https://doi.org/10.1016/j.xplc.2025.101620
+                 ABSTRACT
+                 Accurate genomic prediction of agronomic traits is critical for modern breeding and agriculture. Deep 
+                 learning has great potential to enhance prediction by modeling nonlinearity, but its applications remain 
+                 limited by inconsistent performance across diverse agronomic traits and environments and a lack of bio-
+                 logical interpretability. Here, we propose a mixed-effect deep neural network (MeNet), a novel framework 
+                 that unifies the statistical rigor of the mixed-effect model with the nonlinear modeling power of neural net-
+                 works to advance genomic prediction. It employs dual embeddings to model phenotype-specific genetic 
+                 relatedness as random effects and the cumulative nonlinear effect of genomic variants as fixed effects. 
+                 Their contributions are dynamically adjusted through adaptive learning of the genetic complexity of the 
+                 trait. When tested on three datasets from three crops, including 12 rice traits under three environments, 
+                 wheat grain yield under four environments, and three maize traits, MeNet achieved superior performance 
+                 in 34 of 36 evaluations, outperforming 11 state-of-the-art models, including conventional statistical models 
+                 and deep learning approaches. Notably, it exceeded the theoretical upper bound of additive heritability for 
+                 key traits, demonstrating its capacity to capture epistatic and gene-by-environment interactions. MeNet 
+                 enables direct exploitation of genomic variants without dimensionality reduction and scales robustly 
+                 with marker quantity. It performs cross-environment prediction using only 10% of field samples for training, 
+                 achieving, on average, a 57.07% gain over baseline models. MeNet’s robustness and generalizability under-
+                 score the potential for foundation models to streamline multi-site and multi-year prediction with minimal 
+                 field data for the breeding of climate-resilient crops.
+                 Key words: deep learning, genomic selection, trait prediction, transfer learning, nonlinear effects
+                 Li Y., Ren S., Li J., Lee J., Wan J., and Gan X. (2026). MeNet: A mixed-effect deep neural network for multi-
+                 environment genomic prediction of agronomic traits. Plant Comm. 7, 101620.
+                 INTRODUCTION                                                                        alytic role in modern crop and animal breeding  (Hayes and 
+                                                                                                     Goddard,  2010).
+                 Prediction  of agronomic  traits has wide applications  in modern 
+                 crop and animal breeding.  Technological  advances  in high-                        A mainstay in genomic prediction has been best linear unbiased 
+                 throughput  genotyping  have enabled  highly efficient  prediction  of              prediction (BLUP) (Meuwissen et al., 2001), which efficiently 
+                 phenotypic  traits for large populations  using genome-wide  variants               exploits pedigree or genetic relatedness among samples. BLUP 
+                 and phenotypic  data from a subset of samples.  The use of                          and its derivatives, including genomic BLUP (gBLUP), ridge 
+                 genomic prediction  models to facilitate  marker-assisted          selection,       regression BLUP (rrBLUP), compressed BLUP (cBLUP), and 
+                 trait introgression,    and even genome editing in both crops                       BayesBLUP, were introduced decades ago and remain among 
+                 and livestock  has progressively      come to perform  a central  and cat-          the most widely used genomic prediction tools in modern
+                                           Plant Communications 7, 101620, February 9 2026 © 2025 The Authors. Published by Elsevier Inc. on behalf of                            1
+                               CAS Center for Excellence in Molecular Plant Sciences, Chinese Academy of Sciences, Chinese Society for Plant Biology. 
+                                                      This is an open access article under the CC BY license (http://creativecommons.org/licenses/by/4.0/).
+                                        Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                                        Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                                     Plant Communications                                                                                                                                               MeNet for genomic prediction of agronomic traits
+                                     breeding (Meher et al., 2022). These models, especially rrBLUP,                                                                                       background as random effects and the other capturing the cumu-
+                                     are robust and can provide reliable performance in predicting a                                                                                       lative impact of genomic variants with nonlinear interactions as 
+                                     variety of agronomic traits (Xiang et al., 2024). Other methods,                                                                                      fixed effects. MeNet adaptively changes its weights during 
+                                     including Lasso regression (Tibshirani, 1996) and Bayesian                                                                                            training through adaptive learning of the genetic complexity of 
+                                     approaches (BayesA, BayesB, and BayesC) (De Los Campos                                                                                                the trait. Unlike most DL genomic prediction approaches that 
+                                     et al., 2009; Gianola et al., 2009; Gianola, 2013), do not                                                                                            depend heavily on dimensionality reduction to avoid overfitting, 
+                                     explicitly  incorporate  genetic  relatedness  information  but                                                                                       the architecture of the mixed-effect model of MeNet enables 
+                                     instead extend the linear model to capture the functional                                                                                             straightforward exploitation of all genomic variants, thus offering 
+                                     impact of genomic variation through various prior distributions                                                                                       high scalability. We applied MeNet to 36 predictions for three 
+                                     and regularization techniques. In general, the statistical models                                                                                     crops from three publicly available datasets. We then evaluated 
+                                     underlying these traditional methods are linear. Although they                                                                                        MeNet’s robustness under data-limited scenarios and produced 
+                                     excel at modeling additive genetic effects, they inherently                                                                                           cross-environment predictions using 10% of the samples for 
+                                     overlook higher-order interactions, such as gene-by-gene or                                                                                           training and validation, simulating the resource constraints faced 
+                                     gene-by-environment interactions.                                                                                                                     in practical breeding programs.
+                                     In breeding, dominance effects and epistatic effects from gene– 
+                                     gene and gene–environment interactions make significant contri-                                                                                       RESULTS
+                                     butions to phenotypic divergence (Cheverud and Routman, 1995;                                                                                         An architecture designed for MeNet
+                                     Mackay, 2001; Rogers et al., 2021). Although these effects can 
+                                     theoretically be analyzed using linear models with specialized                                                                                        The linear mixed-effects model (LMM) has wide applications in 
+                                     variant-coding  schemes  or  interaction  variables  (Cheverud                                                                                        statistical analyses, including genome-wide association studies 
+                                     et al., 1999), it is often impractical to do so in genome-wide asso-                                                                                  (GWASs) (the Million Veteran Program et al., 2018). However, 
+                                     ciation or genomic prediction studies. These interactions typically                                                                                   traditional LMMs focus on additive genetic effects and cannot 
+                                     exhibit high nonlinearity in phenotypic traits, and traditional sta-                                                                                  efficiently account for epistatic effects. The nonlinear mixed-
+                                     tistical models often fail to adequately account for such effects,                                                                                    effects  model,  which  also  allows  for  epistasis,  can  be 
+                                     thereby markedly reducing the accuracy of trait prediction. To                                                                                        formulated as
+                                     embrace nonlinearity for genomic prediction, machine learning                                                                                                                    y = β  ∑                                 ∑
+                                                                                                                                                                                                                                      +          β X +                  θ X ∗ X +Zγ + ϵ;
+                                     (ML)-based algorithms have been proposed. Notable algorithms                                                                                                                                  0                i  i                  ij    i        j 
+                                     include support vector machines (Ogutu et al., 2011), decision                                                                                                                                          i               (i;j) ∈ C
+                                                                                                                                                       ´ 
+                                     trees, and random forests (RFs) (Montesinos Lopez et al., 
+                                     2022). Subsequent advances in learning strategies, such as                                                                                            where y is the phenotype, X is the ith genomic variant, i,j is a com-
+                                                                                                                                                                                                                                                      i 
+                                     those used by extreme gradient boosting (XGBoost) (Abdollahi-                                                                                         bination of interacting genomic variants, Zγ is the random effect 
+                                     Arpanahi et al., 2020) and light gradient boosting machine (Yan                                                                                       related to genetic relatedness, and ε is the noise or environmental 
+                                     et al., 2021), have significantly improved predictive performance.                                                                                    factors. Unfortunately, the explicit incorporation of epistasis into 
+                                                                                                                                                                                           LMMs in this manner is impractical, as the computational de-
+                                     In recent years, deep neural networks  (DNNs) (Wang et al., 2023),                                                                                    mand for exhaustive searching of pairwise interactions is 
+                                     such as convolutional  neural networks  (Ma et al., 2024), long short-                                                                                extremely high, even for a moderate number of genetic markers.
+                                     term memory networks (Okut, 2021), and Transformer-based                                                                                      
+                                     methods  (e.g.,  DNABERT-2   and  Nucleotide   Transformer                                                                                            Here, we model traits using a specially designed DNN, MeNet, to 
+                                     [Ji et al., 2021; Dalla-Torre  et al., 2025; Zhou et al., 2024a]), have                                                                               effectively capture the nonlinear cumulative effects of genomic 
+                                     shown  considerable   potential   for  prediction   tasks.  These                                                                                     variants (Figure 1A). In practice, most DNNs that have been 
+                                     methods are particularly  favored for modeling  the functional                                                                                        applied to genomic prediction show promising performance in 
+                                     impact of genomic variation  and capturing  nonlinear  interactions                                                                                   capturing nonlinearity. MeNet addresses two key limitations 
+                                     and latent patterns  within genotypic  data (Wang et al., 2022).                                                                                      inherent to these networks. First, DNNs have an inherent 
+                                     Most deep learning  (DL) genomic prediction  approaches  focus                                                                                        demand for a large number of samples (Hollmann et al., 2025) 
+                                     on exploiting  multi-scale  information  from genomic variants  and                                                                                   and struggle to deliver stable results with the medium-sized 
+                                     depend heavily on dimensionality  reduction  to avoid overfitting                                                                                     datasets (often <10 000 training samples) or small datasets 
+                                     (Du et al., 2018). Little attention  is paid to genetic background                                                                                    (often <2000) regularly used in breeding. The second limitation 
+                                     information.   Although   DL  methods  have  demonstrated                                                                                             stems from the fact that dense markers are increasingly used 
+                                     significant  promise in genomic prediction,  they frequently  suffer                                                                                  for genomic prediction, as genome sequencing becomes a 
+                                     from inconsistent  performance  across different  agronomic  traits,                                                                                  regular  practice  for  genotyping.  The  enriched  association 
+                                     and most importantly,  they often lack biological  interpretability                                                                                   among genomic markers, called linkage disequilibrium (LD), 
+                                     (Zou et al., 2019). A comprehensive  framework  that exploits  both                                                                                   frequently leads to an increased computational load. As a 
+                                     linear and nonlinear  relationships  to account for the complexity                                                                                    consequence, existing DNNs depend heavily on dimensionality 
+                                     of genetic architectures  and integrates  both genetic background                                                                                     reduction.
+                                     information  and the cumulative  impact of genomic variation  for 
+                                     prediction  would greatly enhance our understanding  of complex                                                                                       MeNet employs a dual-branch architecture (Figure 1A), with one 
+                                     traits and genomic prediction.                                                                                                                        branch modeling fixed effects and the other modeling random 
+                                                                                                                                                                                           effects,  which  represents  genetic  relatedness  information 
+                                     Here, we propose a mixed-effect DNN (MeNet). It models genetic                                                                                        among  samples  (referred  to  as  RepGeno).  RepGeno 
+                                     information with dual embeddings: one representing the genetic                                                                                        generates embeddings by capturing phenotype-specific genetic
+                                     2             Plant Communications 7, 101620, February 9 2026
+                 Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                 Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+               MeNet for genomic prediction of agronomic traits                                                             Plant Communications
+                          A
+                          B                                                          C
+               Figure 1. Overview of MeNet for trait prediction.
+               (A) The architecture of MeNet. The input consists of genomic variation data from the population and phenotypic data from a subset of samples. RepGeno 
+               is designed to extract embeddings representing genetic background information. In parallel, a CNN-based VE network extracts embeddings repre-
+               senting the cumulative impact of genomic variation. The embeddings from both modules are integrated for training with the observed phenotypic data, 
+               enabling accurate trait prediction.
+               (B) Trait-aware contrastive learning for training the RepGeno module.
+               (C) Details of the cross-information feature fusion unit of the fusion module.
+               relatedness via trait-aware triplet contrastive learning (Figure 1B),     inbred line populations and a four-way multiparent advanced 
+               distinguishing it from the genetic relatedness matrix in LMMs by          generation inter-cross population (Wei et al., 2024). Numeric 
+               incorporating phenotypic information. In parallel, the variation          phenotypes for 12 agronomic traits were collected across three 
+               embedding (VE) module, implemented as a residual-enhanced                 sites with different photoperiods and temperatures: Shanghai, 
+               convolutional network, models the nonlinear effects of genomic            Hangzhou, and Hainan. The other two datasets are a wheat 
+               variants. These two embeddings are integrated through the                 dataset of grain yield (GY) (n = 599) across 4 environments 
+               fusion module (Figure 1C), and MeNet dynamically adjusts                  (Crossa et al., 2010) and a maize dataset with 3 traits (n = 8652) 
+               their  contributions  with  adaptive  learning  of  the  genetic          (Xiao et al., 2021). The detailed analyses are based on the rice 
+               complexity of the target phenotype. In practice, this novel               dataset, which is the most comprehensive of the three. The rice 
+               architecture  not  only  increases  the  stability  of  predictive        traits include culm length (CL), plant height (PH), heading date 
+               performance for traits across multiple environments but also              (HD), GY, grain length (GL), grain width (GW), grain protein 
+               enhances  robustness  with  medium  sample  sizes.  The                   content (GPC), leaf length (LL), leaf width (LW), leaf angle (LA), 
+               integration enhances the model’s capacity to leverage both                panicle length (PL), and panicle number (PN). These traits are 
+               latent  population  genetic  relatedness  and  variant  signals,          generally believed to differ significantly in genetic complexity. 
+               thereby supporting accurate modeling of complex genotype–                 For instance, previous studies have shown that rice HD has 
+               phenotype associations. In both modules, the genomic markers              very high heritability, and HDs of a population growing in the 
+               are used in a straightforward manner. If the number of genomic            same field can be predicted accurately using only 11 genes 
+               markers is too large (>100 000 by default), chromosome-by-                (Zhang et al., 2019; Kawakita et al., 2024). By contrast, GY is 
+               chromosome processing or a sliding window is used.                        one of the most challenging traits to predict, as it is a complex 
+                                                                                         trait with low heritability that involves many small-effect genes, 
+               Performance of MeNet for multiple agronomic traits                        and it is heavily influenced by environmental and cultivation fac-
+                                                                                         tors (Spindel et al., 2015).
+               We evaluated the overall performance of MeNet using three pub-
+               licly available datasets. The first dataset is an 18 000-panel rice       We used the same datasets to compare MeNet with 11 represen-
+               population (n = 18 421 accessions) that contains 15 recombinant           tative  models:  RF,  XGBoost,  BayesC,  rrBLUP,  SoyDNGP
+                                                                                                   Plant Communications 7, 101620, February 9 2026           3
+                    Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                    Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                  Plant Communications                                                          MeNet for genomic prediction of agronomic traits
+                             A                                                             B
+                                                                                        C
+                                                                                        D
+                  Figure 2. Performance of MeNet on three datasets from three crops.
+                                                               2 
+                  (A) Bar charts showing the predictive ability (R ) of MeNet compared with that of RF, XGBoost, BayesC, rrBLUP, SoyDNGP, WheatGP, GPformer, 
+                  Cropformer, contrastive learning and chromosome-aware network (CLCNet), VMGP, and DeepCCR for rice (Shanghai), wheat, and maize traits with a 
+                  6:2:2 split for training, validation, and test sets.
+                  (B) Regression analysis of observed versus predicted HDs in the Shanghai region using MeNet, rrBLUP, and DeepCCR. For simplicity, only 10% of the 
+                  data points were randomly selected for the plot.
+                  (C) For the Shanghai phenotypic data, comparison of error metrics for MeNet, rrBLUP, and DeepCCR in predicting GY, HD, and GPC.
+                                                                    2 
+                  (D) Statistical plot of predictive performance ranks (R 
+                                                                     ) across 36 tests by seven models, shown as a heatmap.
+                  (Gao et al., 2023), WheatGP (Wang et al., 2025b), GPformer (Wu          and test sets, with each set showing the same distribution 
+                  et al., 2023), Cropformer (Wang et al., 2025a), contrastive learning    (Supplemental Figure 1). For the 12 rice traits measured in 
+                  and chromosome-aware network (CLCNet) (Huang et al., 2024),             Shanghai,  MeNet  achieved  the  highest  coefficient  of 
+                                                                                                              2 
+                  DeepCCR (Ma et al., 2024), and variational auto-encoder-based           determination  (R )  among  all  the  models  (Figure  2A; 
+                  multi-task genomic prediction (VMGP) (Zhao et al., 2025).               Supplemental Table 1) and showed a clear advantage in HD 
+                  These models included two traditional methods, two ML-based             prediction compared with the other methods (Figure 2B). For 
+                  approaches, and seven DL-based approaches. All models were              maize, when predicting three key agronomic traits within the 
+                                                                                                                                                             2
+                  trained and tested with a 6:2:2 split for the training, validation,     same environment, MeNet consistently achieved the highest R 
+                  4      Plant Communications 7, 101620, February 9 2026
+                Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+               MeNet for genomic prediction of agronomic traits                                                         Plant Communications
+               A                                            B                                               Figure 3. The predictive ability of MeNet 
+                                                                                                            demonstrates high efficiency in capturing 
+                                                                                                            nonlinearity.
+                                                                                                            Predictive performance of MeNet and rrBLUP for 
+                                                                                                            PH (A) and HD (B) in Shanghai.
+                                                                                                            values of the models. To investigate its 
+                                                                                                            role in MeNet’s performance, we focused 
+                                                                                                            on two traits, PH and HD, measured in 
+                                                                                                            Shanghai. The original paper (Wei et al., 
+                                                                                                                                     2                2 
+                                                                                                            2024) estimated that H  = 0.938 and h  = 
+                                                                                                            0.791 for PH, indicating that approximately 
+                                                                                                            93.8% of the phenotypic variation could 
+                                                                                                            be attributed to genetic factors and that 
+                                                                                                            approximately 79.1% was additive. For 
+                                                                                             2               2 
+               values among all tested methods. For wheat across four different       HD, H = 0.767 and h = 0.702. For both traits, non-additive ge-
+               environments, MeNet also delivered the best prediction ability,        netic effects contributed significantly to phenotypic variance.
+                                    2 
+               with the highest R  for all GY traits. These results clearly 
+               demonstrate the universality and superiority of MeNet for              In theory, for an independent test set with independent errors, the 
+                                                                                                           2 
+               genomic prediction across multiple species, environments, and          prediction metric R  of any linear prediction model should not 
+                                                                                                                                   2 
+               traits, highlighting its robustness and broad applicability in         exceed the additive heritability of the trait, h , which is sometimes 
+               diverse breeding contexts (Figure 2A; Supplemental Table 1).           called the "Visscher bound" (Visscher et al., 2008). In the 
+                                                         2                            Shanghai rice dataset, this held true for rrBLUP: it achieved an 
+               When the 12 methods were ranked by R , MeNet placed first in 
+                                                                                        2 
+               34 out of 36 tests and second in the remaining two, whereas            R  of 0.793 for PH, which is essentially consistent with the 
+               the ranks of the other methods varied markedly among different         overall  additive  heritability  (Figure  3).  Although  rrBLUP 
+               traits or environments (Figure 2D). In fact, it is difficult to        performed well for this trait, MeNet improved the performance 
+                                                                                                                                   2 
+               determine which model was the second best among the other              by 3.03%, with a prediction metric R  of 0.817, notably 
+                                                                                                                   2 
+               11 tested models. The consistent performance of MeNet across           exceeding the reported h . This suggests that MeNet can 
+               multiple phenotypes underscores its robustness and strong              effectively  capture  nonlinear  information  beyond  additive 
+               adaptability to a wide range of agronomic traits.                      effects. A similar pattern was observed for HD. rrBLUP yielded 
+                                                                                           2 
+                                                                                      an R  of 0.651, and MeNet achieved an 11.37% improvement, 
+                                                                                                       2 
+               We also evaluated other numeric metrics for the rice dataset.          producing an R of 0.725, well above the additive heritability of 
+                                                                                       2 
+               MeNet had the highest overall performance in terms of the              h = 0.702.
+               average Pearson correlation coefficient (PCC) (red lines) and me-
+               dian PCC (blue lines) for all traits in Hangzhou and Hainan            We further analyzed the ability of the model to capture nonlinear 
+               (Supplemental  Figure  2).  MeNet  consistently  yielded  the          responses  using  locally  weighted  scatterplot  smoothing 
+               smallest normalized mean square error, relative root mean              (LOWESS) (Cleveland and Devlin, 1988). We constructed joint 
+               square error, and mean absolute percentage error when predict-         density plots of the observed values and MeNet-predicted values 
+               ing GY, GPC, and HD (Figure 2C; Supplemental Table 2).                 for 12 major phenotypic traits in the Shanghai dataset and over-
+                                                                                      laid them with LOWESS fitted curves (Supplemental Figure 5). We 
+               We also tested the prediction ability of MeNet for medium-sized        observed significant bends in our LOWESS curves, indicating the 
+               samples. We compared the performance of all models trained             ability of MeNet to capture nonlinearity embedded in the pheno-
+               and tested using a 3:2:5 split for the training, validation, and       typic data. The plots also revealed some distinct nonlinear pat-
+               test sets; that is, only half of the samples were used for training    terns. For example, most density plots exhibited an asymmetric 
+               and parameter optimization. MeNet still showed excellent predic-       ‘‘banana-shaped’’ distribution, suggesting that the model pro-
+               tive ability (Supplemental Figures 3 and 4).                           vides higher predictive accuracy in the mid-range values while 
+                                                                                      potentially  applying  different  response  mechanisms  in  the 
+               Robustness of MeNet for prediction of nonlinear                        extreme-value regions. MeNet is capable of identifying the 
+               relationships                                                          nonlinear relationships between genotype and phenotype across 
+               Robust prediction of nonlinear relatedness is a hallmark of DNNs       different value ranges, highlighting its potential to model complex 
+               (Krizhevsky et al., 2017). We investigated the nonlinearity of         phenotypic variations. Taken together, these results demonstrate 
+               MeNet for prediction based on the heritability of traits. There        that MeNet is highly effective at capturing nonlinear genetic 
+               are two types of heritability: broad-sense and narrow-sense her-       effects.
+                                                   2) 
+               itability. Broad-sense heritability (H  reflects the overall contribu-
+               tion of genetic factors to phenotypic variance and includes both       Adaptive learning on contributions reflects genetic 
+               additive and non-additive effects, whereas narrow-sense herita-        complexity of quantitative traits in MeNet
+                      2                                                               We next examined the contribution of genetic background and 
+               bility (h 
+                       ) is confined to additive effects. In a similar manner, the 
+                                                        2                             the effect of variants on trait prediction by MeNet using the inte-
+               predictive ability of models in terms of R is measured by the pro-
+               portion of phenotypic variance explained (PVE) by the predicted        grated gradient (IG) method (Sundararajan et al., 2017) (Figure 4).
+                                                                                                 Plant Communications 7, 101620, February 9 2026        5
+                    Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                    Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                  Plant Communications                                                            MeNet for genomic prediction of agronomic traits
+                  Figure 4. Dynamic patterns of contributions from RepGeno and VE during training for the Shanghai dataset as revealed by IG.
+                  Among 12 agronomic traits, HD, PH, CL, GL, GW, and LW exhibited significantly higher weights for VE (genomic variation information) than for RepGeno 
+                  (genetic background information). By contrast, for PL, PN, LL, LA, GY, and GPC, the weights of RepGeno were much higher than those of VE.
+                  IG estimates the importance of each input feature by integrating          genomic variants. This aligns well with our understanding that 
+                  the gradients of the model’s output with respect to its inputs            large-effect genes underlie these traits in the dataset and is 
+                  along a straight-line path from a baseline input to the actual input.     consistent with the GWAS results (Supplemental Figure 6).
+                                                           [              ] 
+                  In our model, the final embedding z =  z           ; z   is achieved 
+                                                             RepGeno   VE 
+                  by combining the genetic relatedness embedding z                 and      For traits such as PL, PN, LL, LA, GY, and GPC, RepGeno weights 
+                                                                           RepGeno 
+                  the variant embedding z  . We computed the IG of the model                (red lines) were substantially higher than VE weights (blue lines). 
+                                             VE 
+                  output F(z) with respect to z, using a zero vector 0 as the baseline.     These traits are, in general, affected by a large number of 
+                                                                                            small-effect genes, as demonstrated by the GWAS results. 
+                  Notably, traits with similar genetic architectures exhibited analo-       Instead of directly garnering small effects from a large number 
+                  gous weight-distribution patterns. For example, HD, PH, CL, GL,           of variants dispersed across the whole genome, which would 
+                  GW, and LW, which share similar genetic underpinnings, showed             require intensive network training, MeNet leverages genetic 
+                  nearly identical weight trajectories during training. The final           background information. Because a large number of small-
+                  weights of VE (genomic variation information), ranging from 0.            effect variants lead to a higher correlation with genomic back-
+                  70 to 0.90, were significantly higher than those of RepGeno, indi-        ground metrics, such as identity by descent or identity by state, 
+                  cating that the prediction of these traits relies primarily on key        shifting to RepGeno improves predictive reliability and efficiency.
+                  6      Plant Communications 7, 101620, February 9 2026
+                  Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                  Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                MeNet for genomic prediction of agronomic traits                                                                    Plant Communications
+                The weight distribution between the genetic background and the                In theory, dimensionality reduction of genomic markers leads to 
+                cumulative impact of genomic variation in MeNet reflects the ge-              the loss of genomic information, thus reducing the PVE. Indeed, 
+                netic complexity of the trait and has important implications for ge-          a steady upward trend for PVE was observed as the number of 
+                netic studies and breeding practices. Accordingly, network                    markers increased (Figure 5A). Across 12 traits, PVE and 
+                weights could serve as indicators of a trait’s genetic architecture.          predictive ability were synchronized and exhibited a correlation 
+                Furthermore, MeNet’s adaptive weighting is highly consistent                  coefficient  ranging  from  0.599  to  0.994  (Figure  5B).  This 
+                with breeding practices. For traits such as HD, PH, and CL, where             strong positive correlation across all traits suggests a direct 
+                several genes with large effects are predominant, germplasm                   relationship. Structural equation modeling indicated that PVE 
+                enhancement could be achieved by introducing genomic variants                 was causally linked to predictive ability. The path coefficient 
+                into key genes or their regulatory elements. For example, precise             from PVE to predictive ability was highly significant (β = 1.04, 
+                modulation of the regulatory elements of three genes has been                 p < 0.001). These findings confirm that the model’s predictive 
+                shown to generate rice plants with a broad phenotypic spectrum                performance is driven primarily by the PVE.
+                of HDs (Zhou et al., 2024b). By contrast, for complex traits such 
+                as GY and GPC, successful breeding typically involves crossing                To further explore the effect of marker number on PVE and, sub-
+                elite cultivars, followed by intensive selection to accumulate a              sequently, predictive ability, we subdivided our analysis into two 
+                broader genetic background with an improved combination of                    LD-threshold intervals, 0.1–0.3 and 0.3–0.5 (Figure 5C), in the 
+                small-effect loci. This specific interpretability not only enhances           Shanghai dataset. Within the 0.1–0.3 interval, the PVE for 12 
+                our understanding of trait-prediction mechanisms but also sug-                                                                    2 
+                                                                                              traits increased by 2.17%–79.62%, and R  increased by 4. 
+                gests that MeNet is a promising tool for dissecting trait heritability        60%–25.62%. By contrast, within the 0.3–0.5 range, PVE 
+                patterns and guiding precision breeding strategies.                                                                          2 
+                                                                                              changed by only   2.00%–2.09%, and R changed by 2.06% to 
+                                                                                              10.10%. This suggests that in populations with sufficiently large 
+                                                                                              sample sizes, when only a small number of markers are used, 
+                The scaling law of genomic variants for prediction                            predictive ability can be significantly enhanced by increasing 
+                In genomic prediction,  the number of variants  used for prediction           marker  number,  as  long  as  PVE  continues  to  improve. 
+                affects   not  only  computational   complexity   and  model                  However, this benefit diminishes rapidly as PVE saturates. In 
+                performance  but also genotyping  costs in the field. Previous                addition, the ‘‘large P, small N’’ problem may increase the risk 
+                studies have often suggested  feature selection  or multivariate              of overfitting in DL models, offsetting potential gains from 
+                regression,  such as principal-component        regression,  to reduce        increased marker numbers.
+                the  data  dimensions   (Long  et  al.,  2011).  Although   these 
+                approaches  significantly  reduce the computational  load and                 Cross-environment prediction with transfer learning
+                avoid the possibility  of overfitting,  dimensionality   reduction  can 
+                lead to low performance  due to loss of information.  Furthermore,            In crop breeding, it is important to breed cultivars with stable 
+                there is a general expectation  that the model performance  of a              yields across multiple environments. This is even more crucial 
+                DNN should improve with increasing  quantities  of data, a                    during a time of climate change, when extreme weather occurs 
+                phenomenon  termed the scaling law, and data reduction  is                    frequently. To breed a commercially viable cultivar, breeders 
+                generally  counterproductive     for data-driven  research.  MeNet            need to grow their breeding populations in diverse climates 
+                exploits  all genomic variants  in a straightforward      manner, thus        over multiple years for selection. In typical practice, breeders 
+                enabling  us to investigate  the effect of marker number on                   usually own a long-term homesite for crop breeding and rent 
+                prediction  performance.  For simplicity,  we applied LD filtering            several commercial test centers where resources are significantly 
+                thresholds  from 0.1 to 0.5 with an increment  of 0.1 to our                  more expensive or difficult to obtain. The rationale of genomic se-
+                genomic variants  and evaluated  the association  between marker              lection (GS) is to save resources by using prediction to reduce the 
+                number and trait performance.  In this experimental  setting,                 number of plants needed for field testing; thus, reducing the 
+                stricter   filtering   resulted   in  fewer  markers   being  used  for       numbers of plants grown at test centers by taking advantage of 
+                prediction.  The number of SNPs retained  under different  filtering          models trained at the homesite would be highly beneficial and 
+                thresholds  is shown in Supplemental  Table 3.                                attractive to breeders. This approach requires that the genomic 
+                                                                                              prediction algorithm generalizes well across multiple environ-
+                In general, when the sample size was large enough, the increase               ments and multiple years.
+                in marker number improved predictive ability, indicating that 
+                MeNet aligns well with the scaling of the genomic data. Interest-             Here, we investigated the generalization ability of MeNet by 
+                ingly, individual traits differed in their response to changes in             extrapolating a model trained for one environment to other envi-
+                marker number. For example, when the LD filtering threshold                   ronments, using phenotype data from a few samples for training. 
+                                                     2                                        We used transfer learning, an ML approach that applies pre-
+                increased from 0.1 to 0.5, the R  value for HD rose significantly 
+                                                                     2 for                    learned information to a target task, thereby enhancing model 
+                from 0.541 to 0.725 (33.95%), whereas the R               GL showed a 
+                more moderate increase from 0.617 to 0.726 (17.66%), and the                  performance in limited-data scenarios. We followed a feature-
+                  2                                                                           representation transfer paradigm, in which lower-level repre-
+                R for GY increased from 0.255 to 0.313 (23.06%).
+                                                                                              sentations are reused, while higher-level task-specific compo-
+                To identify possible factors contributing to these differences, we            nents are adapted to the new domain. Specifically, the genetic 
+                examined a frequently used index in breeding—the proportion of                relationship learned from Shanghai using 80% of the samples 
+                                                                  / 
+                                                                  2  (      )           2     (60% training and 20% validation) was directly transferred to 
+                PVE by genomic markers. In brief, PVE = σ              2   2 , where σ 
+                                                                  g   σ +σ              g
+                                                                       g   e                  Hainan and Hangzhou. Fine-tuning was then applied to enhance 
+                                               2
+                is the PVE by markers and σ is the PVE by environmental factors.              the model’s capacity to capture genetic variation responsive to
+                                               e
+                                                                                                          Plant Communications 7, 101620, February 9 2026             7
+                   Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                   Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                 Plant Communications                                                      MeNet for genomic prediction of agronomic traits
+                   A
+                   B                                                                C
+                 Figure 5. The effect of marker number on predictive ability and PVE for 12 agronomic traits in Shanghai.
+                                         2 
+                 (A) The predictive ability (R ) (blue line) and PVE (red line) increased as LD threshold values changed from 0.1 to 0.5.
+                 (B) Bar chart showing the correlation coefficients between predictive ability and PVE for the 12 traits.
+                 (C) Bar chart showing the percentage increases in predictive ability and PVE across three LD-threshold intervals: 0.1→0.5, 0.1→0.3, and 0.3→0.5.
+                 environment-specific conditions using only 10% of the samples       For the data from Hangzhou, transfer learning outperformed 
+                                                                                                                                             2 
+                 (5% training and 5% validation) from each target environment.       training from scratch for all traits (Figure 6). Using R  as the 
+                 This approach facilitates the transfer of stable genetic related-   evaluation metric, the relative advantage of transfer learning 
+                 ness modeling while enabling the model to flexibly adapt to         ranged from 5.14% to 159.93%. We observed that transfer 
+                 the expression of genetic variation under distinct environmental    learning showed a significant advantage for traits with lower 
+                                                                                                                                2 
+                 conditions.                                                         prediction accuracy. For instance, the R  values for MeNet
+                 8     Plant Communications 7, 101620, February 9 2026
+                 Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                 Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+               MeNet for genomic prediction of agronomic traits                                                             Plant Communications
+               Figure 6. Transfer learning demonstrates the strong ability of MeNet to generalize.
+               Bar plot of the performance of MeNet under transfer learning and direct training for nine traits in Hangzhou and eight traits in Hainan, using only 10% of the 
+               samples.
+               trained from scratch for PN, HD, and LL were 0.061, 0.288, and 0.         sion traits. The MeNet model also increased performance for 
+                                                                         2 
+               135, respectively, whereas transfer learning yielded R values of          high-precision traits (e.g., PH), where prediction accuracy was 
+               0.160, 0.596, and 0.239, with relative gains of 159.93%, 107.             already high. Despite the relatively high precision of these traits, 
+               08%, and 77.29%, respectively. These results suggest that                 transfer learning still contributed to significant performance 
+               transfer learning shows substantial potential for improving the           enhancement. For low-precision traits (e.g., PN and LA), transfer 
+               prediction accuracy of low-precision traits, leading to high stabil-      learning showed more significant improvements, highlighting its 
+               ity and preventing model failure. For high-precision traits, transfer     importance in ensuring model stability and preventing model 
+               learning was still able to significantly improve prediction accu-         failure.
+                             2 
+               racy. The R  for PH when trained from scratch was 0.659, 
+                                                             2 
+               whereas transfer learning resulted in an R  of 0.790, a relative          The superior generalization ability of the MeNet model in cross-
+                                                2 
+               gain of 19.89%. For CL, the R  when training from scratch was             regional transfer has important implications for practical breeding 
+               0.678, and transfer learning increased it to 0.799, a relative gain       applications. Theoretically, the focus of genome-wide selection 
+               of 17.73%.                                                                can shift from the development of decentralized proprietary 
+                                                                                         models to large, comprehensive genome-wide selection models. 
+               A similar pattern was observed for the data from Hainan. The rela-        Through collaborations within the field and integration of existing 
+               tive gain of transfer learning ranged from 5.14% to 87.43%. Spe-          phenotypic and genotypic data, a high-precision foundation 
+                                                                                   2 
+               cifically, for low-precision traits such as LA, LL, and LW, the R         model can be trained. For multi-site trait prediction across large 
+               values when training from scratch were 0.162, 0.104, and 0.               populations, the foundation model can be fine-tuned to achieve 
+                                                                            2 
+               153, respectively, whereas transfer learning resulted in R values         accurate prediction, reducing the number of field samples and 
+               of 0.170, 0.147, and 0.287, corresponding to relative gains of 5.         phenotypic data collection efforts, thereby optimizing resource 
+               14%, 40.76%, and 87.43%. These results provide further evi-               utilization.
+               dence that transfer learning significantly enhances the prediction 
+                                                                                   2 
+               accuracy of low-precision traits. For high-precision traits, the R        DISCUSSION
+               for PH when training from scratch was 0.596, and transfer 
+               learning increased it to 0.700, a relative gain of 17.50%. For CL,        Continuing and accelerating advances in DL have the potential to 
+                     2 
+               the R  when training from scratch was 0.625, whereas transfer             transform genomic prediction, but realizing this potential requires 
+                                      2 
+               learning yielded an R of 0.700, a relative gain of 12.01%.                a good model design that is compatible with, and even inspiring 
+                                                                                         for, existing biological understanding and breeding practices. 
+               These results indicate that transfer learning significantly outper-       Central to such an approach is the integration of genetic back-
+               formed training from scratch for all traits, particularly low-preci-      ground information and the impact of genomic variation—two
+                                                                                                   Plant Communications 7, 101620, February 9 2026           9
+                   Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                   Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                 Plant Communications                                                         MeNet for genomic prediction of agronomic traits
+                 key components that correspond to the core breeding strategies         crucial role. Nonetheless, pinpointing the exact gene-by-gene 
+                 of elite cultivar crossing and marker selection. In this study, we     or gene-by-environment interactions and constructing gene 
+                 introduce MeNet, a mixed-effect DNN that adaptively balances           interaction networks remains an open challenge that requires 
+                 genetic background and the impact of genomic variation,                specialized interpretability techniques. Confirming the ability 
+                 providing a robust approach for genomic prediction. Across mul-        of  MeNet  to  accurately  capture  epistasis  and  gene-by-
+                 tiple traits of three crops in different environments, MeNet signif-   environment interactions requires further investigation using 
+                 icantly outperformed established models such as rrBLUP and             larger or multi-environment datasets. Such studies will be essen-
+                 VMGP. In addition to its high predictive ability, MeNet offers         tial to fully harness its capabilities for breeding practice and 
+                 deeper insights into the genetic architectures of traits through       genomic research.
+                 its adaptive learning on contributions from genetic background 
+                 and the nonlinear cumulative impact of genomic variation. Spe-         METHODS
+                 cifically, the model dynamically adjusts the relative importance 
+                 of these two sources of information on the basis of the underlying     Data preprocessing
+                 genetic complexity of the trait. By analyzing the final weight dis-    Genomic predictions used the 18000 rice panel (n = 18 421 accessions), 
+                 tribution, researchers can infer whether a trait is predominantly      which includes 15 recombinant inbred line populations and a four-way 
+                 influenced by several major-effect quantitative trait loci or by       multiparent advanced generation inter-cross population (Wei et al., 
+                 numerous smaller-effect variants. This enables precise estima-         2024). Phenotypes for agronomic traits were collected across three 
+                 tion of genetic complexity, facilitating an informed breeding          environments (n = 18 421 per environment) for the populations. The design 
+                 strategy.                                                              of the populations, characterized by a relatively weak population struc-
+                                                                                        ture, facilitates clearer phenotypic differentiation among samples. In gen-
+                                                                                        eral, the integrative nature and reliability of these data provide a robust 
+                 The rationale of GS is to save resources by using prediction to        foundation for advancing our understanding of the genetic architecture 
+                 reduce the number of plants needed for field testing; thus, the        of rice and serve as a valuable resource for genomic prediction studies. 
+                 ability of prediction models to perform well with very few training    The phenotypic data included 12 numeric agronomic traits: CL, PH, HD, 
+                 samples is of crucial significance. In this study, we demonstrated     GY, GL, GW, GPC, LL, LW, LA, PL, and PN. All traits showed a normal dis-
+                 the strong performance of MeNet in extrapolating a well-trained        tribution, and no additional transformations were applied.
+                 model from one environment to the same trait in other environ-
+                 ments by training with phenotypic data from a small percentage         To ensure data integrity and analytical reliability, a comprehensive quality 
+                 of samples. Clearly, extrapolating a well-trained model to the         control (QC) workflow was implemented using PLINK (v1.9). The QC work-
+                 same trait in different years does not pose any challenge. How-        flow comprised two main steps: (1) variant filtering on the basis of minor 
+                 ever, MeNet provides a new avenue for GS application in which          allele frequency, in which genomic markers with a minor allele frequency 
+                 a well-trained foundation model is established through large,          <0.01 were excluded, and (2) LD filtering, in which a sliding window was 
+                                                                                        used to exclude markers that exhibited high LD. The window size was 
+                 community-wide collaborations and then used to predict multi-                                                                  2 
+                                                                                        set to 2000 bp, with a step size of 1000 bp. LD thresholds (r ) from 0.1 
+                 site, multi-year phenotypes of a large number of samples using         to 0.5 were tested to evaluate the influence of LD on prediction 
+                 data from very few field samples. The code for MeNet has been          performance.
+                 publicly released, and a shareable software with a graphical 
+                 user interface is also available (Supplemental Figures 7–10).          For maize, the dataset was constructed using 30 recombinant inbred line 
+                                                                                        F1 populations and 1428 parental lines derived from the complete diallel 
+                 Nonetheless, MeNet’s high predictive ability comes with costs,         used for breeding and intercross (CUBIC) collection, resulting in a total 
+                 and MeNet had the highest computational costs in our experi-           of 42 480 hybrid combinations (Xiao et al., 2021). Field phenotyping was 
+                 ments. Using HD prediction as an example, the wall time of             performed on 8652 F1 hybrids to assess three key agronomic traits: 
+                 each epoch for MeNet was 10.136 s, almost 1.5 times that of            days to tasseling, PH, and ear weight. Data preprocessing with PLINK 
+                 VMGP (6.705 s) and almost 1.3 times that of DeepCCR                    involved LD filtering using –indep-pairwise 1000 100 0.1, resulting in 
+                                                                                        30 890 SNPs. After handling missing values, 8153 individuals were re-
+                 (7.567 s) (Supplemental Table 4). This may have been due to its        tained, and all seven models were tested. For wheat, the dataset con-
+                 dual-branch architecture, and MeNet could potentially be sped          tained GY data from four different environments (GY1, GY2, GY3, and 
+                 up using parallel computing techniques. In addition, for traits        GY4) with 599 samples and 1279 features (Crossa et al., 2010).
+                 such as HD, whose causal variants are well documented 
+                 (Wei et al., 2021), prediction with a targeted set of causal           After QC, the genomic variants were encoded with 1 and   1 for homozy-
+                 variants  or  with  related  metabolite  or  molecular  markers        gous alleles and 0 for heterozygous alleles. Missing genotype values were 
+                 (Xu et al., 2025) instead of genome-wide markers could be              imputed with 0.
+                 computationally efficient and biologically interpretable. This 
+                 approach is regularly practiced for specific traits in molecular       Implementation of MeNet
+                 breeding and could be a potential alternative GS model for             MeNet uses a dual-branch architecture. The first branch is inspired by 
+                 balancing accuracy and resource efficiency (Kitazawa et al.,           random effects in LMMs. We proposed a novel neural network to produce 
+                 2024), albeit only for a few well-studied traits.                      an embedding as the representation of genetic-relatedness information 
+                                                                                        among samples (referred to as RepGeno). We then designed a convolu-
+                 A key advantage of the DNN is its ability to detect nonlinear rela-    tional neural network enhanced with residual units to serve as the second 
+                 tionships among genomic variants. Our analysis of PH demon-            branch, called the VE module. The VE module uses a convolutional 
+                                                                                        network to extract regional dependencies and long-range interactions 
+                 strates the capacity of MeNet to capture complex interactions,         across loci. These two representations are aligned and fused by the fusion 
+                 including gene-by-gene and potential gene-by-environment in-           module, whose core is a cross-information feature fusion unit (Figure 1C), 
+                 teractions. This highlights its broader potential for dissection of    and MeNet dynamically adjusts their contributions on the basis of 
+                 intricate genetic architectures in which nonlinear effects play a      adaptive learning of the genetic architecture of the target phenotype.
+                 10     Plant Communications 7, 101620, February 9 2026
+                    Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                    Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                  MeNet for genomic prediction of agronomic traits                                                                                     Plant Communications
+                  We performed ablation experiments on the two branches of MeNet and                        networks, F  and F               , to generate correction vectors, which are 
+                                                                                                                           VE        RepGeno 
+                  validated their effectiveness (Supplemental Table 5).                                     then fed back to the original information through a residual mechanism.
+                                                                                                                                    ̂                   [              ])
+                                                                                                                                    Z  = Z  +F           Z  ; Z 
+                  Representation learning of a population via trait-aware                                                             VE      VE    VE    VE   RepGeno 
+                  contrastive learning
+                  Inspired by triplet contrastive learning and the Siamese network, we                                         ̂                                [             ])
+                                                                                                                             Z         = Z         +F           Z  ; Z 
+                                                                                                                              RepGeno       RepGeno   RepGeno     VE   RepGeno 
+                  developed  RepGeno,  a  phenotype-aware  genotypic  representation 
+                  learning framework for modeling trait-specific genetic relationships. The                 F  and F              share the same bottleneck architecture composed of 
+                  objective of RepGeno is to learn an embedding space that simultaneously                     VE         RepGeno 
+                  captures population-level classification and individual-level phenotypic                  three fully connected layers but are trained independently to ensure that 
+                  continuity, thereby enabling the computation of genetic relationships                     both information flows follow an identical correction paradigm. The cor-
+                  that reflect both population affiliation and trait similarity among samples.              rected information flows are then concatenated again and passed through 
+                  In other words, RepGeno aims to constrain the embeddings of samples                       three fully connected layers to produce the final prediction output.
+                  from different populations such that their distances correspond to pheno-                 Prediction across diverse environments
+                  typic differences. RepGeno (Figure 1B) uses trait-aware triplet contrastive 
+                  learning to train a trait-specific encoder, which maps each sample’s geno-                To enable MeNet to generalize across environments, we adopted a 
+                  type into an embedding vector that captures both population-level differ-                 parameter-efficient transfer learning approach, in which most parts of 
+                  ences and individual phenotypic variations. Subsequently, by calculating                  the model remain intact and only specific parts are fine-tuned. This strat-
+                  the genetic distances between samples, RepGeno produces an embed-                         egy is particularly popular in DL when limited labeled data in the target 
+                  ding that represents the genetic relatedness among samples.                               domain are available. After comprehensive training of MeNet using data 
+                                                                                                            from one environment, the RepGeno-based encoder and its associated 
+                  Each sample is treated as an anchor, with a positive sample randomly                      feature extractor are frozen and transferred to a target environment. The 
+                                                                                                            fusion module, including F  of cross-information feature fusion and the 
+                  drawn from the same population and a negative sample randomly drawn                                                       VE 
+                  from a different population. We designed a trait-aware triplet loss function,             three-layer fully connected network used for the final prediction output, 
+                  in which the margin is adaptively scaled according to the phenotypic dif-                 is fine-tuned using the data from the target environment.
+                  ferences between the anchor and the positive/negative samples. This loss 
+                  encourages the distance between positive and negative pairs to align with                 Chromosome-aware window-encoding mechanism
+                  their trait dissimilarities, thereby achieving inter-population separation and            To address redundancy and parameter explosion, we introduced a 
+                  intra-population phenotypic continuity modeling. The trait-aware triplet                  chromosome-aware window-encoding mechanism. Instead of process-
+                  loss is formally defined as follows:                                                      ing the entire genotype vector with a single shared network, we first divide 
+                                                                        )                                   the genotype by chromosome. For each chromosome-specific segment, 
+                                                              +     
+                                                             d   d +m 
+                                                            (         γ ) 
+                                           L = log 1 + e                 and                                we assign an independent VE to capture localized genomic patterns. The 
+                                                                                                            resulting chromosome-wise embeddings are then integrated through an 
+                                                                                                            extended cross-information feature fusion module for multi-source infor-
+                                                m  = Δ  × margin:
+                                                  γ      +                                                  mation interaction, producing the final embedding representation for 
+                                                       Δ +ε 
+                                                                                                            downstream modeling. This design significantly reduces computational 
+                    +                                                                                       load and improves parameter efficiency by introducing modular and bio-
+                  d  and d  denote the Euclidean distances between the normalized                           logically informed encoding.
+                  embedding vectors of the positive and negative sample pairs, respec-
+                                     + 
+                  tively. Δ  and Δ represent the absolute phenotypic differences between                    Training of models
+                  the positive and negative sample pairs, respectively. When population 
+                  affiliation information is unavailable in the dataset, for each anchor, we                RepGeno and MeNet were trained on NVIDIA A800 GPUs (80 GB memory) 
+                  randomly sample two other samples and determine whether they serve                        and optimized  using the AdamW optimizer  with weight-decay  regulariza -
+                  as positive or negative samples on the basis of their phenotypic                          tion. The mean absolute  error was adopted as the training  objective.  
+                  differences.                                                                              Training  was conducted  in mini-batches  of size 128 with randomized  data 
+                                                                                                            loading  to promote  stable convergence.  In RepGeno,  the distance  between  
+                  The genetic similarity between samples is represented by the normalized                   an anchor and its negative  counterpart  should exceed that between  the an-
+                  Euclidean distance (scaled to the range [0, 1]) between their embeddings                  chor and its positive  counterpart  by at least a margin value, and the margin 
+                  in the optimized latent space. This learned relatedness offers a task-                    parameter  space was set to [0.1, 0.2, 0.3, 0.4, 0.5]. For VE, the number of 
+                  sensitive alternative to traditional genetic relationships and enables                    convolutional   kernel channels  was searched  within [1, 2, 4, 8, 16, 64]. For 
+                  more adaptive correction in trait-specific genomic analyses. Note that                    VE and RepGeno,  the embedding  dimension  was explored  in [512, 1024, 
+                  the genetic relatedness distances extracted by RepGeno to produce the                     4096, 8192] (Supplemental  Table 6). Learning  rates were dynamically  
+                  final embedding are quite different from the genetic relatedness matrix                   adjusted  on the basis of validation  performance  and reduced  by a factor 
+                  used in LMMs, as RepGeno takes into account the phenotypic values.                        when the validation  metric plateaued  for several  epochs.  The best-
+                                                                                                            performing  checkpoints  were selected  on the basis of the validation  dataset  
+                                                                                                              2 
+                                                                                                            R and used for the final evaluation  on the test dataset.
+                  Modeling genotypic variation and information fusion
+                  In parallel,  VE extracts  information  on genetic  variants  into embedding  Z           We selected 11 representative traditional and modern ML models for 
+                                                                                                    VE 
+                  via a convolutional   layer, two residual  blocks based on ResNet architecture,           comparison: RF, XGBoost, BayesC, rrBLUP, SoyDNGP, WheatGP, 
+                  followed  by an adaptive  average  pooling  layer and fully connected  layers.            GPformer, Cropformer, contrastive learning and chromosome-aware 
+                                                                                                            network, DeepCCR, and VMGP. GPformer and DeepCCR, for which 
+                  In the message-passing process of MeNet, Z                  and Z  are regarded           neither the source code nor the executable software is publicly available, 
+                                                                      RepGeno        VE 
+                  as two information vectors. Inspired by cross-view feature fusion                         were implemented according to their publications. All models were trained 
+                  (Ye et al., 2024), we developed cross-information feature fusion to                       and evaluated using the same settings (6:2:2, 3:2:5, and 0.5:0.5:9 for 
+                  enable efficient interaction between these vectors while preserving their                 training, validation, and test sets). Hyperparameter optimization for each 
+                                                                                                                                                                                  2 
+                  respective structural characteristics. Specifically, the concatenated joint               model was conducted on the validation set in terms of R , PCC, and 
+                  information from the two vectors is fed into two independent correction                   mean absolute error metrics.
+                                                                                                                         Plant Communications 7, 101620, February 9 2026                      11
+                      Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                      Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                    Plant Communications                                                                    MeNet for genomic prediction of agronomic traits
+                    Evaluating the contributions from RepGeno and VE                                 and evaluation and wrote the manuscript. J. Li and J. Lee analyzed the 
+                    embeddings via Integrated Gradients (IG)                                         data. All authors reviewed and approved the final manuscript.
+                    To gain a deeper understanding of how MeNet utilizes information from 
+                    the RepGeno and VE modules, we used IG as a post hoc interpretability            SUPPLEMENTAL INFORMATION
+                    method. IG quantifies feature importance by averaging gradients along            Supplemental information is available at Plant Communications Online.
+                    a linear path from a baseline to the input. Given a differentiable prediction 
+                                                                                 ′ 
+                    function F, an input sample x, and a baseline input x , representing             Received: July 23, 2025 
+                    the absence of a signal, the attribution for the i-th feature is computed as     Revised: October 17, 2025 
+                                                       ∫                   )                         Accepted: November 17, 2025
+                                                      )  1      ′         ′ 
+                                                           ∂F x +α(x    x 
+                                                     ′          i         ) 
+                                    IG         x    x                        dα:
+                                       (x) = 
+                                       i        i    i            ∂x 
+                                                        0           i
+                    This formulation integrates the gradient of the output along the path from       REFERENCES
+                     ′ 
+                    x to x, capturing the marginal contribution of each input dimension in a 
+                                                                                                                                                    ˜ 
+                    path-aware manner.                                                               Abdollahi-Arpanahi, R, Gianola, D, and Penagaricano, F (2020). Deep 
+                                                                                                        learning versus parametric and ensemble methods for genomic 
+                    The fused embedding z = [z  ;z           ] is used to compute the IG. For a         prediction of complex phenotypes. Genet Sel. Evol 52:12. https://doi. 
+                                                 VE  RepGeno                                            org/10.1186/s12711-020-00531-z.
+                    dataset of N samples, let a = IG(z ) denote the attribution vector for sample 
+                                               j      j 
+                    j, where i denotes the index of the attribution vector. We compute the           Cheverud, J.M., and Routman, E.J. (1995). Epistasis and its contribution 
+                    average absolute attribution across samples:                                        to genetic variance components. Genetics 139:1455–1461.
+                                                      (            )                                 Cheverud, J.M., Vaughn, T.T., Pletscher, L.S., King-Ellison, K., Bailiff, 
+                                                            N
+                                                   ∑ 1∑⃒ ⃒                                              J., Adams, E., Erickson, C., and Bonislawski, A. (1999). Epistasis and 
+                                           S  =                ⃒a ⃒  and
+                                             VE         N        j;i                                    the Evolution of Additive Genetic Variance in Populations That Pass 
+                                                   i ∈ VE  j = 1
+                                                                                                        Through a Bottleneck. Evolution 53:1009–1018.
+                                                             (  N        )                           Cleveland, W.S., and Devlin, S.J. (1988). Locally Weighted Regression: 
+                                                       ∑ 1∑⃒ ⃒
+                                         S        =                  ⃒a ⃒  :
+                                          RepGeno              N       j;i                              An Approach to Regression Analysis by Local Fitting. J. Am. Stat. 
+                                                     i ∈ RepGeno j = 1                                  Assoc. 83:596–610.
+                                                                                                                                      ´                             ˜ 
+                                                                                                     Crossa, J., Campos, G.D.L.,  Perez, P., Gianola,  D., Burguen o, J., Araus, 
+                    The scalar values S  and S             represent the overall attribution as-
+                                         VE       RepGeno                                               J.L., Makumbi,  D., Singh, R.P., Dreisigacker,  S., Yan, J., et al. (2010).  
+                    signed to the variant-level and population-level components, respectively.          Prediction  of Genetic  Values of Quantitative  Traits in Plant Breeding  
+                    Optionally, we normalize these scores to obtain relative contributions by           Using Pedigree  and Molecular  Markers.  Genetics  186:713–724.
+                    computing their proportions with respect to the total attribution sum.
+                                                                                                     Dalla-Torre, H., Gonzalez, L., Mendoza-Revilla, J., et al. (2025). 
+                                                                                                        Nucleotide Transformer: building and evaluating robust foundation 
+                    DATA AND CODE AVAILABILITY                                                          models for human genomics. Nat Methods 22:287–297. https://doi. 
+                    The rice phenotypic data used in this study are available in the online             org/10.1038/s41592-024-02523-z.
+                    supplementary materials of Wei et al. (2024). The genomic data used              De Los Campos, G., Naya, H., Gianola, D., Crossa, J., Legarra, A., 
+                    in  this  study  can  be  downloaded  from  https://figshare.com/s/                 Manfredi,  E.,  Weigel,  K.,  and  Cotes,  J.M.  (2009).  Predicting 
+                    12978737918eecb74903. For maize, we used the Maize8652 dataset 
+                    (Xiao et al., 2021), which is accessible at https://iagr.genomics.cn/               Quantitative Traits With Regression Models for Dense Molecular 
+                    CropGS/#/Datasets. For wheat, we used a publicly available dataset                  Markers and Pedigree. Genetics 182:375–385.
+                    (Crossa et al., 2010), available at https://academic.oup.com/genetics/           Du, C., Wei, J., Wang, S., and Jia, Z. (2018). Genomic selection using 
+                    article/186/2/713/6063582#supplementary-data.                                       principal component regression. Heredity 121:12–23.
+                                                                                                     Gao, P., Zhao, H., Luo, Z., Lin, Y., Feng, W., Li, Y., Kong, F., Li, X., Fang, 
+                    The source code for MeNet is available on GitHub at https://github.com/             C., and Wang, X. (2023). SoyDNGP: a web-accessible deep learning 
+                    ganlab/MENET. An executable software tool with a graphical user inter-              framework  for  genomic  prediction  in  soybean  breeding.  Brief. 
+                    face for the Windows operating system can be downloaded from                        Bioinform. 24:bbad349.
+                    https://github.com/ganlab/menet/releases.                                        Gianola, D. (2013). Priors in Whole-Genome Regression: The Bayesian 
+                                                                                                        Alphabet Returns. Genetics 194:573–596.
+                    FUNDING                                                                          Gianola, D., De Los Campos, G., Hill, W.G., Manfredi, E., and 
+                    This work was supported in part by grants from the National Science and             Fernando, R. (2009). Additive Genetic Variability and the Bayesian 
+                    Technology Major Project, China (grant no. 2022ZD0115703); the National             Alphabet. Genetics 183:347–363.
+                    Natural Science Foundation of China (grant no. 32176047); the National 
+                    Science Foundation of Jiangsu Province (grant no. BE2022383); the                Hayes, B., and Goddard, M. (2010). Genome-wide association and 
+                    Jiangsu Engineering Research Center for Plant Genome Editing; Southern              genomic selection in animal breeding. Genome 53:876–883.
+                    Japonica Rice Research and Development Co., Ltd.; and the Jiangsu                                                                                   ¨ 
+                                                                                                     Hollmann, N., Mu¨ ller, S., Purucker, L., Krishnakumar, A., Korfer, M., 
+                    Collaborative Innovation Center for Modern Crop Production, China.                  Hoo, S.B., Schirrmeister, R.T., and Hutter, F. (2025). Accurate 
+                                                                                                        predictions on small data with a tabular foundation model. Nature 
+                    ACKNOWLEDGMENTS                                                                     637:319–326.
+                    We thank Professor Miltos Tsiantis for his valuable suggestions and Mr.          Huang, J., Yang, Z., Yin, M., Li, C., Li, J., Wang, Y., Huang, L., Liang, C., 
+                    Jun Wang and Mr. Ziya Tang for their technical assistance. No conflict              He, F., Li, M., et al. (2024). CLCNet: a contrastive learning and 
+                    of interest declared.                                                               chromosome-aware  network  for  genomic  prediction  in  plants. 
+                                                                                                        Preprint at bioRxiv. https://doi.org/10.1101/2024.12.29.630569.
+                    AUTHOR CONTRIBUTIONS                                                             Ji, Y., Zhou, Z., Liu, H., and Davuluri, R.V. (2021). DNABERT: pre-trained 
+                    X.G. and J.W. conceived and supervised the study and revised the manu-              Bidirectional Encoder Representations from Transformers model for 
+                    script. Y.L. and S.R. performed the data analysis, model development,               DNA-language in genome. Bioinformatics 37:2112–2120.
+                    12      Plant Communications 7, 101620, February 9 2026
+                    Please cite this article in press as: Li et al., MeNet: A mixed-effect deep neural network for multi-environment genomic prediction of agronomic traits, Plant 
+                    Communications (2025), https://doi.org/10.1016/j.xplc.2025.101620
+                  MeNet for genomic prediction of agronomic traits                                                                                 Plant Communications
+                  Kawakita, S., Yamasaki, M., Teratani, R., Yabe, S., Kajiya-Kanegae,                    Wang, D., Li, J., Wang, Y., and Wang, E. (2022). A comparison on 
+                     H., Yoshida, H., Fushimi, E., and Nakagawa, H. (2024). Dual                             predicting functional impact of genomic variants. NAR Genom. 
+                     ensemble approach to predict rice heading date by integrating                           Bioinform. 4:lqab122.
+                     multiple rice phenology models and machine learning-based genetic                   Wang, K., Abid, M.A., Rasheed, A., Crossa, J., Hearne, S., and Li, H. 
+                     parameter regression models. Agric. For. Meteorol. 344:109821.                          (2023). DNNGP, a deep neural network-based method for genomic 
+                  Kitazawa, N., Shomura, A., Mizubayashi, T., Ando, T., Hayashi, N.,                         prediction using multi-omics data in plants. Mol. Plant 16:279–293.
+                     Yabe,  S.,  Matsubara,  K.,  Ebana,  K.,  Yamanouchi,  U.,  and                     Wang, H., Yan, S., Wang, W., Chen, Y., Hong, J., He, Q., Diao, X., Lin, 
+                     Fukuoka, S. (2024). Development of SNP genotyping assays for                            Y., Chen, Y., Cao, Y., et al. (2025a). Cropformer: An interpretable deep 
+                     heading date in rice. Breed. Sci. 74:274–284.                                           learning framework for crop genomic prediction. Plant Commun. 
+                  Krizhevsky, A., Sutskever, I., and Hinton, G.E. (2017). ImageNet                           6:101223.
+                     classification with deep convolutional neural networks. Commun. 
+                     ACM 60:84–90.                                                                       Wang, C., Zhang, D., Ma, Y., Zhao, Y., Liu, P., and Li, X. (2025b). 
+                                                                                                             WheatGP, a genomic prediction method based on CNN and LSTM. 
+                  Long, N., Gianola, D., Rosa, G.J.M., and Weigel, K.A. (2011). Dimension                    Brief. Bioinform. 26:bbaf191.
+                     reduction and variable selection for genomic selection: application to 
+                     predicting milk yield in Holsteins. J. Anim. Breed. Genet. 128:247–257.             Wei, X., Qiu, J., Yong, K., Fan, J., Zhang, Q., Hua, H., Liu, J., Wang, Q., 
+                  Ma, X., Wang, H., Wu, S., Han, B., Cui, D., Liu, J., Zhang, Q., Xia, X.,                   Olsen, K.M., Han, B., and Huang, X. (2021). A quantitative genomics 
+                     Song, P., Tang, C., et al. (2024). DeepCCR : large-scale genomics-                      map of rice provides genetic insights and guides breeding. Nat. Genet. 
+                     based deep learning method for improving rice breeding. Plant                           53:243–253.
+                     Biotechnol. J. 22:2691–2693.                                                        Wei, X., Chen, M., Zhang, Q., Gong, J., Liu, J., Yong, K., Wang, Q., Fan, 
+                  Mackay, T.F.C. (2001). The Genetic Architecture of Quantitative Traits.                    J., Chen, S., Hua, H., et al. (2024). Genomic investigation of 18,421 
+                     Annu. Rev. Genet. 35:303–339.                                                           lines reveals the genetic architecture of rice. Science 385:eadm8762.
+                  Meher, P.K., Rustgi, S., and Kumar, A. (2022). Performance of Bayesian                 Wu, C., Zhang, Y., Ying, Z., Li, L., Wang, J., Yu, H., Zhang, M., Feng, X., 
+                     and BLUP alphabets for genomic prediction: analysis, comparison and                     Wei, X., and Xu, X. (2023). A transformer-based genomic prediction 
+                     results. Heredity 128:519–530.                                                          method fused with knowledge-guided module. Brief. Bioinform. 
+                  Meuwissen, T.H., Hayes, B.J., and Goddard, M.E. (2001). Prediction of                      25:bbad438.
+                     Total Genetic Value Using Genome-Wide Dense Marker Maps.                            Xiang, Y., Xia, C., Li, L., Wei, R., Rong, T., Liu, H., and Lan, H. (2024). 
+                     Genetics 157:1819–1829.                                                                 Genomic  prediction  of  yield-related  traits  and  genome-based 
+                                  ´                             ´                                            establishment of heterotic pattern in maize hybrid breeding of 
+                  Montesinos Lopez, O.A., Montesinos Lopez, A., and Crossa, J. (2022). 
+                     Random Forest for Genomic Prediction. In Multivariate Statistical                       Southwest China. Front. Plant Sci. 15:1441555.
+                     Machine Learning Methods for Genomic Prediction, O.A. Montesinos                    Xiao, Y., Jiang, S., Cheng, Q., Wang, X., Yan, J., Zhang, R., Qiao, F., 
+                       ´                             ´ 
+                     Lopez,  A.  Montesinos  Lopez,  and  J.  Crossa,  eds.  (Springer                       Ma, C., Luo, J., Li, W., et al. (2021). The genetic mechanism of 
+                     International Publishing), pp. 633–681.                                                 heterosis utilization in maize improvement. Genome Biol. 22:148.
+                  Ogutu,  J.O.,  Piepho,  H.-P.,  and  Schulz-Streeck,  T.  (2011).  A                   Xu, Y., Yang, W., Qiu, J., Zhou, K., Yu, G., Zhang, Y., Wang, X., Jiao, Y., 
+                     comparison  of  random  forests,  boosting  and  support  vector                        Wang, X., Hu, S., et al. (2025). Metabolic marker-assisted genomic 
+                     machines for genomic selection. BMC Proc. 5:S11.                                        prediction improves hybrid breeding. Plant Commun. 6:101199.
+                  Okut, H. (2021). Deep Learning Algorithms for Complex Traits Genomic                   Yan, J., Xu, Y., Cheng, Q., Jiang, S., Wang, Q., Xiao, Y., Ma, C., Yan, J., 
+                                                      ¨ 
+                     Prediction. Hayvan Bilimi Ve U ru¨ n. Derg. 4:225–239.                                  and Wang, X. (2021). LightGBM: accelerated genomically designed 
+                  Rogers, A.R., Dunne, J.C., Romay, C., Bohn, M., Buckler, E.S.,                             crop breeding through ensemble learning. Genome Biol. 22:271.
+                     Ciampitti, I.A., Edwards, J., Ertl, D., Flint-Garcia, S., Gore, M.A.,               Ye, J., Luo, Q., Yu, J., Zhong, H., Zheng, Z., He, C., and Li, W. (2024). 
+                     et al. (2021). The importance of dominance and genotype-by-                             SG-BEV: Satellite-Guided BEV Fusion for Cross-View Semantic 
+                     environment interactions on grain yield variation in a large-scale                      Segmentation. Preprint at arXiv. https://doi.org/10.48550/arXiv.2404. 
+                     public cooperative maize experiment. G3 (Bethesda). 11:jkaa050.                         02638.
+                                                                                             ˜ 
+                  Spindel,  J., Begum, H., Akdemir,  D., Virk, P., Collard,  B., Redona, E.,             Zhang, B., Liu, H., Qi, F., Zhang, Z., Li, Q., Han, Z., and Xing, Y. (2019). 
+                     Atlin,  G., Jannink,   J.-L., and McCouch,  S.R. (2015).  Genomic                       Genetic  Interactions  Among  Ghd7,  Ghd8,  OsPRR37  and  Hd1 
+                     Selection  and Association  Mapping  in Rice (Oryza sativa):  Effect of                 Contribute to Large Variation in Heading Date in Rice. Rice 12:48.
+                     Trait Genetic  Architecture,   Training  Population  Composition,  Marker 
+                     Number and Statistical  Model on Accuracy  of Rice Genomic  Selection               Zhao, X., Sun, F., Li, J., Zhang, D., Zhang, Q., Liu, Z., Tan, C., Ma, H., and 
+                     in Elite,  Tropical  Rice Breeding  Lines. PLoS Genet. 11:e1004982.                     Wang, K. (2025).  VMGP: A unified variational  auto-encoder  based multi-
+                  Sundararajan, M., Taly, A., and Yan, Q. (2017). Axiomatic Attribution for                  task  model  for  multi-phenotype,        multi-environment,     and  cross-
+                     Deep Networks. In Proceedings of the 34th International Conference                      population  genomic  selection  in plants.  Artif. Intell.  Agric. 15:829–842.
+                     on Machine Learning (PMLR), pp. 3319–3328.                                          Zhou, Z., Ji, Y., Li, W., Dutta, P., Davuluri, R., and Liu, H. (2024a). 
+                  The Million Veteran Program, Evangelou, E., Warren, H.R., Mosen-                           DNABERT-2: Efficient Foundation Model and Benchmark For Multi-
+                     Ansorena, D., Mifsud, B., Pazoki, R., Gao, H., Ntritsos, G., Dimou,                     Species Genome. Preprint at arXiv. https://doi.org/10.48550/arXiv. 
+                     N., Cabrera, C.P., et al. (2018). Genetic analysis of over 1 million                    2306.15006.
+                     people identifies 535 new loci associated with blood pressure traits.               Zhou, S., Cai, L., Wu, H., Wang, B., Gu, B., Cui, S., Huang, X., Xu, Z., 
+                     Nat. Genet. 50:1412–1425.                                                               Hao, B., Hou, H., et al. (2024b). Fine-tuning rice heading date 
+                  Tibshirani, R. (1996). Regression Shrinkage and Selection via the Lasso.                   through multiplex editing of the regulatory regions of key genes by 
+                     J. R. Stat. Soc. Ser. B Methodol. 58:267–288.                                           CRISPR-Cas9. Plant Biotechnol. J. 22:751–758.
+                  Visscher, P.M., Hill, W.G., and Wray, N.R. (2008). Heritability in the                 Zou, J., Huss, M., Abid, A., Mohammadi, P., Torkamani, A., and 
+                     genomics era — concepts and misconceptions. Nat. Rev. Genet.                            Telenti, A. (2019). A primer on deep learning in genomics. Nat. 
+                     9:255–266.                                                                              Genet. 51:12–18.
+                                                                                                                      Plant Communications 7, 101620, February 9 2026                   13

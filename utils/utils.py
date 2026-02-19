@@ -50,6 +50,20 @@ def parse_args():
     p.add_argument("--full_transformer", type=str2bool, default=False)
     p.add_argument("--full_tf_mlp_type", type=str, default=None)
     p.add_argument("--residual", type=str2bool, default=False)
+    p.add_argument("--adaptive_branch_gating", type=str2bool, default=False,
+                   help="Enable sample-wise adaptive gating over G/E/LD branches (3-branch models only).")
+    p.add_argument("--branch_gate_hidden", type=int, default=128,
+                   help="Hidden dimension for adaptive branch gating MLP.")
+    p.add_argument("--branch_gate_dropout", type=float, default=0.0,
+                   help="Dropout for adaptive branch gating MLP.")
+    p.add_argument("--cross_residual_fusion", type=str2bool, default=False,
+                   help="Enable cross-information residual fusion head (3-branch models only).")
+    p.add_argument("--cross_residual_hidden", type=int, default=256,
+                   help="Hidden dimension for cross-residual fusion MLP.")
+    p.add_argument("--cross_residual_dropout", type=float, default=0.1,
+                   help="Dropout for cross-residual fusion MLP.")
+    p.add_argument("--cross_residual_scale_init", type=float, default=0.0,
+                   help="Initial value for learnable cross-residual fusion scale.")
     p.add_argument("--g_input_type", type=str, default="tokens", choices=["tokens", "grm"],
                    help="Genotype input representation: tokenized markers ('tokens') or GRM-standardized features ('grm').")
     p.add_argument("--env_categorical_mode", type=str, default="drop", choices=["drop", "onehot"],
@@ -184,13 +198,15 @@ def make_run_name(args) -> str:
         env_cat_mode = "drop"
     envcat = "env1h+" if env_cat_mode == "onehot" else ""
     cmix = "cmix+" if getattr(args, "c_mixup", False) else ""
+    agate = "agate+" if ((not full_transformer) and getattr(args, "adaptive_branch_gating", False)) else ""
+    xfuse = "xfuse+" if ((not full_transformer) and getattr(args, "cross_residual_fusion", False)) else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat + cmix).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat + cmix + agate + xfuse).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

@@ -292,6 +292,13 @@ class GxE_Transformer(nn.Module):
                  moe_shared_expert: bool = None,
                  moe_shared_expert_hidden_dim: int = None,
                  moe_loss_weight: float = None,
+                 adaptive_branch_gating: bool = False,
+                 branch_gate_hidden: int = 128,
+                 branch_gate_dropout: float = 0.0,
+                 cross_residual_fusion: bool = False,
+                 cross_residual_hidden: int = 256,
+                 cross_residual_dropout: float = 0.1,
+                 cross_residual_scale_init: float = 0.0,
                  config = None
                  ):
         super().__init__()
@@ -311,6 +318,15 @@ class GxE_Transformer(nn.Module):
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         self.use_moe_encoder = bool(g_enc) and self.g_encoder_type == "moe"
         self.moe_aux_loss = None
+        self.adaptive_branch_gating = bool(adaptive_branch_gating)
+        self.branch_gate_hidden = int(branch_gate_hidden)
+        self.branch_gate_dropout = float(branch_gate_dropout)
+        self.cross_residual_fusion = bool(cross_residual_fusion)
+        self.cross_residual_hidden = int(cross_residual_hidden)
+        self.cross_residual_dropout = float(cross_residual_dropout)
+        self.cross_residual_scale_init = float(cross_residual_scale_init)
+        self.last_branch_weight_mean = None
+        self.last_cross_residual_norm = None
 
         # set attributes
         self.g_encoder = (
@@ -337,6 +353,28 @@ class GxE_Transformer(nn.Module):
 
         self.moe_w = nn.Parameter(torch.zeros(3)) if moe else None # logits
         self.fuse_ln = nn.LayerNorm(config.n_embd) # add ln for moe fusion
+
+        self.branch_gate = None
+        if self.adaptive_branch_gating:
+            self.branch_gate = nn.Sequential(
+                nn.Linear(3 * config.n_embd, self.branch_gate_hidden),
+                nn.GELU(),
+                nn.Dropout(self.branch_gate_dropout),
+                nn.Linear(self.branch_gate_hidden, 3),
+            )
+
+        self.cross_residual_mlp = None
+        self.cross_residual_scale = None
+        if self.cross_residual_fusion:
+            self.cross_residual_mlp = nn.Sequential(
+                nn.Linear(3 * config.n_embd, self.cross_residual_hidden),
+                nn.GELU(),
+                nn.Dropout(self.cross_residual_dropout),
+                nn.Linear(self.cross_residual_hidden, config.n_embd),
+            )
+            self.cross_residual_scale = nn.Parameter(
+                torch.tensor(self.cross_residual_scale_init, dtype=torch.float32)
+            )
 
         # append env as a token to final tf layer instead of adding to all reprs
         self.env_as_token = True  # set to false for old behavior
@@ -380,23 +418,81 @@ class GxE_Transformer(nn.Module):
         nn.init.normal_(self.final_layer.weight, std=0.01)
         nn.init.zeros_(self.final_layer.bias)
 
-    # concat now uses softmax to augment moe weights proportionally 
-    def _concat(self, g_enc, e_enc, ld_enc):
-        w = torch.softmax(self.moe_w, dim=0) if self.moe_w is not None else None
-        x = 0
-        if isinstance(g_enc, torch.Tensor):
-            x = x + (w[0] * g_enc if w is not None else g_enc)
-        if isinstance(e_enc, torch.Tensor):
-            x = x + (w[1] * e_enc if w is not None else e_enc)
-        if isinstance(ld_enc, torch.Tensor):
-            x = x + (w[2] * ld_enc if w is not None else ld_enc)
+    def _apply_branch_weight(self, tensor, weight_col):
+        if not isinstance(tensor, torch.Tensor):
+            return tensor
+        if tensor.dim() == 3:
+            return tensor * weight_col.view(-1, 1, 1)
+        if tensor.dim() == 2:
+            return tensor * weight_col.view(-1, 1)
+        return tensor * weight_col
+
+    def _pool_branch(self, tensor):
+        if not isinstance(tensor, torch.Tensor):
+            return None
+        if tensor.dim() == 3:
+            main = tensor[:, 1:, :] if tensor.size(1) > 1 else tensor
+            return main.mean(dim=1)
+        if tensor.dim() == 2:
+            return tensor
+        return None
+
+    def _get_branch_summaries(self, g_enc, e_enc, ld_enc):
+        g_pool = self._pool_branch(g_enc)
+        e_pool = self._pool_branch(e_enc)
+        ld_pool = self._pool_branch(ld_enc)
+
+        ref = g_pool if g_pool is not None else (e_pool if e_pool is not None else ld_pool)
+        if ref is None:
+            raise ValueError("At least one encoder branch must provide tensor outputs.")
+
+        zeros = torch.zeros_like(ref)
+        return (
+            g_pool if g_pool is not None else zeros,
+            e_pool if e_pool is not None else zeros,
+            ld_pool if ld_pool is not None else zeros,
+        )
+
+    # concat now uses softmax to augment moe weights proportionally
+    def _concat(self, g_enc, e_enc, ld_enc, branch_weights=None):
+        x = None
+        if branch_weights is not None:
+            if isinstance(g_enc, torch.Tensor):
+                g_term = self._apply_branch_weight(g_enc, branch_weights[:, 0])
+                x = g_term if x is None else (x + g_term)
+            if isinstance(e_enc, torch.Tensor):
+                e_term = self._apply_branch_weight(e_enc, branch_weights[:, 1])
+                x = e_term if x is None else (x + e_term)
+            if isinstance(ld_enc, torch.Tensor):
+                ld_term = self._apply_branch_weight(ld_enc, branch_weights[:, 2])
+                x = ld_term if x is None else (x + ld_term)
+        else:
+            w = torch.softmax(self.moe_w, dim=0) if self.moe_w is not None else None
+            if isinstance(g_enc, torch.Tensor):
+                g_term = w[0] * g_enc if w is not None else g_enc
+                x = g_term if x is None else (x + g_term)
+            if isinstance(e_enc, torch.Tensor):
+                e_term = w[1] * e_enc if w is not None else e_enc
+                x = e_term if x is None else (x + e_term)
+            if isinstance(ld_enc, torch.Tensor):
+                ld_term = w[2] * ld_enc if w is not None else ld_enc
+                x = ld_term if x is None else (x + ld_term)
+
+        if x is None:
+            raise ValueError("All branch encoders are disabled; cannot build fused representation.")
         return self.fuse_ln(x)
 
-    def _forward_tf(self, g_enc, e_enc, ld_enc):
+    def _forward_tf(self, g_enc, e_enc, ld_enc, branch_weights=None):
         if isinstance(e_enc, torch.Tensor):
             if self.env_as_token:
                 # append single env token
                 e_tok = e_enc.unsqueeze(dim=1)  # [B, 1, C]
+                if branch_weights is not None:
+                    if isinstance(g_enc, torch.Tensor):
+                        g_enc = self._apply_branch_weight(g_enc, branch_weights[:, 0])
+                    e_tok = self._apply_branch_weight(e_tok, branch_weights[:, 1])
+                    if isinstance(ld_enc, torch.Tensor):
+                        ld_enc = self._apply_branch_weight(ld_enc, branch_weights[:, 2])
                 x = torch.cat([g_enc, e_tok], dim=1) if isinstance(g_enc, torch.Tensor) else e_tok
 
                 # align ld_enc by padding to match x's sequence length
@@ -408,9 +504,9 @@ class GxE_Transformer(nn.Module):
                     x = self.fuse_ln(x + ld_enc)
             else:
                 e_map = e_enc.unsqueeze(dim=1).expand(-1, g_enc.size(1), -1)
-                x = self._concat(g_enc, e_map, ld_enc)
+                x = self._concat(g_enc, e_map, ld_enc, branch_weights=branch_weights)
         else:
-            x = self._concat(g_enc, e_enc, ld_enc)
+            x = self._concat(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
         for layer in self.hidden_layers:
             x = layer(x)
         # take CLS (first token) as summary if present; else mean
@@ -418,7 +514,7 @@ class GxE_Transformer(nn.Module):
             return x[:, 0]  # (B, C)
         return x.mean(dim=1)
 
-    def _forward_mlp(self, g_enc, e_enc, ld_enc):
+    def _forward_mlp(self, g_enc, e_enc, ld_enc, branch_weights=None):
         # convert [B, T, C] -> [B, C]
         if isinstance(g_enc, torch.Tensor):
             g_main = g_enc[:, 1:] if g_enc.size(1) > 1 else g_enc
@@ -426,18 +522,18 @@ class GxE_Transformer(nn.Module):
         if isinstance(ld_enc, torch.Tensor):
             ld_main = ld_enc[:, 1:] if ld_enc.size(1) > 1 else ld_enc
             ld_enc = ld_main.mean(dim=1)
-        x = self._concat(g_enc, e_enc, ld_enc)
+        x = self._concat(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
         for layer in self.hidden_layers:
             x = x + layer(x)
         return x
     
-    def _forward_cnn(self, g_enc, e_enc, ld_enc):
+    def _forward_cnn(self, g_enc, e_enc, ld_enc, branch_weights=None):
         #unsqueeze e to concat properly
         if isinstance(e_enc, torch.Tensor):
             e_enc = e_enc.unsqueeze(dim=1)
             if isinstance(g_enc, torch.Tensor):
                 e_enc = e_enc.expand(-1, g_enc.size(1), -1)
-        x = self._concat(g_enc, e_enc, ld_enc)
+        x = self._concat(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
 
         x = x.transpose(1, 2) # (B, T, C) -> (B, C, T)
         for layer in self.hidden_layers:
@@ -449,6 +545,8 @@ class GxE_Transformer(nn.Module):
         return x
 
     def _encode(self, x):
+        self.last_branch_weight_mean = None
+        self.last_cross_residual_norm = None
         self.moe_aux_loss = None
         if self.g_encoder:
             if self.use_moe_encoder:
@@ -471,14 +569,28 @@ class GxE_Transformer(nn.Module):
                 pad = torch.zeros(ld_enc.size(0), 1, ld_enc.size(2), device=ld_enc.device, dtype=ld_enc.dtype)
                 ld_enc = torch.cat([pad, ld_enc], dim=1)
 
+        g_pool, e_pool, ld_pool = self._get_branch_summaries(g_enc, e_enc, ld_enc)
+        fusion_in = torch.cat([g_pool, e_pool, ld_pool], dim=1)
+
+        branch_weights = None
+        if self.branch_gate is not None:
+            gate_logits = self.branch_gate(fusion_in)
+            branch_weights = torch.softmax(gate_logits, dim=1)
+            self.last_branch_weight_mean = branch_weights.detach().mean(dim=0)
+
         if self.gxe_enc == "tf":
-            rep = self._forward_tf(g_enc, e_enc, ld_enc)
+            rep = self._forward_tf(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
         elif self.gxe_enc == "mlp":
-            rep = self._forward_mlp(g_enc, e_enc, ld_enc)
+            rep = self._forward_mlp(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
         elif self.gxe_enc == "cnn":
-            rep = self._forward_cnn(g_enc, e_enc, ld_enc)
+            rep = self._forward_cnn(g_enc, e_enc, ld_enc, branch_weights=branch_weights)
         else:
             raise ValueError("gxe_enc must be one of ['tf', 'mlp', 'cnn']")
+
+        if self.cross_residual_mlp is not None and self.cross_residual_scale is not None:
+            delta_rep = self.cross_residual_mlp(fusion_in)
+            rep = rep + (self.cross_residual_scale * delta_rep)
+            self.last_cross_residual_norm = delta_rep.detach().norm(dim=1).mean()
 
         return rep, e_enc, g_enc
     
@@ -541,6 +653,13 @@ class GxE_ResidualTransformer(GxE_Transformer):
                  moe_shared_expert: bool = None,
                  moe_shared_expert_hidden_dim: int = None,
                  moe_loss_weight: float = None,
+                 adaptive_branch_gating: bool = False,
+                 branch_gate_hidden: int = 128,
+                 branch_gate_dropout: float = 0.0,
+                 cross_residual_fusion: bool = False,
+                 cross_residual_hidden: int = 256,
+                 cross_residual_dropout: float = 0.1,
+                 cross_residual_scale_init: float = 0.0,
                  config = None
                  ):
         super().__init__(
@@ -556,6 +675,13 @@ class GxE_ResidualTransformer(GxE_Transformer):
             moe_shared_expert=moe_shared_expert,
             moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
             moe_loss_weight=moe_loss_weight,
+            adaptive_branch_gating=adaptive_branch_gating,
+            branch_gate_hidden=branch_gate_hidden,
+            branch_gate_dropout=branch_gate_dropout,
+            cross_residual_fusion=cross_residual_fusion,
+            cross_residual_hidden=cross_residual_hidden,
+            cross_residual_dropout=cross_residual_dropout,
+            cross_residual_scale_init=cross_residual_scale_init,
             config=config,
         )
         self.residual = residual

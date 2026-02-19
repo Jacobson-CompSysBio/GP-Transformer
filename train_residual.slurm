@@ -59,6 +59,15 @@ export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb d
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches jacd5n45 baseline; "onehot" enables added categorical features
+
+# 3-branch-only architecture additions (ignored when FULL_TRANSFORMER=True)
+export ADAPTIVE_BRANCH_GATING=False
+export BRANCH_GATE_HIDDEN=128
+export BRANCH_GATE_DROPOUT=0.0
+export CROSS_RESIDUAL_FUSION=False
+export CROSS_RESIDUAL_HIDDEN=256
+export CROSS_RESIDUAL_DROPOUT=0.1
+export CROSS_RESIDUAL_SCALE_INIT=0.0
 export LOSS="envpcc+envmse+pcc+mse"
 export LOSS_WEIGHTS="1.0,0.1,0.1,0.1"
 export SCALE_TARGETS=False
@@ -149,6 +158,13 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --g_input_type $G_INPUT_TYPE \
         --env_categorical_mode $ENV_CATEGORICAL_MODE \
+        --adaptive_branch_gating $ADAPTIVE_BRANCH_GATING \
+        --branch_gate_hidden $BRANCH_GATE_HIDDEN \
+        --branch_gate_dropout $BRANCH_GATE_DROPOUT \
+        --cross_residual_fusion $CROSS_RESIDUAL_FUSION \
+        --cross_residual_hidden $CROSS_RESIDUAL_HIDDEN \
+        --cross_residual_dropout $CROSS_RESIDUAL_DROPOUT \
+        --cross_residual_scale_init $CROSS_RESIDUAL_SCALE_INIT \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \

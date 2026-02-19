@@ -238,6 +238,13 @@ def main():
     moe_shared_expert = _get_arg_or_env("moe_shared_expert", "MOE_SHARED_EXPERT", False, str2bool)
     moe_shared_expert_hidden_dim = _get_arg_or_env("moe_shared_expert_hidden_dim", "MOE_SHARED_EXPERT_HIDDEN_DIM", None, int)
     moe_loss_weight = _get_arg_or_env("moe_loss_weight", "MOE_LOSS_WEIGHT", 0.01, float)
+    adaptive_branch_gating = _get_arg_or_env("adaptive_branch_gating", "ADAPTIVE_BRANCH_GATING", False, str2bool)
+    branch_gate_hidden = _get_arg_or_env("branch_gate_hidden", "BRANCH_GATE_HIDDEN", 128, int)
+    branch_gate_dropout = _get_arg_or_env("branch_gate_dropout", "BRANCH_GATE_DROPOUT", 0.0, float)
+    cross_residual_fusion = _get_arg_or_env("cross_residual_fusion", "CROSS_RESIDUAL_FUSION", False, str2bool)
+    cross_residual_hidden = _get_arg_or_env("cross_residual_hidden", "CROSS_RESIDUAL_HIDDEN", 256, int)
+    cross_residual_dropout = _get_arg_or_env("cross_residual_dropout", "CROSS_RESIDUAL_DROPOUT", 0.1, float)
+    cross_residual_scale_init = _get_arg_or_env("cross_residual_scale_init", "CROSS_RESIDUAL_SCALE_INIT", 0.0, float)
     full_tf_mlp_type = _get_arg_or_env("full_tf_mlp_type", "FULL_TF_MLP_TYPE", None, str)
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
@@ -261,6 +268,8 @@ def main():
             moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
             moe_loss_weight=moe_loss_weight,
         ).to(device)
+        if is_main(rank) and (adaptive_branch_gating or cross_residual_fusion):
+            print("[INFO] adaptive_branch_gating/cross_residual_fusion are 3-branch-only features; ignoring because full_transformer=True.")
     else:
         model = GxE_Transformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
@@ -274,12 +283,23 @@ def main():
                                 moe_shared_expert=moe_shared_expert,
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
+                                adaptive_branch_gating=adaptive_branch_gating,
+                                branch_gate_hidden=branch_gate_hidden,
+                                branch_gate_dropout=branch_gate_dropout,
+                                cross_residual_fusion=cross_residual_fusion,
+                                cross_residual_hidden=cross_residual_hidden,
+                                cross_residual_dropout=cross_residual_dropout,
+                                cross_residual_scale_init=cross_residual_scale_init,
                                 config=config).to(device)
     if is_main(rank):
         model.print_trainable_parameters()
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
               f"full_transformer={args.full_transformer}")
+        print(
+            f"[CONFIG] adaptive_branch_gating={adaptive_branch_gating}, "
+            f"cross_residual_fusion={cross_residual_fusion}"
+        )
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -430,6 +450,14 @@ def main():
         run.define_metric("val_loss", step_metric="epoch")
         run.define_metric("train_loss_epoch/env_avg_pearson", step_metric="epoch")
         run.define_metric("val_loss/env_avg_pearson", step_metric="epoch")
+        run.define_metric("train/branch_w_g", step_metric="iter_num")
+        run.define_metric("train/branch_w_e", step_metric="iter_num")
+        run.define_metric("train/branch_w_ld", step_metric="iter_num")
+        run.define_metric("train/cross_residual_norm", step_metric="iter_num")
+        run.define_metric("train_epoch/branch_w_g", step_metric="epoch")
+        run.define_metric("train_epoch/branch_w_e", step_metric="epoch")
+        run.define_metric("train_epoch/branch_w_ld", step_metric="epoch")
+        run.define_metric("train_epoch/cross_residual_norm", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
@@ -473,6 +501,13 @@ def main():
                              "g_input_type": g_input_type,
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                             "adaptive_branch_gating": adaptive_branch_gating,
+                             "branch_gate_hidden": branch_gate_hidden,
+                             "branch_gate_dropout": branch_gate_dropout,
+                             "cross_residual_fusion": cross_residual_fusion,
+                             "cross_residual_hidden": cross_residual_hidden,
+                             "cross_residual_dropout": cross_residual_dropout,
+                             "cross_residual_scale_init": cross_residual_scale_init,
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
@@ -524,6 +559,11 @@ def main():
         
         # training steps
         step_times = []
+        branch_w_g_sum = 0.0
+        branch_w_e_sum = 0.0
+        branch_w_ld_sum = 0.0
+        cross_residual_norm_sum = 0.0
+        branch_diag_count = 0
         for step_idx, (xb, yb) in enumerate(train_loader):
             if epoch_num == 0 and is_main(rank):
                 t_step_start = time.time()
@@ -638,6 +678,28 @@ def main():
                     # DDP handles this with find_unused_parameters=True
                     loss_total = loss_total + moe_aux_loss
                     loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
+
+            branch_w = getattr(model.module, "last_branch_weight_mean", None)
+            if isinstance(branch_w, torch.Tensor) and branch_w.numel() >= 3:
+                branch_w_g = float(branch_w[0].detach().item())
+                branch_w_e = float(branch_w[1].detach().item())
+                branch_w_ld = float(branch_w[2].detach().item())
+            else:
+                branch_w_g = 0.0
+                branch_w_e = 0.0
+                branch_w_ld = 0.0
+
+            cross_residual_norm_t = getattr(model.module, "last_cross_residual_norm", None)
+            if isinstance(cross_residual_norm_t, torch.Tensor):
+                cross_residual_norm = float(cross_residual_norm_t.detach().item())
+            else:
+                cross_residual_norm = 0.0
+
+            branch_w_g_sum += branch_w_g
+            branch_w_e_sum += branch_w_e
+            branch_w_ld_sum += branch_w_ld
+            cross_residual_norm_sum += cross_residual_norm
+            branch_diag_count += 1
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
@@ -662,6 +724,10 @@ def main():
                     "train_loss": loss_total.item(),
                     "learning_rate": lr,
                     "iter_num": iter_num,
+                    "train/branch_w_g": branch_w_g,
+                    "train/branch_w_e": branch_w_e,
+                    "train/branch_w_ld": branch_w_ld,
+                    "train/cross_residual_norm": cross_residual_norm,
                 }
                 for k, v in loss_parts.items():
                     log_payload[f"train_loss/{k}"] = float(v)
@@ -766,6 +832,11 @@ def main():
                 log_epoch_payload[f"val_loss/{k}"] = float(v)
             log_epoch_payload["train_loss_epoch"] = train_total.item()
             log_epoch_payload["train_loss_epoch/env_avg_pearson"] = train_env_pcc
+            denom = max(1, branch_diag_count)
+            log_epoch_payload["train_epoch/branch_w_g"] = branch_w_g_sum / denom
+            log_epoch_payload["train_epoch/branch_w_e"] = branch_w_e_sum / denom
+            log_epoch_payload["train_epoch/branch_w_ld"] = branch_w_ld_sum / denom
+            log_epoch_payload["train_epoch/cross_residual_norm"] = cross_residual_norm_sum / denom
             for k, v in train_parts.items():
                 log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             wandb.log(log_epoch_payload)
@@ -847,6 +918,13 @@ def main():
                         "g_input_type": g_input_type,
                         "env_categorical_mode": env_categorical_mode,
                         "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                        "adaptive_branch_gating": adaptive_branch_gating,
+                        "branch_gate_hidden": branch_gate_hidden,
+                        "branch_gate_dropout": branch_gate_dropout,
+                        "cross_residual_fusion": cross_residual_fusion,
+                        "cross_residual_hidden": cross_residual_hidden,
+                        "cross_residual_dropout": cross_residual_dropout,
+                        "cross_residual_scale_init": cross_residual_scale_init,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,

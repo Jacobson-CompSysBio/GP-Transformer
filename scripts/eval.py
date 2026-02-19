@@ -286,6 +286,13 @@ def load_model(device: torch.device,
     moe_shared_expert = config.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
     moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
     moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
+    adaptive_branch_gating = config.get("adaptive_branch_gating", getattr(args, "adaptive_branch_gating", False))
+    branch_gate_hidden = config.get("branch_gate_hidden", getattr(args, "branch_gate_hidden", 128))
+    branch_gate_dropout = config.get("branch_gate_dropout", getattr(args, "branch_gate_dropout", 0.0))
+    cross_residual_fusion = config.get("cross_residual_fusion", getattr(args, "cross_residual_fusion", False))
+    cross_residual_hidden = config.get("cross_residual_hidden", getattr(args, "cross_residual_hidden", 256))
+    cross_residual_dropout = config.get("cross_residual_dropout", getattr(args, "cross_residual_dropout", 0.1))
+    cross_residual_scale_init = config.get("cross_residual_scale_init", getattr(args, "cross_residual_scale_init", 0.0))
     g_input_type = config.get("g_input_type", getattr(args, "g_input_type", "tokens"))
     env_categorical_mode = config.get(
         "env_categorical_mode",
@@ -348,6 +355,8 @@ def load_model(device: torch.device,
                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                 moe_loss_weight=moe_loss_weight,
             ).to(device)
+        if adaptive_branch_gating or cross_residual_fusion:
+            print("[INFO] adaptive_branch_gating/cross_residual_fusion are 3-branch-only; ignored for full_transformer checkpoints.")
     elif residual:
         model = GxE_ResidualTransformer(g_enc=g_enc,
                                         e_enc=e_enc,
@@ -361,6 +370,13 @@ def load_model(device: torch.device,
                                         moe_shared_expert=moe_shared_expert,
                                         moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                         moe_loss_weight=moe_loss_weight,
+                                        adaptive_branch_gating=adaptive_branch_gating,
+                                        branch_gate_hidden=branch_gate_hidden,
+                                        branch_gate_dropout=branch_gate_dropout,
+                                        cross_residual_fusion=cross_residual_fusion,
+                                        cross_residual_hidden=cross_residual_hidden,
+                                        cross_residual_dropout=cross_residual_dropout,
+                                        cross_residual_scale_init=cross_residual_scale_init,
                                         residual=residual,
                                         config=config).to(device)
         model.detach_ymean_in_sum = args.detach_ymean
@@ -377,6 +393,13 @@ def load_model(device: torch.device,
                                 moe_shared_expert=moe_shared_expert,
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
+                                adaptive_branch_gating=adaptive_branch_gating,
+                                branch_gate_hidden=branch_gate_hidden,
+                                branch_gate_dropout=branch_gate_dropout,
+                                cross_residual_fusion=cross_residual_fusion,
+                                cross_residual_hidden=cross_residual_hidden,
+                                cross_residual_dropout=cross_residual_dropout,
+                                cross_residual_scale_init=cross_residual_scale_init,
                                 config=config).to(device)
     model.load_state_dict(state, strict=False)
     model.eval()
