@@ -33,6 +33,18 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
+def normalize_val_prediction_mode(value: str) -> str:
+    v = str(value).strip().lower()
+    if v in {"", "false", "0", "off", "none", "no", "lyo", "year", "leave-year-out", "leave_year_out"}:
+        return "lyo"
+    if v in {"leo", "env", "environment", "leave-environment-out", "leave_environment_out"}:
+        return "leo"
+    if v in {"lgo", "geno", "genotype", "leave-genotype-out", "leave_genotype_out"}:
+        return "lgo"
+    raise ValueError(
+        f"Unsupported val_prediction='{value}'. Allowed modes: ['lyo', 'leo', 'lgo']"
+    )
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--g_enc", type=str2bool, default=True)
@@ -103,16 +115,23 @@ def parse_args():
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
+    p.add_argument("--val_prediction", type=str, default="lyo",
+                   help="Validation prediction mode: 'lyo' (Leave-Year-Out), 'leo' (Leave-Environment-Out), or 'lgo' (Leave-Genotype-Out).")
     p.add_argument("--leo_val", type=str2bool, default=False,
-                   help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
+                   help="Deprecated alias for val_prediction='leo'.")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--lgo_val_fraction", type=float, default=0.15,
+                   help="Fraction of genotypes to hold out for LGO validation (default 0.15)")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
     # Backward compatibility for older scripts/configs that used env_cat_embeddings.
     if getattr(args, "env_cat_embeddings", None) is not None and "--env_categorical_mode" not in sys.argv:
         args.env_categorical_mode = "onehot" if bool(args.env_cat_embeddings) else "drop"
+    if getattr(args, "leo_val", False) and "--val_prediction" not in sys.argv:
+        args.val_prediction = "leo"
+    args.val_prediction = normalize_val_prediction_mode(args.val_prediction)
     return args
 
 def make_run_name(args) -> str:
@@ -140,7 +159,12 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
-    leo = "leo+" if getattr(args, "leo_val", False) else ""
+    val_prediction_raw = _get_arg_env("val_prediction", "VAL_PREDICTION", None, str)
+    legacy_leo = _get_arg_env("leo_val", "LEO_VAL", False, str2bool)
+    if val_prediction_raw is None:
+        val_prediction_raw = "leo" if legacy_leo else "lyo"
+    val_prediction = normalize_val_prediction_mode(val_prediction_raw)
+    valpred = "leo+" if val_prediction == "leo" else ("lgo+" if val_prediction == "lgo" else "")
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -175,7 +199,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + valpred + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

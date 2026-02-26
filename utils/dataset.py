@@ -120,7 +120,9 @@ def compute_leo_val_envs(
     
     # Get unique environments from train/val pool
     all_envs = x_raw.loc[train_val_mask, 'Env'].unique()
-    n_val_envs = max(1, int(len(all_envs) * val_fraction))
+    if len(all_envs) == 0:
+        raise ValueError("No pre-test environments available for LEO split selection.")
+    n_val_envs = min(len(all_envs), max(1, int(len(all_envs) * val_fraction)))
     
     # Randomly select environments for validation
     val_envs = set(rng.choice(all_envs, size=n_val_envs, replace=False))
@@ -128,11 +130,46 @@ def compute_leo_val_envs(
     return val_envs
 
 
+def _extract_genotype_series(x_raw: pd.DataFrame) -> pd.Series:
+    """
+    Return genotype/hybrid identifier for each row.
+    Prefers explicit Hybrid column when present, else parses id as "{Env}-{Hybrid}".
+    """
+    if "Hybrid" in x_raw.columns:
+        return x_raw["Hybrid"].astype(str)
+    return x_raw["id"].astype(str).apply(lambda x: x.split("-", 1)[1] if "-" in x else x)
+
+
+def compute_lgo_val_genotypes(
+    x_raw: pd.DataFrame,
+    test_year: int = 2024,
+    val_fraction: float = 0.15,
+    seed: int = 42,
+) -> set:
+    """
+    Compute which genotypes should be held out for LGO validation.
+    """
+    rng = np.random.default_rng(seed)
+
+    x_raw = x_raw.copy()
+    x_raw["Year"] = x_raw["Env"].astype(str).apply(_env_year_from_str)
+    x_raw["GenotypeID"] = _extract_genotype_series(x_raw)
+    train_val_mask = x_raw["Year"] < test_year
+
+    all_genotypes = x_raw.loc[train_val_mask, "GenotypeID"].dropna().astype(str).unique()
+    if len(all_genotypes) == 0:
+        raise ValueError("No pre-test genotypes available for LGO split selection.")
+    n_val_genotypes = min(len(all_genotypes), max(1, int(len(all_genotypes) * val_fraction)))
+    val_genotypes = set(rng.choice(all_genotypes, size=n_val_genotypes, replace=False))
+
+    return val_genotypes
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
     def __init__(self,
-                 split='train', # train <= 2022, val == 2023
+                 split='train', # default LYO: train <= 2022, val == 2023
                  data_path='data/maize_data_2014-2023_vs_2024_v2/', # need to go up one level and then down to data directory
                  residual: bool = False,
                  scaler: StandardScaler | None = None,
@@ -143,9 +180,12 @@ class GxE_Dataset(Dataset):
                  g_input_type: str = "tokens",
                  env_categorical_mode: str = "drop",
                  marker_stats: Optional[Dict[str, object]] = None,
+                 val_prediction: str = "lyo",
+                 val_holdout_ids: Optional[set] = None,
                  leo_val: bool = False,
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
+                 lgo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
                  ):
         
@@ -162,19 +202,28 @@ class GxE_Dataset(Dataset):
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
             env_categorical_mode (str): "drop" (legacy baseline) or "onehot" categorical env handling
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
-            leo_val (bool): if True, use Leave-Environment-Out validation
-            leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
+            val_prediction (str): 'lyo' (default), 'leo', or 'lgo' validation split mode
+            val_holdout_ids (Optional[set]): pre-computed holdout ids from train split (envs for LEO, genotypes for LGO)
+            leo_val (bool): deprecated alias for val_prediction='leo'
+            leo_val_envs (Optional[set]): deprecated alias for val_holdout_ids in LEO mode
             leo_val_fraction (float): fraction of environments to hold out for LEO val
-            leo_seed (int): random seed for LEO environment selection
+            lgo_val_fraction (float): fraction of genotypes to hold out for LGO val
+            leo_seed (int): random seed for LEO/LGO holdout selection
         """
         super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
-        self.leo_val = leo_val
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
+        if leo_val and str(val_prediction).strip().lower() == "lyo":
+            val_prediction = "leo"
+        self.val_prediction = normalize_val_prediction_mode(val_prediction)
+        self.leo_val = self.val_prediction == "leo"
+        self.lgo_val = self.val_prediction == "lgo"
+        if val_holdout_ids is None and leo_val_envs is not None:
+            val_holdout_ids = leo_val_envs
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
@@ -219,28 +268,33 @@ class GxE_Dataset(Dataset):
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
-        # LEO validation: hold out entire environments (not years)
-        if leo_val and split in ("train", "val"):
-            # Compute or use provided LEO val environments
-            if leo_val_envs is None:
-                # First call (train split) - compute the held-out environments
-                leo_val_envs = compute_leo_val_envs(
-                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
-                )
-            self.leo_val_envs = leo_val_envs
-            
-            # Filter to years before test (2014-2023)
-            pre_test_mask = x_raw['Year'] < 2024
-            env_in_val = x_raw['Env'].isin(leo_val_envs)
-            
+        # Explicit split modes:
+        # - LYO: year holdout (legacy default)
+        # - LEO: environment holdout
+        # - LGO: genotype holdout
+        if split in ("train", "val") and self.val_prediction in {"leo", "lgo"}:
+            pre_test_mask = x_raw["Year"] < 2024
+            if self.val_prediction == "leo":
+                if val_holdout_ids is None:
+                    val_holdout_ids = compute_leo_val_envs(
+                        x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                    )
+                in_val = x_raw["Env"].isin(val_holdout_ids)
+            else:
+                x_raw["GenotypeID"] = _extract_genotype_series(x_raw)
+                if val_holdout_ids is None:
+                    val_holdout_ids = compute_lgo_val_genotypes(
+                        x_raw, test_year=2024, val_fraction=lgo_val_fraction, seed=leo_seed
+                    )
+                in_val = x_raw["GenotypeID"].isin(val_holdout_ids)
+
+            self.val_holdout_ids = set(val_holdout_ids)
             if split == "train":
-                # Train: all pre-2024 data EXCEPT held-out environments
-                keep_mask = pre_test_mask & ~env_in_val
-            else:  # val
-                # Val: only the held-out environments (from any year < 2024)
-                keep_mask = pre_test_mask & env_in_val
+                keep_mask = pre_test_mask & ~in_val
+            else:
+                keep_mask = pre_test_mask & in_val
         else:
-            self.leo_val_envs = None
+            self.val_holdout_ids = None
             if split == "train":
                 cutoff = 2022 if train_year_max is None else train_year_max
                 keep_mask = x_raw['Year'] <= cutoff
@@ -249,6 +303,8 @@ class GxE_Dataset(Dataset):
                 keep_mask = x_raw['Year'] == which
             else: # 'test', 'sub'
                 keep_mask = x_raw['Year'] >= 2024
+        self.leo_val_envs = self.val_holdout_ids if self.val_prediction == "leo" else None
+        self.lgo_val_genotypes = self.val_holdout_ids if self.val_prediction == "lgo" else None
         
         ### FILTER/ALIGN X/Y BY MASK BUILT ON X ###
         x_filt = x_raw.loc[keep_mask.values].reset_index(drop=True)
@@ -270,15 +326,13 @@ class GxE_Dataset(Dataset):
         ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
         # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
         # Falls back to full id if no "-" separator is present
-        hybrid_names = self.meta['id'].astype(str).apply(
-            lambda x: x.split('-', 1)[1] if '-' in x else x
-        )
+        hybrid_names = _extract_genotype_series(x_filt)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
 
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
-        feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
+        feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'GenotypeID', 'Yield_Mg_ha'], errors='ignore')
 
         # sanity
         if feature_df.shape[1] < N_ENV:

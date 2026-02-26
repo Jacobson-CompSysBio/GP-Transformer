@@ -60,9 +60,10 @@ export SCALE_TARGETS=False # whether to standardize the target values
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
-# LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
+# Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
+export VAL_PREDICTION=leo
 export LEO_VAL_FRACTION=0.15
+export LGO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -119,8 +120,9 @@ srun -N ${SLURM_NNODES} \
         --scale_targets $SCALE_TARGETS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
-        --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --val_prediction $VAL_PREDICTION \
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --lgo_val_fraction $LGO_VAL_FRACTION
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

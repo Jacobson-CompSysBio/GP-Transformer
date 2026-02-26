@@ -113,17 +113,28 @@ def main():
     g = torch.Generator()
     g.manual_seed(args.seed + rank)
 
-    # Check if using LEO (Leave-Environment-Out) validation
-    leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
+    # Validation split mode: LYO (default), LEO, or LGO
+    legacy_leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
+    val_prediction_raw = _get_arg_or_env("val_prediction", "VAL_PREDICTION", None, str)
+    if val_prediction_raw is None:
+        val_prediction_raw = "leo" if legacy_leo_val else "lyo"
+    val_prediction = normalize_val_prediction_mode(val_prediction_raw)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    lgo_val_fraction = _get_arg_or_env("lgo_val_fraction", "LGO_VAL_FRACTION", 0.15, float)
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
     
-    if is_main(rank) and leo_val:
-        print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
-        print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank):
+        if val_prediction == "leo":
+            print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
+            print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+        elif val_prediction == "lgo":
+            print(f"[INFO] Using LGO (Leave-Genotype-Out) validation")
+            print(f"[INFO] Holding out {lgo_val_fraction*100:.0f}% of genotypes for validation")
+        else:
+            print("[INFO] Using LYO (Leave-Year-Out) validation: train <= 2022, val = 2023")
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -137,18 +148,21 @@ def main():
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=None,
-        leo_val=leo_val,
+        val_prediction=val_prediction,
+        leo_val=legacy_leo_val,
         leo_val_fraction=leo_val_fraction,
+        lgo_val_fraction=lgo_val_fraction,
         leo_seed=args.seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
-    leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
+    val_holdout_ids = train_ds.val_holdout_ids  # Pass to val_ds for consistency
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_prediction in {"leo", "lgo"}:
+        holdout_label = "envs" if val_prediction == "leo" else "genotypes"
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
-        print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+        print(f"[INFO] {val_prediction.upper()} val {holdout_label}: {len(val_holdout_ids) if val_holdout_ids else 0}")
     
     val_ds = GxE_Dataset(
         split="val",
@@ -159,11 +173,14 @@ def main():
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
-        leo_val=leo_val,
-        leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        val_prediction=val_prediction,
+        leo_val=legacy_leo_val,
+        val_holdout_ids=val_holdout_ids,  # Use same held-out ids computed by train
+        leo_val_fraction=leo_val_fraction,
+        lgo_val_fraction=lgo_val_fraction,
     )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_prediction in {"leo", "lgo"}:
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -435,6 +452,9 @@ def main():
                              "g_input_type": g_input_type,
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                             "val_prediction": val_prediction,
+                             "leo_val_fraction": leo_val_fraction if val_prediction == "leo" else None,
+                             "lgo_val_fraction": lgo_val_fraction if val_prediction == "lgo" else None,
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
@@ -763,6 +783,9 @@ def main():
                         "g_input_type": g_input_type,
                         "env_categorical_mode": env_categorical_mode,
                         "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                        "val_prediction": val_prediction,
+                        "leo_val_fraction": leo_val_fraction if val_prediction == "leo" else None,
+                        "lgo_val_fraction": lgo_val_fraction if val_prediction == "lgo" else None,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,

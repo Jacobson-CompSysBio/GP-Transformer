@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J longtest
-#SBATCH -N 2
-#SBATCH -t 24:00:00
-#SBATCH -p extended
+#SBATCH -N 4
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -47,7 +47,7 @@ export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=5e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -60,7 +60,7 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
@@ -78,9 +78,10 @@ export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
-# LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
+# Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
+export VAL_PREDICTION=lgo
 export LEO_VAL_FRACTION=0.15
+export LGO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -154,8 +155,9 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
-        --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --val_prediction $VAL_PREDICTION \
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --lgo_val_fraction $LGO_VAL_FRACTION
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

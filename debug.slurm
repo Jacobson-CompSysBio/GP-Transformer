@@ -72,9 +72,10 @@ export CONTRASTIVE_TEMPERATURE=0.5
 export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
 export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 
-# LEO (Leave-Environment-Out) validation: hold out entire environments for val
-export LEO_VAL=True
+# Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
+export VAL_PREDICTION=leo
 export LEO_VAL_FRACTION=0.15
+export LGO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -138,8 +139,9 @@ srun -N ${SLURM_NNODES} \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
         --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
-        --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --val_prediction $VAL_PREDICTION \
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --lgo_val_fraction $LGO_VAL_FRACTION
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

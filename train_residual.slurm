@@ -80,10 +80,11 @@ export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 export ENV_CONTRASTIVE_WEIGHT=0.05
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
-# LEO (Leave-Environment-Out) validation: hold out entire environments for val
-# This better simulates test performance on unseen environments
-export LEO_VAL=True
-export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
+# Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
+# LEO/LGO better simulate generalization to unseen environments/genotypes.
+export VAL_PREDICTION=leo
+export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (for VAL_PREDICTION=leo)
+export LGO_VAL_FRACTION=0.15  # fraction of genotypes to hold out (for VAL_PREDICTION=lgo)
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -152,8 +153,9 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
-        --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --val_prediction $VAL_PREDICTION \
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --lgo_val_fraction $LGO_VAL_FRACTION
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
