@@ -64,6 +64,12 @@ def _rebuild_marker_stats(payload: dict) -> dict | None:
         "columns": list(payload["columns"]),
     }
 
+
+def _rebuild_parent_stats(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    return payload
+
 def load_data(args,
               split: str = "test",
               batch_size: int = 32,
@@ -71,7 +77,11 @@ def load_data(args,
               y_scalers: dict | None = None,
               marker_stats: dict | None = None,
               g_input_type: str = "tokens",
-              env_categorical_mode: str = "drop"):
+              env_categorical_mode: str = "drop",
+              parent_cfg: dict | None = None,
+              parent_stats: dict | None = None):
+
+    parent_cfg = parent_cfg or {}
 
     ds = GxE_Dataset(
         split=split,
@@ -82,6 +92,17 @@ def load_data(args,
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
+        parent_features=bool(parent_cfg.get("parent_features", False)),
+        parent_use_embeddings=bool(parent_cfg.get("parent_use_embeddings", False)),
+        parent_use_interaction=bool(parent_cfg.get("parent_use_interaction", False)),
+        parent_use_seen_flags=bool(parent_cfg.get("parent_use_seen_flags", False)),
+        parent_use_history_features=bool(parent_cfg.get("parent_use_history_features", False)),
+        parent_use_gca_features=bool(parent_cfg.get("parent_use_gca_features", False)),
+        parent_use_sca_features=bool(parent_cfg.get("parent_use_sca_features", False)),
+        parent_use_source_meta=bool(parent_cfg.get("parent_use_source_meta", False)),
+        parent_oof_folds=int(parent_cfg.get("parent_oof_folds", 5)),
+        parent_shrink_alpha=float(parent_cfg.get("parent_shrink_alpha", 10.0)),
+        parent_stats=parent_stats,
     )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
     return ds, loader
@@ -304,6 +325,26 @@ def load_model(device: torch.device,
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
     y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
     marker_stats = _rebuild_marker_stats(payload.get("marker_stats", None))
+    parent_stats = _rebuild_parent_stats(payload.get("parent_stats", None))
+
+    parent_cfg = {
+        "parent_features": bool(config.get("parent_features", getattr(args, "parent_features", False))),
+        "parent_use_embeddings": bool(config.get("parent_use_embeddings", getattr(args, "parent_use_embeddings", False))),
+        "parent_use_interaction": bool(config.get("parent_use_interaction", getattr(args, "parent_use_interaction", False))),
+        "parent_use_seen_flags": bool(config.get("parent_use_seen_flags", getattr(args, "parent_use_seen_flags", False))),
+        "parent_use_history_features": bool(config.get("parent_use_history_features", getattr(args, "parent_use_history_features", False))),
+        "parent_use_gca_features": bool(config.get("parent_use_gca_features", getattr(args, "parent_use_gca_features", False))),
+        "parent_use_sca_features": bool(config.get("parent_use_sca_features", getattr(args, "parent_use_sca_features", False))),
+        "parent_use_source_meta": bool(config.get("parent_use_source_meta", getattr(args, "parent_use_source_meta", False))),
+        "parent_embed_dim": int(config.get("parent_embed_dim", getattr(args, "parent_embed_dim", 32))),
+        "parent_oof_folds": int(config.get("parent_oof_folds", getattr(args, "parent_oof_folds", 5))),
+        "parent_shrink_alpha": float(config.get("parent_shrink_alpha", getattr(args, "parent_shrink_alpha", 10.0))),
+        "n_parent1_ids": int(config.get("n_parent1_ids", 1)),
+        "n_parent2_ids": int(config.get("n_parent2_ids", 1)),
+        "n_parent_dataset_ids": int(config.get("n_parent_dataset_ids", 1)),
+        "n_parent_source_ids": int(config.get("n_parent_source_ids", 1)),
+        "n_parent_bioproject_ids": int(config.get("n_parent_bioproject_ids", 1)),
+    }
 
     config = Config(block_size=blk,
                     g_input_type=g_input_type,
@@ -313,7 +354,17 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    use_parent_features=parent_cfg["parent_features"],
+                    use_parent_embeddings=parent_cfg["parent_use_embeddings"],
+                    use_parent_interaction=parent_cfg["parent_use_interaction"],
+                    use_parent_source_meta=parent_cfg["parent_use_source_meta"],
+                    parent_embed_dim=parent_cfg["parent_embed_dim"],
+                    n_parent1_ids=parent_cfg["n_parent1_ids"],
+                    n_parent2_ids=parent_cfg["n_parent2_ids"],
+                    n_parent_dataset_ids=parent_cfg["n_parent_dataset_ids"],
+                    n_parent_source_ids=parent_cfg["n_parent_source_ids"],
+                    n_parent_bioproject_ids=parent_cfg["n_parent_bioproject_ids"])
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts
@@ -381,7 +432,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_cfg, parent_stats
 
 def main():
     args = parse_args()
@@ -413,7 +464,7 @@ def main():
     torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_cfg, parent_stats = load_model(device, args)    
     
     # load data
     print("Loading data...")
@@ -423,6 +474,8 @@ def main():
                                     marker_stats=marker_stats,
                                     g_input_type=g_input_type,
                                     env_categorical_mode=env_categorical_mode,
+                                    parent_cfg=parent_cfg,
+                                    parent_stats=parent_stats,
                                     split="test",
                                     batch_size=32)
 

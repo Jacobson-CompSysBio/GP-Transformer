@@ -2,6 +2,7 @@
 import time, sys
 import re
 from pathlib import Path
+from collections import defaultdict
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -165,6 +166,208 @@ def compute_lgo_val_genotypes(
     return val_genotypes
 
 
+PARENT_UNK = "UNK"
+PARENT_PAIR_SEP = "|||"
+
+
+def _split_hybrid_parents(hybrid: str) -> tuple[str, str]:
+    raw = str(hybrid).strip()
+    if not raw:
+        return PARENT_UNK, PARENT_UNK
+    parts = [p.strip() for p in raw.split("/", 1)]
+    if len(parts) == 1:
+        p1 = parts[0] if parts[0] else PARENT_UNK
+        return p1, PARENT_UNK
+    p1 = parts[0] if parts[0] else PARENT_UNK
+    p2 = parts[1] if parts[1] else PARENT_UNK
+    return p1, p2
+
+
+def _extract_parent_series(hybrid_series: pd.Series) -> tuple[pd.Series, pd.Series]:
+    p1_list = []
+    p2_list = []
+    for h in hybrid_series.astype(str).tolist():
+        p1, p2 = _split_hybrid_parents(h)
+        p1_list.append(p1)
+        p2_list.append(p2)
+    return pd.Series(p1_list, index=hybrid_series.index), pd.Series(p2_list, index=hybrid_series.index)
+
+
+def _pair_key(p1: str, p2: str) -> str:
+    return f"{p1}{PARENT_PAIR_SEP}{p2}"
+
+
+def _fit_index_map(values: pd.Series) -> dict:
+    uniq = sorted({str(v).strip() if str(v).strip() else PARENT_UNK for v in values.astype(str).tolist()})
+    mapping = {PARENT_UNK: 0}
+    for v in uniq:
+        if v == PARENT_UNK:
+            continue
+        mapping[v] = len(mapping)
+    return mapping
+
+
+def _map_with_unk(values: pd.Series, mapping: dict) -> np.ndarray:
+    return np.asarray([int(mapping.get(str(v), 0)) for v in values.astype(str).tolist()], dtype=np.int64)
+
+
+def _default_key_inbreds_path(data_path: str) -> Path:
+    return (Path(data_path).resolve().parent / "Training_data" / "key_inbreds_G2F_2014-2025.txt")
+
+
+def _load_key_inbreds_metadata(data_path: str, parent_key_path: Optional[str] = None) -> dict:
+    key_path = Path(parent_key_path) if parent_key_path else _default_key_inbreds_path(data_path)
+    if not key_path.exists():
+        return {}
+    try:
+        df = pd.read_csv(key_path, sep="\t")
+    except Exception:
+        return {}
+    if "Cultivar" not in df.columns:
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        cultivar = str(row.get("Cultivar", "")).strip()
+        if not cultivar:
+            continue
+        out[cultivar] = {
+            "Dataset": str(row.get("Dataset", PARENT_UNK)).strip() or PARENT_UNK,
+            "SourceName": str(row.get("SourceName", PARENT_UNK)).strip() or PARENT_UNK,
+            "Bioproject": str(row.get("Bioproject", PARENT_UNK)).strip() or PARENT_UNK,
+        }
+    return out
+
+
+def _shrunk_mean_map(
+    key_series: pd.Series,
+    value_series: pd.Series,
+    alpha: float,
+    global_mean: float,
+) -> tuple[dict, dict]:
+    frame = pd.DataFrame({"k": key_series.astype(str), "v": value_series.astype(float)})
+    grp = frame.groupby("k")["v"].agg(["mean", "count"])
+    count = grp["count"].astype(float)
+    weight = count / (count + float(alpha))
+    shrunk = weight * grp["mean"] + (1.0 - weight) * float(global_mean)
+    return shrunk.to_dict(), grp["count"].astype(int).to_dict()
+
+
+def _compute_train_prior_parent_history(
+    years: np.ndarray,
+    envs: np.ndarray,
+    hybrids: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+) -> dict:
+    n = len(years)
+    out = {
+        "p1_seen": np.zeros(n, dtype=np.float32),
+        "p2_seen": np.zeros(n, dtype=np.float32),
+        "pair_seen": np.zeros(n, dtype=np.float32),
+        "p1_hybrid_count": np.zeros(n, dtype=np.float32),
+        "p1_env_count": np.zeros(n, dtype=np.float32),
+        "p1_year_count": np.zeros(n, dtype=np.float32),
+        "p2_hybrid_count": np.zeros(n, dtype=np.float32),
+        "p2_env_count": np.zeros(n, dtype=np.float32),
+        "p2_year_count": np.zeros(n, dtype=np.float32),
+    }
+
+    p1_hyb = defaultdict(set)
+    p1_env = defaultdict(set)
+    p1_year = defaultdict(set)
+    p2_hyb = defaultdict(set)
+    p2_env = defaultdict(set)
+    p2_year = defaultdict(set)
+    seen_pairs = set()
+
+    years_sorted = sorted({int(y) for y in years.tolist()})
+    for y in years_sorted:
+        idx = np.where(years == y)[0]
+        for i in idx:
+            k1 = p1[i]
+            k2 = p2[i]
+            pk = _pair_key(k1, k2)
+            out["p1_seen"][i] = 1.0 if k1 in p1_hyb else 0.0
+            out["p2_seen"][i] = 1.0 if k2 in p2_hyb else 0.0
+            out["pair_seen"][i] = 1.0 if pk in seen_pairs else 0.0
+
+            out["p1_hybrid_count"][i] = float(len(p1_hyb[k1]))
+            out["p1_env_count"][i] = float(len(p1_env[k1]))
+            out["p1_year_count"][i] = float(len(p1_year[k1]))
+            out["p2_hybrid_count"][i] = float(len(p2_hyb[k2]))
+            out["p2_env_count"][i] = float(len(p2_env[k2]))
+            out["p2_year_count"][i] = float(len(p2_year[k2]))
+
+        for i in idx:
+            k1 = p1[i]
+            k2 = p2[i]
+            p1_hyb[k1].add(hybrids[i])
+            p1_env[k1].add(envs[i])
+            p1_year[k1].add(int(years[i]))
+            p2_hyb[k2].add(hybrids[i])
+            p2_env[k2].add(envs[i])
+            p2_year[k2].add(int(years[i]))
+            seen_pairs.add(_pair_key(k1, k2))
+
+    return out
+
+
+def _compute_train_oof_parent_effects(
+    hybrids: pd.Series,
+    p1: pd.Series,
+    p2: pd.Series,
+    resid: pd.Series,
+    n_folds: int,
+    shrink_alpha: float,
+) -> dict:
+    n = len(hybrids)
+    if n == 0:
+        return {
+            "p1_gca": np.zeros(0, dtype=np.float32),
+            "p2_gca": np.zeros(0, dtype=np.float32),
+            "pair_sca": np.zeros(0, dtype=np.float32),
+            "pair_sca_count": np.zeros(0, dtype=np.float32),
+            "pair_sca_weight": np.zeros(0, dtype=np.float32),
+        }
+    n_folds = max(2, int(n_folds))
+    fold_id = (pd.util.hash_pandas_object(hybrids.astype(str), index=False).astype(np.uint64) % np.uint64(n_folds)).astype(int).to_numpy()
+    global_mean = float(resid.mean())
+
+    p1_oof = np.full(n, global_mean, dtype=np.float32)
+    p2_oof = np.full(n, global_mean, dtype=np.float32)
+    pair_oof = np.full(n, global_mean, dtype=np.float32)
+    pair_count_oof = np.zeros(n, dtype=np.float32)
+    pair_weight_oof = np.zeros(n, dtype=np.float32)
+
+    pair_key_all = (p1.astype(str) + PARENT_PAIR_SEP + p2.astype(str))
+    for f in range(n_folds):
+        train_mask = fold_id != f
+        valid_mask = ~train_mask
+        if not np.any(valid_mask):
+            continue
+
+        p1_map, _ = _shrunk_mean_map(p1[train_mask], resid[train_mask], shrink_alpha, global_mean)
+        p2_map, _ = _shrunk_mean_map(p2[train_mask], resid[train_mask], shrink_alpha, global_mean)
+        pair_map, pair_count_map = _shrunk_mean_map(pair_key_all[train_mask], resid[train_mask], shrink_alpha, global_mean)
+
+        idx = np.where(valid_mask)[0]
+        p1_oof[idx] = p1.iloc[idx].astype(str).map(p1_map).fillna(global_mean).to_numpy(dtype=np.float32)
+        p2_oof[idx] = p2.iloc[idx].astype(str).map(p2_map).fillna(global_mean).to_numpy(dtype=np.float32)
+        pair_vals = pair_key_all.iloc[idx].astype(str)
+        pair_oof[idx] = pair_vals.map(pair_map).fillna(global_mean).to_numpy(dtype=np.float32)
+        counts = pair_vals.map(pair_count_map).fillna(0).to_numpy(dtype=np.float32)
+        pair_count_oof[idx] = counts
+        pair_weight_oof[idx] = counts / (counts + float(shrink_alpha))
+
+    return {
+        "p1_gca": p1_oof,
+        "p2_gca": p2_oof,
+        "pair_sca": pair_oof,
+        "pair_sca_count": pair_count_oof,
+        "pair_sca_weight": pair_weight_oof,
+    }
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
@@ -187,6 +390,18 @@ class GxE_Dataset(Dataset):
                  leo_val_fraction: float = 0.15,
                  lgo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 parent_features: bool = False,
+                 parent_use_embeddings: bool = True,
+                 parent_use_interaction: bool = True,
+                 parent_use_seen_flags: bool = True,
+                 parent_use_history_features: bool = True,
+                 parent_use_gca_features: bool = True,
+                 parent_use_sca_features: bool = True,
+                 parent_use_source_meta: bool = True,
+                 parent_oof_folds: int = 5,
+                 parent_shrink_alpha: float = 10.0,
+                 parent_stats: Optional[Dict[str, object]] = None,
+                 parent_key_path: Optional[str] = None,
                  ):
         
         """
@@ -209,6 +424,18 @@ class GxE_Dataset(Dataset):
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             lgo_val_fraction (float): fraction of genotypes to hold out for LGO val
             leo_seed (int): random seed for LEO/LGO holdout selection
+            parent_features (bool): enable parent-aware feature pipeline
+            parent_use_embeddings (bool): expose parent ids for learned embeddings
+            parent_use_interaction (bool): expose explicit p1 x p2 embedding interaction path
+            parent_use_seen_flags (bool): add seen/novel parent flags
+            parent_use_history_features (bool): add parent history counts (hybrid/env/year)
+            parent_use_gca_features (bool): add shrinkage GCA-like parent effects
+            parent_use_sca_features (bool): add shrinkage SCA-like pair effects
+            parent_use_source_meta (bool): add parent source metadata ids and same_source flag
+            parent_oof_folds (int): folds for OOF parent-effect estimation in train split
+            parent_shrink_alpha (float): shrinkage strength for GCA/SCA effects
+            parent_stats (Optional[Dict[str, object]]): train-fitted parent stats for val/test
+            parent_key_path (Optional[str]): override path to key_inbreds metadata file
         """
         super().__init__()
         self.split = split
@@ -222,6 +449,32 @@ class GxE_Dataset(Dataset):
         self.val_prediction = normalize_val_prediction_mode(val_prediction)
         self.leo_val = self.val_prediction == "leo"
         self.lgo_val = self.val_prediction == "lgo"
+        self.parent_features = bool(parent_features)
+        self.parent_use_embeddings = bool(parent_use_embeddings) and self.parent_features
+        self.parent_use_interaction = bool(parent_use_interaction) and self.parent_use_embeddings
+        self.parent_use_seen_flags = bool(parent_use_seen_flags) and self.parent_features
+        self.parent_use_history_features = bool(parent_use_history_features) and self.parent_features
+        self.parent_use_gca_features = bool(parent_use_gca_features) and self.parent_features
+        self.parent_use_sca_features = bool(parent_use_sca_features) and self.parent_features
+        self.parent_use_source_meta = bool(parent_use_source_meta) and self.parent_features
+        self.parent_oof_folds = int(parent_oof_folds)
+        self.parent_shrink_alpha = float(parent_shrink_alpha)
+        self.parent_key_path = parent_key_path
+        self.parent_stats = None
+        self.parent_numeric_cols = []
+        self.parent1_id_arr = None
+        self.parent2_id_arr = None
+        self.parent1_dataset_id_arr = None
+        self.parent2_dataset_id_arr = None
+        self.parent1_source_id_arr = None
+        self.parent2_source_id_arr = None
+        self.parent1_bioproject_id_arr = None
+        self.parent2_bioproject_id_arr = None
+        self.n_parent1_ids = 1
+        self.n_parent2_ids = 1
+        self.n_parent_dataset_ids = 1
+        self.n_parent_source_ids = 1
+        self.n_parent_bioproject_ids = 1
         if val_holdout_ids is None and leo_val_envs is not None:
             val_holdout_ids = leo_val_envs
         if self.g_input_type not in {"tokens", "grm"}:
@@ -329,6 +582,200 @@ class GxE_Dataset(Dataset):
         hybrid_names = _extract_genotype_series(x_filt)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
+        parent1_series, parent2_series = _extract_parent_series(hybrid_names)
+        pair_series = parent1_series.astype(str) + PARENT_PAIR_SEP + parent2_series.astype(str)
+
+        parent_numeric = pd.DataFrame(index=x_filt.index)
+        if self.parent_features:
+            if split == "train":
+                parent_meta = _load_key_inbreds_metadata(data_path, self.parent_key_path)
+                p1_to_idx = _fit_index_map(parent1_series)
+                p2_to_idx = _fit_index_map(parent2_series)
+
+                p1_dataset = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Dataset", PARENT_UNK))
+                p2_dataset = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Dataset", PARENT_UNK))
+                p1_source = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("SourceName", PARENT_UNK))
+                p2_source = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("SourceName", PARENT_UNK))
+                p1_bioproject = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Bioproject", PARENT_UNK))
+                p2_bioproject = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Bioproject", PARENT_UNK))
+
+                dataset_to_idx = _fit_index_map(pd.concat([p1_dataset, p2_dataset], ignore_index=True))
+                source_to_idx = _fit_index_map(pd.concat([p1_source, p2_source], ignore_index=True))
+                bioproject_to_idx = _fit_index_map(pd.concat([p1_bioproject, p2_bioproject], ignore_index=True))
+
+                y_total_raw = y_filt["Yield_Mg_ha"].astype(float).reset_index(drop=True)
+                env_series = self.meta["Env"].astype(str).reset_index(drop=True)
+                resid = y_total_raw - y_total_raw.groupby(env_series).transform("mean")
+                global_resid = float(resid.mean())
+
+                p1_gca_map, _ = _shrunk_mean_map(parent1_series, resid, self.parent_shrink_alpha, global_resid)
+                p2_gca_map, _ = _shrunk_mean_map(parent2_series, resid, self.parent_shrink_alpha, global_resid)
+                pair_gca_map, pair_count_map = _shrunk_mean_map(pair_series, resid, self.parent_shrink_alpha, global_resid)
+
+                # full-history maps for val/test projection
+                p1_hist_hybrid_map = pd.DataFrame({"p": parent1_series, "hyb": hybrid_names}).groupby("p")["hyb"].nunique().to_dict()
+                p1_hist_env_map = pd.DataFrame({"p": parent1_series, "env": self.meta["Env"].astype(str)}).groupby("p")["env"].nunique().to_dict()
+                p1_hist_year_map = pd.DataFrame({"p": parent1_series, "year": self.meta["Year"].astype(int)}).groupby("p")["year"].nunique().to_dict()
+                p2_hist_hybrid_map = pd.DataFrame({"p": parent2_series, "hyb": hybrid_names}).groupby("p")["hyb"].nunique().to_dict()
+                p2_hist_env_map = pd.DataFrame({"p": parent2_series, "env": self.meta["Env"].astype(str)}).groupby("p")["env"].nunique().to_dict()
+                p2_hist_year_map = pd.DataFrame({"p": parent2_series, "year": self.meta["Year"].astype(int)}).groupby("p")["year"].nunique().to_dict()
+
+                prior_hist = _compute_train_prior_parent_history(
+                    years=self.meta["Year"].astype(int).to_numpy(),
+                    envs=self.meta["Env"].astype(str).to_numpy(),
+                    hybrids=hybrid_names.astype(str).to_numpy(),
+                    p1=parent1_series.astype(str).to_numpy(),
+                    p2=parent2_series.astype(str).to_numpy(),
+                )
+                oof_effects = _compute_train_oof_parent_effects(
+                    hybrids=hybrid_names.astype(str),
+                    p1=parent1_series.astype(str),
+                    p2=parent2_series.astype(str),
+                    resid=resid.astype(float),
+                    n_folds=self.parent_oof_folds,
+                    shrink_alpha=self.parent_shrink_alpha,
+                )
+
+                self.parent_stats = {
+                    "p1_to_idx": p1_to_idx,
+                    "p2_to_idx": p2_to_idx,
+                    "dataset_to_idx": dataset_to_idx,
+                    "source_to_idx": source_to_idx,
+                    "bioproject_to_idx": bioproject_to_idx,
+                    "train_p1_set": list(set(parent1_series.astype(str).tolist())),
+                    "train_p2_set": list(set(parent2_series.astype(str).tolist())),
+                    "train_pair_set": list(set(pair_series.astype(str).tolist())),
+                    "p1_hist_hybrid_map": {str(k): int(v) for k, v in p1_hist_hybrid_map.items()},
+                    "p1_hist_env_map": {str(k): int(v) for k, v in p1_hist_env_map.items()},
+                    "p1_hist_year_map": {str(k): int(v) for k, v in p1_hist_year_map.items()},
+                    "p2_hist_hybrid_map": {str(k): int(v) for k, v in p2_hist_hybrid_map.items()},
+                    "p2_hist_env_map": {str(k): int(v) for k, v in p2_hist_env_map.items()},
+                    "p2_hist_year_map": {str(k): int(v) for k, v in p2_hist_year_map.items()},
+                    "p1_gca_map": {str(k): float(v) for k, v in p1_gca_map.items()},
+                    "p2_gca_map": {str(k): float(v) for k, v in p2_gca_map.items()},
+                    "pair_sca_map": {str(k): float(v) for k, v in pair_gca_map.items()},
+                    "pair_count_map": {str(k): int(v) for k, v in pair_count_map.items()},
+                    "global_resid": float(global_resid),
+                    "parent_shrink_alpha": float(self.parent_shrink_alpha),
+                    "key_parent_meta": parent_meta,
+                    "options": {
+                        "use_embeddings": self.parent_use_embeddings,
+                        "use_interaction": self.parent_use_interaction,
+                        "use_seen_flags": self.parent_use_seen_flags,
+                        "use_history_features": self.parent_use_history_features,
+                        "use_gca_features": self.parent_use_gca_features,
+                        "use_sca_features": self.parent_use_sca_features,
+                        "use_source_meta": self.parent_use_source_meta,
+                    },
+                }
+            else:
+                if parent_stats is None:
+                    raise ValueError("For val/test with parent_features=True, pass parent_stats from train split.")
+                self.parent_stats = parent_stats
+                opts = dict(self.parent_stats.get("options", {}))
+                if opts:
+                    self.parent_use_embeddings = bool(opts.get("use_embeddings", self.parent_use_embeddings))
+                    self.parent_use_interaction = bool(opts.get("use_interaction", self.parent_use_interaction))
+                    self.parent_use_seen_flags = bool(opts.get("use_seen_flags", self.parent_use_seen_flags))
+                    self.parent_use_history_features = bool(opts.get("use_history_features", self.parent_use_history_features))
+                    self.parent_use_gca_features = bool(opts.get("use_gca_features", self.parent_use_gca_features))
+                    self.parent_use_sca_features = bool(opts.get("use_sca_features", self.parent_use_sca_features))
+                    self.parent_use_source_meta = bool(opts.get("use_source_meta", self.parent_use_source_meta))
+                p1_to_idx = dict(self.parent_stats.get("p1_to_idx", {PARENT_UNK: 0}))
+                p2_to_idx = dict(self.parent_stats.get("p2_to_idx", {PARENT_UNK: 0}))
+                dataset_to_idx = dict(self.parent_stats.get("dataset_to_idx", {PARENT_UNK: 0}))
+                source_to_idx = dict(self.parent_stats.get("source_to_idx", {PARENT_UNK: 0}))
+                bioproject_to_idx = dict(self.parent_stats.get("bioproject_to_idx", {PARENT_UNK: 0}))
+                parent_meta = dict(self.parent_stats.get("key_parent_meta", {}))
+                p1_dataset = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Dataset", PARENT_UNK))
+                p2_dataset = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Dataset", PARENT_UNK))
+                p1_source = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("SourceName", PARENT_UNK))
+                p2_source = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("SourceName", PARENT_UNK))
+                p1_bioproject = parent1_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Bioproject", PARENT_UNK))
+                p2_bioproject = parent2_series.astype(str).map(lambda p: parent_meta.get(p, {}).get("Bioproject", PARENT_UNK))
+
+                prior_hist = None
+                oof_effects = None
+
+            # ids for embedding features
+            self.parent1_id_arr = _map_with_unk(parent1_series, p1_to_idx)
+            self.parent2_id_arr = _map_with_unk(parent2_series, p2_to_idx)
+            self.n_parent1_ids = max(1, len(p1_to_idx))
+            self.n_parent2_ids = max(1, len(p2_to_idx))
+
+            # optional parent metadata ids
+            self.parent1_dataset_id_arr = _map_with_unk(p1_dataset, dataset_to_idx)
+            self.parent2_dataset_id_arr = _map_with_unk(p2_dataset, dataset_to_idx)
+            self.parent1_source_id_arr = _map_with_unk(p1_source, source_to_idx)
+            self.parent2_source_id_arr = _map_with_unk(p2_source, source_to_idx)
+            self.parent1_bioproject_id_arr = _map_with_unk(p1_bioproject, bioproject_to_idx)
+            self.parent2_bioproject_id_arr = _map_with_unk(p2_bioproject, bioproject_to_idx)
+            self.n_parent_dataset_ids = max(1, len(dataset_to_idx))
+            self.n_parent_source_ids = max(1, len(source_to_idx))
+            self.n_parent_bioproject_ids = max(1, len(bioproject_to_idx))
+
+            # Seen flags (novelty) and history counts
+            if self.parent_use_seen_flags:
+                if split == "train":
+                    parent_numeric["parent_p1_seen_train"] = prior_hist["p1_seen"]
+                    parent_numeric["parent_p2_seen_train"] = prior_hist["p2_seen"]
+                    parent_numeric["parent_pair_seen_train"] = prior_hist["pair_seen"]
+                else:
+                    p1_seen_set = set(self.parent_stats.get("train_p1_set", []))
+                    p2_seen_set = set(self.parent_stats.get("train_p2_set", []))
+                    pair_seen_set = set(self.parent_stats.get("train_pair_set", []))
+                    parent_numeric["parent_p1_seen_train"] = parent1_series.astype(str).map(lambda k: 1.0 if k in p1_seen_set else 0.0)
+                    parent_numeric["parent_p2_seen_train"] = parent2_series.astype(str).map(lambda k: 1.0 if k in p2_seen_set else 0.0)
+                    parent_numeric["parent_pair_seen_train"] = pair_series.astype(str).map(lambda k: 1.0 if k in pair_seen_set else 0.0)
+
+            if self.parent_use_history_features:
+                if split == "train":
+                    parent_numeric["parent_p1_hist_hybrid_count"] = prior_hist["p1_hybrid_count"]
+                    parent_numeric["parent_p1_hist_env_count"] = prior_hist["p1_env_count"]
+                    parent_numeric["parent_p1_hist_year_count"] = prior_hist["p1_year_count"]
+                    parent_numeric["parent_p2_hist_hybrid_count"] = prior_hist["p2_hybrid_count"]
+                    parent_numeric["parent_p2_hist_env_count"] = prior_hist["p2_env_count"]
+                    parent_numeric["parent_p2_hist_year_count"] = prior_hist["p2_year_count"]
+                else:
+                    parent_numeric["parent_p1_hist_hybrid_count"] = parent1_series.astype(str).map(self.parent_stats.get("p1_hist_hybrid_map", {})).fillna(0.0)
+                    parent_numeric["parent_p1_hist_env_count"] = parent1_series.astype(str).map(self.parent_stats.get("p1_hist_env_map", {})).fillna(0.0)
+                    parent_numeric["parent_p1_hist_year_count"] = parent1_series.astype(str).map(self.parent_stats.get("p1_hist_year_map", {})).fillna(0.0)
+                    parent_numeric["parent_p2_hist_hybrid_count"] = parent2_series.astype(str).map(self.parent_stats.get("p2_hist_hybrid_map", {})).fillna(0.0)
+                    parent_numeric["parent_p2_hist_env_count"] = parent2_series.astype(str).map(self.parent_stats.get("p2_hist_env_map", {})).fillna(0.0)
+                    parent_numeric["parent_p2_hist_year_count"] = parent2_series.astype(str).map(self.parent_stats.get("p2_hist_year_map", {})).fillna(0.0)
+
+            if self.parent_use_gca_features:
+                if split == "train":
+                    parent_numeric["parent_p1_gca"] = oof_effects["p1_gca"]
+                    parent_numeric["parent_p2_gca"] = oof_effects["p2_gca"]
+                else:
+                    global_resid = float(self.parent_stats.get("global_resid", 0.0))
+                    parent_numeric["parent_p1_gca"] = parent1_series.astype(str).map(self.parent_stats.get("p1_gca_map", {})).fillna(global_resid)
+                    parent_numeric["parent_p2_gca"] = parent2_series.astype(str).map(self.parent_stats.get("p2_gca_map", {})).fillna(global_resid)
+
+            if self.parent_use_sca_features:
+                if split == "train":
+                    parent_numeric["parent_pair_sca"] = oof_effects["pair_sca"]
+                    parent_numeric["parent_pair_sca_count"] = oof_effects["pair_sca_count"]
+                    parent_numeric["parent_pair_sca_weight"] = oof_effects["pair_sca_weight"]
+                else:
+                    global_resid = float(self.parent_stats.get("global_resid", 0.0))
+                    alpha = float(self.parent_stats.get("parent_shrink_alpha", self.parent_shrink_alpha))
+                    parent_numeric["parent_pair_sca"] = pair_series.astype(str).map(self.parent_stats.get("pair_sca_map", {})).fillna(global_resid)
+                    counts = pair_series.astype(str).map(self.parent_stats.get("pair_count_map", {})).fillna(0.0)
+                    parent_numeric["parent_pair_sca_count"] = counts
+                    parent_numeric["parent_pair_sca_weight"] = counts.astype(float) / (counts.astype(float) + alpha)
+
+            if self.parent_use_source_meta:
+                parent_numeric["parent_same_source"] = (
+                    (p1_source.astype(str) == p2_source.astype(str))
+                    & (p1_source.astype(str) != PARENT_UNK)
+                ).astype(np.float32)
+
+            parent_numeric = parent_numeric.fillna(0.0).astype(np.float32)
+            self.parent_numeric_cols = list(parent_numeric.columns)
+        else:
+            self.parent_stats = None
 
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
@@ -344,6 +791,8 @@ class GxE_Dataset(Dataset):
         e_block = feature_df.iloc[:, -N_ENV:]
 
         e_block = preprocess_env_features(e_block, self.env_categorical_mode)
+        if self.parent_features and len(parent_numeric.columns):
+            e_block = pd.concat([e_block.reset_index(drop=True), parent_numeric.reset_index(drop=True)], axis=1)
         # Keep val/test schema aligned with the train-fitted scaler feature order.
         if split != "train" and scaler is not None and hasattr(scaler, "feature_names_in_"):
             ref_cols = [str(c) for c in scaler.feature_names_in_.tolist()]
@@ -475,6 +924,16 @@ class GxE_Dataset(Dataset):
             g_tensor = torch.tensor(self.g_data.iloc[index, :].values, dtype=torch.float32)
         env_data = torch.tensor(self.e_data.iloc[index, :].values, dtype=torch.float32)
         x = {'g_data': g_tensor, 'e_data': env_data}
+        if self.parent_features and self.parent_use_embeddings:
+            x["parent1_id"] = torch.tensor(int(self.parent1_id_arr[index]), dtype=torch.long)
+            x["parent2_id"] = torch.tensor(int(self.parent2_id_arr[index]), dtype=torch.long)
+            if self.parent_use_source_meta:
+                x["parent1_dataset_id"] = torch.tensor(int(self.parent1_dataset_id_arr[index]), dtype=torch.long)
+                x["parent2_dataset_id"] = torch.tensor(int(self.parent2_dataset_id_arr[index]), dtype=torch.long)
+                x["parent1_source_id"] = torch.tensor(int(self.parent1_source_id_arr[index]), dtype=torch.long)
+                x["parent2_source_id"] = torch.tensor(int(self.parent2_source_id_arr[index]), dtype=torch.long)
+                x["parent1_bioproject_id"] = torch.tensor(int(self.parent1_bioproject_id_arr[index]), dtype=torch.long)
+                x["parent2_bioproject_id"] = torch.tensor(int(self.parent2_bioproject_id_arr[index]), dtype=torch.long)
         if self.g_input_type == "grm":
             x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
         

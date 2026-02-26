@@ -18,3 +18,13 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+    use_parent_features: bool = False
+    use_parent_embeddings: bool = False
+    use_parent_interaction: bool = False
+    use_parent_source_meta: bool = False
+    parent_embed_dim: int = 32
+    n_parent1_ids: int = 1
+    n_parent2_ids: int = 1
+    n_parent_dataset_ids: int = 1
+    n_parent_source_ids: int = 1
+    n_parent_bioproject_ids: int = 1

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J longtest
+#SBATCH -J parental
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -40,7 +40,7 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
-export GBS=1024
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -79,9 +79,22 @@ export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
-export VAL_PREDICTION=lgo
+export VAL_PREDICTION=leo
 export LEO_VAL_FRACTION=0.15
 export LGO_VAL_FRACTION=0.15
+
+# Parent-aware features (set PARENT_FEATURES=True to enable)
+export PARENT_FEATURES=True
+export PARENT_USE_EMBEDDINGS=True
+export PARENT_USE_INTERACTION=True
+export PARENT_USE_SEEN_FLAGS=True
+export PARENT_USE_HISTORY_FEATURES=True
+export PARENT_USE_GCA_FEATURES=True
+export PARENT_USE_SCA_FEATURES=True
+export PARENT_USE_SOURCE_META=True
+export PARENT_EMBED_DIM=32
+export PARENT_OOF_FOLDS=5
+export PARENT_SHRINK_ALPHA=10.0
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -157,7 +170,18 @@ srun -N ${SLURM_NNODES} \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --val_prediction $VAL_PREDICTION \
         --leo_val_fraction $LEO_VAL_FRACTION \
-        --lgo_val_fraction $LGO_VAL_FRACTION
+        --lgo_val_fraction $LGO_VAL_FRACTION \
+        --parent_features $PARENT_FEATURES \
+        --parent_use_embeddings $PARENT_USE_EMBEDDINGS \
+        --parent_use_interaction $PARENT_USE_INTERACTION \
+        --parent_use_seen_flags $PARENT_USE_SEEN_FLAGS \
+        --parent_use_history_features $PARENT_USE_HISTORY_FEATURES \
+        --parent_use_gca_features $PARENT_USE_GCA_FEATURES \
+        --parent_use_sca_features $PARENT_USE_SCA_FEATURES \
+        --parent_use_source_meta $PARENT_USE_SOURCE_META \
+        --parent_embed_dim $PARENT_EMBED_DIM \
+        --parent_oof_folds $PARENT_OOF_FOLDS \
+        --parent_shrink_alpha $PARENT_SHRINK_ALPHA
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then

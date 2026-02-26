@@ -123,6 +123,28 @@ def parse_args():
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
     p.add_argument("--lgo_val_fraction", type=float, default=0.15,
                    help="Fraction of genotypes to hold out for LGO validation (default 0.15)")
+    p.add_argument("--parent_features", type=str2bool, default=False,
+                   help="Enable parent-aware features (IDs, seen/history stats, GCA/SCA, source metadata).")
+    p.add_argument("--parent_use_embeddings", type=str2bool, default=True,
+                   help="Use learned embeddings for Parent1/Parent2 IDs.")
+    p.add_argument("--parent_use_interaction", type=str2bool, default=True,
+                   help="Use explicit Parent1 x Parent2 embedding interaction term.")
+    p.add_argument("--parent_use_seen_flags", type=str2bool, default=True,
+                   help="Add parent seen/novelty indicator features.")
+    p.add_argument("--parent_use_history_features", type=str2bool, default=True,
+                   help="Add parent history count features (hybrids/envs/years).")
+    p.add_argument("--parent_use_gca_features", type=str2bool, default=True,
+                   help="Add parent GCA-like out-of-fold effect features.")
+    p.add_argument("--parent_use_sca_features", type=str2bool, default=True,
+                   help="Add pair SCA-like out-of-fold effect features with shrinkage.")
+    p.add_argument("--parent_use_source_meta", type=str2bool, default=True,
+                   help="Add parent source metadata (Dataset/SourceName/Bioproject) and same-source flag.")
+    p.add_argument("--parent_embed_dim", type=int, default=32,
+                   help="Embedding dimension for Parent1/Parent2 categorical IDs.")
+    p.add_argument("--parent_oof_folds", type=int, default=5,
+                   help="Number of OOF folds for parent GCA/SCA feature estimation in train split.")
+    p.add_argument("--parent_shrink_alpha", type=float, default=10.0,
+                   help="Shrinkage strength for parent GCA/SCA feature estimation.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
@@ -132,6 +154,14 @@ def parse_args():
     if getattr(args, "leo_val", False) and "--val_prediction" not in sys.argv:
         args.val_prediction = "leo"
     args.val_prediction = normalize_val_prediction_mode(args.val_prediction)
+    if not getattr(args, "parent_features", False):
+        args.parent_use_embeddings = False
+        args.parent_use_interaction = False
+        args.parent_use_seen_flags = False
+        args.parent_use_history_features = False
+        args.parent_use_gca_features = False
+        args.parent_use_sca_features = False
+        args.parent_use_source_meta = False
     return args
 
 def make_run_name(args) -> str:
@@ -165,6 +195,8 @@ def make_run_name(args) -> str:
         val_prediction_raw = "leo" if legacy_leo else "lyo"
     val_prediction = normalize_val_prediction_mode(val_prediction_raw)
     valpred = "leo+" if val_prediction == "leo" else ("lgo+" if val_prediction == "lgo" else "")
+    parent_enabled = _get_arg_env("parent_features", "PARENT_FEATURES", False, str2bool)
+    parent = "parent+" if bool(parent_enabled) else ""
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -199,7 +231,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + valpred + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + valpred + parent + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

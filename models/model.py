@@ -12,6 +12,85 @@ from models.cnn import *
 from models.mlp import *
 from models.transformer import * 
 
+
+class ParentFeatureEncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.enabled = bool(getattr(config, "use_parent_features", False)) and bool(getattr(config, "use_parent_embeddings", False))
+        self.use_interaction = bool(getattr(config, "use_parent_interaction", False))
+        self.use_source_meta = bool(getattr(config, "use_parent_source_meta", False))
+        if not self.enabled:
+            self.parent_embed_dim = 0
+            return
+
+        d = max(4, int(getattr(config, "parent_embed_dim", 32)))
+        self.parent_embed_dim = d
+        self.p1_embed = nn.Embedding(max(1, int(getattr(config, "n_parent1_ids", 1))), d)
+        self.p2_embed = nn.Embedding(max(1, int(getattr(config, "n_parent2_ids", 1))), d)
+
+        in_dim = 2 * d
+        if self.use_interaction:
+            in_dim += d
+
+        self.meta_dim = max(4, d // 2)
+        if self.use_source_meta:
+            self.dataset_embed = nn.Embedding(max(1, int(getattr(config, "n_parent_dataset_ids", 1))), self.meta_dim)
+            self.source_embed = nn.Embedding(max(1, int(getattr(config, "n_parent_source_ids", 1))), self.meta_dim)
+            self.bioproject_embed = nn.Embedding(max(1, int(getattr(config, "n_parent_bioproject_ids", 1))), self.meta_dim)
+            in_dim += 6 * self.meta_dim
+
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, config.n_embd),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+        )
+
+    def _get_ids(self, x, key, batch_size, device):
+        if key in x:
+            return x[key].long()
+        return torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    def forward(self, x):
+        if not self.enabled:
+            return None
+        if "parent1_id" not in x or "parent2_id" not in x:
+            return None
+        ref = x.get("g_data", None)
+        if isinstance(ref, torch.Tensor):
+            batch_size = int(ref.shape[0])
+            device = ref.device
+        else:
+            p1_ref = x["parent1_id"]
+            batch_size = int(p1_ref.shape[0]) if isinstance(p1_ref, torch.Tensor) and p1_ref.ndim > 0 else 1
+            device = p1_ref.device if isinstance(p1_ref, torch.Tensor) else torch.device("cpu")
+
+        p1_ids = self._get_ids(x, "parent1_id", batch_size, device)
+        p2_ids = self._get_ids(x, "parent2_id", batch_size, device)
+        p1 = self.p1_embed(p1_ids)
+        p2 = self.p2_embed(p2_ids)
+        comps = [p1, p2]
+        if self.use_interaction:
+            comps.append(p1 * p2)
+
+        if self.use_source_meta:
+            p1_dataset = self._get_ids(x, "parent1_dataset_id", batch_size, device)
+            p2_dataset = self._get_ids(x, "parent2_dataset_id", batch_size, device)
+            p1_source = self._get_ids(x, "parent1_source_id", batch_size, device)
+            p2_source = self._get_ids(x, "parent2_source_id", batch_size, device)
+            p1_bio = self._get_ids(x, "parent1_bioproject_id", batch_size, device)
+            p2_bio = self._get_ids(x, "parent2_bioproject_id", batch_size, device)
+            comps.extend([
+                self.dataset_embed(p1_dataset),
+                self.dataset_embed(p2_dataset),
+                self.source_embed(p1_source),
+                self.source_embed(p2_source),
+                self.bioproject_embed(p1_bio),
+                self.bioproject_embed(p2_bio),
+            ])
+
+        cat = torch.cat(comps, dim=-1)
+        return self.proj(cat)
+
 # ----------------------------------------------------------------
 # Full transformer that treats markers + env covariates as tokens
 class FullTransformer(nn.Module):
@@ -42,6 +121,8 @@ class FullTransformer(nn.Module):
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
+        self.parent_encoder = ParentFeatureEncoder(config)
+        self.parent_extra_tokens = 1 if self.parent_encoder.enabled else 0
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -57,7 +138,7 @@ class FullTransformer(nn.Module):
         self.e_proj = nn.Linear(1, config.n_embd)
 
         # positional encoding for combined marker + env + cls tokens
-        max_len = config.block_size + config.n_env_fts + 1
+        max_len = config.block_size + config.n_env_fts + 1 + self.parent_extra_tokens
         class _PE(nn.Module):
             def __init__(self, n_embd, max_len, dropout):
                 super().__init__()
@@ -114,6 +195,9 @@ class FullTransformer(nn.Module):
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        parent_tok = self.parent_encoder(x)
+        if isinstance(parent_tok, torch.Tensor):
+            e_tok = torch.cat([e_tok, parent_tok.unsqueeze(1)], dim=1)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
@@ -334,6 +418,7 @@ class GxE_Transformer(nn.Module):
                                      output_dim=config.n_embd,
                                      num_blocks=config.n_ld_layer,
                                      dropout=config.dropout) if ld_enc else None
+        self.parent_encoder = ParentFeatureEncoder(config)
 
         self.moe_w = nn.Parameter(torch.zeros(3)) if moe else None # logits
         self.fuse_ln = nn.LayerNorm(config.n_embd) # add ln for moe fusion
@@ -460,6 +545,12 @@ class GxE_Transformer(nn.Module):
         else:
             g_enc = 0
         e_enc = self.e_encoder(x["e_data"]) if self.e_encoder else 0
+        parent_enc = self.parent_encoder(x)
+        if isinstance(parent_enc, torch.Tensor):
+            if isinstance(e_enc, torch.Tensor):
+                e_enc = e_enc + parent_enc
+            else:
+                e_enc = parent_enc
         ld_enc = 0
         if self.ld_encoder:
             if self.g_input_type != "tokens":

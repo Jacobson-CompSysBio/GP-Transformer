@@ -125,6 +125,25 @@ def main():
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
+    parent_features = _get_arg_or_env("parent_features", "PARENT_FEATURES", False, str2bool)
+    parent_use_embeddings = _get_arg_or_env("parent_use_embeddings", "PARENT_USE_EMBEDDINGS", True, str2bool)
+    parent_use_interaction = _get_arg_or_env("parent_use_interaction", "PARENT_USE_INTERACTION", True, str2bool)
+    parent_use_seen_flags = _get_arg_or_env("parent_use_seen_flags", "PARENT_USE_SEEN_FLAGS", True, str2bool)
+    parent_use_history_features = _get_arg_or_env("parent_use_history_features", "PARENT_USE_HISTORY_FEATURES", True, str2bool)
+    parent_use_gca_features = _get_arg_or_env("parent_use_gca_features", "PARENT_USE_GCA_FEATURES", True, str2bool)
+    parent_use_sca_features = _get_arg_or_env("parent_use_sca_features", "PARENT_USE_SCA_FEATURES", True, str2bool)
+    parent_use_source_meta = _get_arg_or_env("parent_use_source_meta", "PARENT_USE_SOURCE_META", True, str2bool)
+    parent_embed_dim = _get_arg_or_env("parent_embed_dim", "PARENT_EMBED_DIM", 32, int)
+    parent_oof_folds = _get_arg_or_env("parent_oof_folds", "PARENT_OOF_FOLDS", 5, int)
+    parent_shrink_alpha = _get_arg_or_env("parent_shrink_alpha", "PARENT_SHRINK_ALPHA", 10.0, float)
+    if not parent_features:
+        parent_use_embeddings = False
+        parent_use_interaction = False
+        parent_use_seen_flags = False
+        parent_use_history_features = False
+        parent_use_gca_features = False
+        parent_use_sca_features = False
+        parent_use_source_meta = False
     
     if is_main(rank):
         if val_prediction == "leo":
@@ -135,6 +154,7 @@ def main():
             print(f"[INFO] Holding out {lgo_val_fraction*100:.0f}% of genotypes for validation")
         else:
             print("[INFO] Using LYO (Leave-Year-Out) validation: train <= 2022, val = 2023")
+        print(f"[INFO] Parent features enabled: {bool(parent_features)}")
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -153,10 +173,22 @@ def main():
         leo_val_fraction=leo_val_fraction,
         lgo_val_fraction=lgo_val_fraction,
         leo_seed=args.seed,
+        parent_features=parent_features,
+        parent_use_embeddings=parent_use_embeddings,
+        parent_use_interaction=parent_use_interaction,
+        parent_use_seen_flags=parent_use_seen_flags,
+        parent_use_history_features=parent_use_history_features,
+        parent_use_gca_features=parent_use_gca_features,
+        parent_use_sca_features=parent_use_sca_features,
+        parent_use_source_meta=parent_use_source_meta,
+        parent_oof_folds=parent_oof_folds,
+        parent_shrink_alpha=parent_shrink_alpha,
+        parent_stats=None,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
+    parent_stats = train_ds.parent_stats
     val_holdout_ids = train_ds.val_holdout_ids  # Pass to val_ds for consistency
     
     if is_main(rank) and val_prediction in {"leo", "lgo"}:
@@ -178,6 +210,17 @@ def main():
         val_holdout_ids=val_holdout_ids,  # Use same held-out ids computed by train
         leo_val_fraction=leo_val_fraction,
         lgo_val_fraction=lgo_val_fraction,
+        parent_features=parent_features,
+        parent_use_embeddings=parent_use_embeddings,
+        parent_use_interaction=parent_use_interaction,
+        parent_use_seen_flags=parent_use_seen_flags,
+        parent_use_history_features=parent_use_history_features,
+        parent_use_gca_features=parent_use_gca_features,
+        parent_use_sca_features=parent_use_sca_features,
+        parent_use_source_meta=parent_use_source_meta,
+        parent_oof_folds=parent_oof_folds,
+        parent_shrink_alpha=parent_shrink_alpha,
+        parent_stats=parent_stats,
     )
     
     if is_main(rank) and val_prediction in {"leo", "lgo"}:
@@ -246,7 +289,17 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    use_parent_features=bool(parent_features),
+                    use_parent_embeddings=bool(parent_use_embeddings),
+                    use_parent_interaction=bool(parent_use_interaction),
+                    use_parent_source_meta=bool(parent_use_source_meta),
+                    parent_embed_dim=int(parent_embed_dim),
+                    n_parent1_ids=int(getattr(train_ds, "n_parent1_ids", 1)),
+                    n_parent2_ids=int(getattr(train_ds, "n_parent2_ids", 1)),
+                    n_parent_dataset_ids=int(getattr(train_ds, "n_parent_dataset_ids", 1)),
+                    n_parent_source_ids=int(getattr(train_ds, "n_parent_source_ids", 1)),
+                    n_parent_bioproject_ids=int(getattr(train_ds, "n_parent_bioproject_ids", 1)))
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -455,6 +508,19 @@ def main():
                              "val_prediction": val_prediction,
                              "leo_val_fraction": leo_val_fraction if val_prediction == "leo" else None,
                              "lgo_val_fraction": lgo_val_fraction if val_prediction == "lgo" else None,
+                             "parent_features": bool(parent_features),
+                             "parent_use_embeddings": bool(parent_use_embeddings),
+                             "parent_use_interaction": bool(parent_use_interaction),
+                             "parent_use_seen_flags": bool(parent_use_seen_flags),
+                             "parent_use_history_features": bool(parent_use_history_features),
+                             "parent_use_gca_features": bool(parent_use_gca_features),
+                             "parent_use_sca_features": bool(parent_use_sca_features),
+                             "parent_use_source_meta": bool(parent_use_source_meta),
+                             "parent_embed_dim": int(parent_embed_dim),
+                             "parent_oof_folds": int(parent_oof_folds),
+                             "parent_shrink_alpha": float(parent_shrink_alpha),
+                             "n_parent1_ids": int(getattr(train_ds, "n_parent1_ids", 1)),
+                             "n_parent2_ids": int(getattr(train_ds, "n_parent2_ids", 1)),
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
@@ -751,6 +817,7 @@ def main():
                         "valid": train_ds.marker_stats["valid"].tolist(),
                         "columns": list(train_ds.marker_stats["columns"]),
                     }
+                parent_stats_payload = train_ds.parent_stats if bool(parent_features) else None
 
                 ckpt = {
                     "model": model.module.state_dict(),
@@ -786,6 +853,22 @@ def main():
                         "val_prediction": val_prediction,
                         "leo_val_fraction": leo_val_fraction if val_prediction == "leo" else None,
                         "lgo_val_fraction": lgo_val_fraction if val_prediction == "lgo" else None,
+                        "parent_features": bool(parent_features),
+                        "parent_use_embeddings": bool(parent_use_embeddings),
+                        "parent_use_interaction": bool(parent_use_interaction),
+                        "parent_use_seen_flags": bool(parent_use_seen_flags),
+                        "parent_use_history_features": bool(parent_use_history_features),
+                        "parent_use_gca_features": bool(parent_use_gca_features),
+                        "parent_use_sca_features": bool(parent_use_sca_features),
+                        "parent_use_source_meta": bool(parent_use_source_meta),
+                        "parent_embed_dim": int(parent_embed_dim),
+                        "parent_oof_folds": int(parent_oof_folds),
+                        "parent_shrink_alpha": float(parent_shrink_alpha),
+                        "n_parent1_ids": int(getattr(train_ds, "n_parent1_ids", 1)),
+                        "n_parent2_ids": int(getattr(train_ds, "n_parent2_ids", 1)),
+                        "n_parent_dataset_ids": int(getattr(train_ds, "n_parent_dataset_ids", 1)),
+                        "n_parent_source_ids": int(getattr(train_ds, "n_parent_source_ids", 1)),
+                        "n_parent_bioproject_ids": int(getattr(train_ds, "n_parent_bioproject_ids", 1)),
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
@@ -793,6 +876,7 @@ def main():
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
                     "marker_stats": marker_stats_payload,
+                    "parent_stats": parent_stats_payload,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }

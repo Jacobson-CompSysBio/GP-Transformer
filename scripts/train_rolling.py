@@ -126,10 +126,22 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
             marker_stats=None,
+            parent_features=bool(getattr(args, "parent_features", False)),
+            parent_use_embeddings=bool(getattr(args, "parent_use_embeddings", False)),
+            parent_use_interaction=bool(getattr(args, "parent_use_interaction", False)),
+            parent_use_seen_flags=bool(getattr(args, "parent_use_seen_flags", False)),
+            parent_use_history_features=bool(getattr(args, "parent_use_history_features", False)),
+            parent_use_gca_features=bool(getattr(args, "parent_use_gca_features", False)),
+            parent_use_sca_features=bool(getattr(args, "parent_use_sca_features", False)),
+            parent_use_source_meta=bool(getattr(args, "parent_use_source_meta", False)),
+            parent_oof_folds=int(getattr(args, "parent_oof_folds", 5)),
+            parent_shrink_alpha=float(getattr(args, "parent_shrink_alpha", 10.0)),
+            parent_stats=None,
         )
         env_scaler = train_ds.scaler
         y_scalers = train_ds.label_scalers
         marker_stats = train_ds.marker_stats
+        parent_stats = train_ds.parent_stats
         val_ds = GxE_Dataset(
             split="val",
             data_path="data/maize_data_2014-2023_vs_2024_v2/",
@@ -139,6 +151,17 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
             marker_stats=marker_stats,
+            parent_features=bool(getattr(args, "parent_features", False)),
+            parent_use_embeddings=bool(getattr(args, "parent_use_embeddings", False)),
+            parent_use_interaction=bool(getattr(args, "parent_use_interaction", False)),
+            parent_use_seen_flags=bool(getattr(args, "parent_use_seen_flags", False)),
+            parent_use_history_features=bool(getattr(args, "parent_use_history_features", False)),
+            parent_use_gca_features=bool(getattr(args, "parent_use_gca_features", False)),
+            parent_use_sca_features=bool(getattr(args, "parent_use_sca_features", False)),
+            parent_use_source_meta=bool(getattr(args, "parent_use_source_meta", False)),
+            parent_oof_folds=int(getattr(args, "parent_oof_folds", 5)),
+            parent_shrink_alpha=float(getattr(args, "parent_shrink_alpha", 10.0)),
+            parent_stats=parent_stats,
         )
 
         train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -164,7 +187,18 @@ def main():
                         n_mlp_layer=args.mlp_layers,
                         n_gxe_layer=args.gxe_layers,
                         n_embd=args.emb_size,
-                        dropout=args.dropout)
+                        dropout=args.dropout,
+                        n_env_fts=train_ds.n_env_fts,
+                        use_parent_features=bool(getattr(args, "parent_features", False)),
+                        use_parent_embeddings=bool(getattr(args, "parent_use_embeddings", False)),
+                        use_parent_interaction=bool(getattr(args, "parent_use_interaction", False)),
+                        use_parent_source_meta=bool(getattr(args, "parent_use_source_meta", False)),
+                        parent_embed_dim=int(getattr(args, "parent_embed_dim", 32)),
+                        n_parent1_ids=int(getattr(train_ds, "n_parent1_ids", 1)),
+                        n_parent2_ids=int(getattr(train_ds, "n_parent2_ids", 1)),
+                        n_parent_dataset_ids=int(getattr(train_ds, "n_parent_dataset_ids", 1)),
+                        n_parent_source_ids=int(getattr(train_ds, "n_parent_source_ids", 1)),
+                        n_parent_bioproject_ids=int(getattr(train_ds, "n_parent_bioproject_ids", 1)))
         model = GxE_Transformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
