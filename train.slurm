@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J parental
-#SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -N 2
+#SBATCH -t 24:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -40,7 +40,7 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
-export GBS=8192
+export GBS=1024
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -79,12 +79,12 @@ export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # Validation split mode: lyo (Leave-Year-Out), leo (Leave-Environment-Out), lgo (Leave-Genotype-Out)
-export VAL_PREDICTION=leo
+export VAL_PREDICTION=lgo
 export LEO_VAL_FRACTION=0.15
 export LGO_VAL_FRACTION=0.15
 
 # Parent-aware features (set PARENT_FEATURES=True to enable)
-export PARENT_FEATURES=True
+export PARENT_FEATURES=False
 export PARENT_USE_EMBEDDINGS=True
 export PARENT_USE_INTERACTION=True
 export PARENT_USE_SEEN_FLAGS=True
