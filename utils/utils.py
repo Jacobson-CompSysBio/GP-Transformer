@@ -57,6 +57,14 @@ def parse_args():
     p.add_argument("--env_cat_embeddings", type=str2bool, default=None,
                    help="Deprecated alias: True -> env_categorical_mode=onehot, False -> drop.")
 
+    # Modern architecture ablation flags
+    p.add_argument("--use_rmsnorm", type=str2bool, default=False,
+                   help="Use RMSNorm instead of LayerNorm in transformer blocks")
+    p.add_argument("--use_swiglu", type=str2bool, default=False,
+                   help="Use SwiGLU activation instead of GELU MLP in transformer blocks")
+    p.add_argument("--use_segment_embed", type=str2bool, default=False,
+                   help="Add learned segment-type embeddings (CLS/G/E) to FullTransformer")
+
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
     p.add_argument("--lambda_resid", type=float, default=1.0)
@@ -175,7 +183,12 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    # modern architecture tags
+    rmsnorm = "rmsnorm+" if getattr(args, "use_rmsnorm", False) else ""
+    swiglu = "swiglu+" if getattr(args, "use_swiglu", False) else ""
+    segemb = "segemb+" if getattr(args, "use_segment_embed", False) else ""
+
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat + rmsnorm + swiglu + segemb).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

@@ -91,10 +91,15 @@ class FullTransformer(nn.Module):
             def build_block(i):
                 return TransformerBlock(config, drop_path=dpr[i])
         self.blocks = nn.ModuleList([build_block(i) for i in range(config.n_gxe_layer)])
-        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.ln_f = _build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+
+        # Segment-type embeddings: learned embedding per token type (CLS=0, G=1, E=2)
+        self.use_segment_embed = getattr(config, "use_segment_embed", False)
+        if self.use_segment_embed:
+            self.segment_embed = nn.Embedding(3, config.n_embd)  # 0=CLS, 1=G, 2=E
         
         # Projection head for contrastive learning (like SimCLR)
         # Projects G embeddings to a space good for contrastive learning
@@ -117,6 +122,17 @@ class FullTransformer(nn.Module):
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
+
+        # add segment-type embeddings if enabled
+        if self.use_segment_embed:
+            Feats = e.shape[1]
+            seg_ids = torch.cat([
+                torch.zeros(1, dtype=torch.long, device=tokens.device),            # CLS = 0
+                torch.ones(Tm, dtype=torch.long, device=tokens.device),            # G   = 1
+                torch.full((Feats,), 2, dtype=torch.long, device=tokens.device),   # E   = 2
+            ], dim=0).unsqueeze(0).expand(B, -1)  # (B, 1+Tm+Feats)
+            tokens = tokens + self.segment_embed(seg_ids)
+
         env_start = 1 + Tm
         return tokens, env_start
 
@@ -336,7 +352,7 @@ class GxE_Transformer(nn.Module):
                                      dropout=config.dropout) if ld_enc else None
 
         self.moe_w = nn.Parameter(torch.zeros(3)) if moe else None # logits
-        self.fuse_ln = nn.LayerNorm(config.n_embd) # add ln for moe fusion
+        self.fuse_ln = _build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)) # ln for moe fusion
 
         # append env as a token to final tf layer instead of adding to all reprs
         self.env_as_token = True  # set to false for old behavior
@@ -350,7 +366,7 @@ class GxE_Transformer(nn.Module):
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, config.n_gxe_layer)]
             self.hidden_layers = nn.ModuleList(
             [TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_gxe_layer)]
-            + [nn.LayerNorm(config.n_embd)]
+            + [_build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))]
             )
         elif gxe_enc == "mlp":
             self.gxe_enc = "mlp"

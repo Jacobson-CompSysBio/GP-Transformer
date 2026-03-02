@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J longtest
-#SBATCH -N 2
-#SBATCH -t 24:00:00
-#SBATCH -p extended
+#SBATCH -J segment-emb
+#SBATCH -N 4
+#SBATCH -t 2:00:00
+#SBATCH -p batch
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -40,7 +40,7 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
-export GBS=1024
+export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -81,6 +81,11 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+
+# Modern architecture ablation flags (set False for baseline)
+export USE_RMSNORM=False        # RMSNorm instead of LayerNorm
+export USE_SWIGLU=False         # SwiGLU activation instead of GELU MLP
+export USE_SEGMENT_EMBED=True  # Learned segment-type embeddings (CLS/G/E)
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -155,7 +160,10 @@ srun -N ${SLURM_NNODES} \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --use_rmsnorm $USE_RMSNORM \
+        --use_swiglu $USE_SWIGLU \
+        --use_segment_embed $USE_SEGMENT_EMBED
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -200,4 +208,7 @@ python -u scripts/eval.py \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS
+    --scale_targets $SCALE_TARGETS \
+    --use_rmsnorm $USE_RMSNORM \
+    --use_swiglu $USE_SWIGLU \
+    --use_segment_embed $USE_SEGMENT_EMBED

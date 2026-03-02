@@ -220,6 +220,9 @@ def main():
     )
 
     # set up config
+    use_rmsnorm = _get_arg_or_env("use_rmsnorm", "USE_RMSNORM", False, str2bool)
+    use_swiglu = _get_arg_or_env("use_swiglu", "USE_SWIGLU", False, str2bool)
+    use_segment_embed = _get_arg_or_env("use_segment_embed", "USE_SEGMENT_EMBED", False, str2bool)
     config = Config(block_size=train_ds.block_size,
                     g_input_type=g_input_type,
                     n_head=args.heads,
@@ -229,7 +232,10 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    use_rmsnorm=use_rmsnorm,
+                    use_swiglu=use_swiglu,
+                    use_segment_embed=use_segment_embed)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -278,7 +284,8 @@ def main():
         model.print_trainable_parameters()
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
-              f"full_transformer={args.full_transformer}")
+              f"full_transformer={args.full_transformer}, "
+              f"rmsnorm={use_rmsnorm}, swiglu={use_swiglu}, segment_embed={use_segment_embed}")
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -766,6 +773,9 @@ def main():
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "use_rmsnorm": use_rmsnorm,
+                        "use_swiglu": use_swiglu,
+                        "use_segment_embed": use_segment_embed,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,

@@ -18,3 +18,7 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+    # modern architecture options (ablation flags)
+    use_rmsnorm: bool = False       # RMSNorm instead of LayerNorm
+    use_swiglu: bool = False        # SwiGLU MLP instead of GELU MLP
+    use_segment_embed: bool = False # learned segment-type embeddings (CLS/G/E)

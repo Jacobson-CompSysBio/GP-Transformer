@@ -9,6 +9,45 @@ from typing import Optional
 from models.moe import MoELayer
 
 # ----------------------------------------------------------------
+# RMSNorm (drop-in replacement for LayerNorm, no mean-centering)
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (Zhang & Sennrich, 2019)."""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        rms = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x.float() * rms).to(x.dtype) * self.weight
+
+
+def _build_norm(dim: int, use_rmsnorm: bool = False):
+    """Return RMSNorm or LayerNorm based on config flag."""
+    return RMSNorm(dim) if use_rmsnorm else nn.LayerNorm(dim)
+
+
+# ----------------------------------------------------------------
+# SwiGLU MLP (Shazeer, 2020) — gated linear unit with SiLU activation
+class SwiGLU_MLP(nn.Module):
+    """
+    SwiGLU: (x @ W1) * SiLU(x @ V) then down-project.
+    Hidden dim ≈ 8/3 * n_embd to match parameter count of standard 4x MLP.
+    """
+    def __init__(self, config):
+        super().__init__()
+        # hidden_dim ≈ (8/3)*n_embd, rounded to nearest multiple of 64 for efficiency
+        hidden_dim = int(2 * (4 * config.n_embd) / 3)
+        hidden_dim = ((hidden_dim + 63) // 64) * 64  # round up to multiple of 64
+        self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=False)  # gate projection
+        self.v  = nn.Linear(config.n_embd, hidden_dim, bias=False)  # value projection
+        self.w2 = nn.Linear(hidden_dim, config.n_embd, bias=False)  # down projection
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.v(x))
+
+
+# ----------------------------------------------------------------
 # positional encoding (sine/cosine)
 class PositionalEncoding(nn.Module):
 
@@ -100,14 +139,23 @@ class TransformerMLP(nn.Sequential):
             nn.Linear(4 * config.n_embd, config.n_embd)
         )
 
+
+def _build_mlp(config):
+    """Return SwiGLU or standard GELU MLP based on config flag."""
+    if getattr(config, "use_swiglu", False):
+        return SwiGLU_MLP(config)
+    return TransformerMLP(config)
+
+
 class TransformerBlock(nn.Module):
     
     def __init__(self, config, drop_path: float = 0.0):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        use_rmsnorm = getattr(config, "use_rmsnorm", False)
+        self.ln_1 = _build_norm(config.n_embd, use_rmsnorm)
         self.attn = SelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = TransformerMLP(config)
+        self.ln_2 = _build_norm(config.n_embd, use_rmsnorm)
+        self.mlp = _build_mlp(config)
         self.dropout = nn.Dropout(config.dropout)
         self.drop_path = drop_path  # stochastic depth rate
 
@@ -133,9 +181,10 @@ class TransformerMoEBlock(nn.Module):
                  shared_expert_hidden_dim: Optional[int] = None,
                  drop_path: float = 0.0):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        use_rmsnorm = getattr(config, "use_rmsnorm", False)
+        self.ln_1 = _build_norm(config.n_embd, use_rmsnorm)
         self.attn = SelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = _build_norm(config.n_embd, use_rmsnorm)
         self.moe = MoELayer(
             input_dim=config.n_embd,
             output_dim=config.n_embd,
@@ -223,7 +272,7 @@ class G_Encoder(nn.Module):
                 wte=embedding_layer,
                 wpe=PositionalEncoding(config),
                 h=nn.ModuleList([build_block(i) for i in range(config.n_g_layer)]),
-                ln_f=nn.LayerNorm(config.n_embd),
+                ln_f=_build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)),
             )
         )
 

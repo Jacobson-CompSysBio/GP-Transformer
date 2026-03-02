@@ -299,6 +299,10 @@ def load_model(device: torch.device,
         full_tf_mlp_type = full_tf_mlp_type.lower()
     else:
         full_tf_mlp_type = "moe" if full_tf_mlp_type else "dense"
+    # Modern architecture flags (default False for backward compat with old checkpoints)
+    use_rmsnorm = config.get("use_rmsnorm", getattr(args, "use_rmsnorm", False))
+    use_swiglu = config.get("use_swiglu", getattr(args, "use_swiglu", False))
+    use_segment_embed = config.get("use_segment_embed", getattr(args, "use_segment_embed", False))
 
     # build scalers
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
@@ -313,7 +317,10 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    use_rmsnorm=use_rmsnorm,
+                    use_swiglu=use_swiglu,
+                    use_segment_embed=use_segment_embed)
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts
