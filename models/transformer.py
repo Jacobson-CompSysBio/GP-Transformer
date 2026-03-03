@@ -22,7 +22,7 @@ class RMSNorm(nn.Module):
         return (x.float() * rms).to(x.dtype) * self.weight
 
 
-def _build_norm(dim: int, use_rmsnorm: bool = False):
+def build_norm(dim: int, use_rmsnorm: bool = False):
     """Return RMSNorm or LayerNorm based on config flag."""
     return RMSNorm(dim) if use_rmsnorm else nn.LayerNorm(dim)
 
@@ -140,7 +140,7 @@ class TransformerMLP(nn.Sequential):
         )
 
 
-def _build_mlp(config):
+def build_mlp(config):
     """Return SwiGLU or standard GELU MLP based on config flag."""
     if getattr(config, "use_swiglu", False):
         return SwiGLU_MLP(config)
@@ -152,10 +152,10 @@ class TransformerBlock(nn.Module):
     def __init__(self, config, drop_path: float = 0.0):
         super().__init__()
         use_rmsnorm = getattr(config, "use_rmsnorm", False)
-        self.ln_1 = _build_norm(config.n_embd, use_rmsnorm)
+        self.ln_1 = build_norm(config.n_embd, use_rmsnorm)
         self.attn = SelfAttention(config)
-        self.ln_2 = _build_norm(config.n_embd, use_rmsnorm)
-        self.mlp = _build_mlp(config)
+        self.ln_2 = build_norm(config.n_embd, use_rmsnorm)
+        self.mlp = build_mlp(config)
         self.dropout = nn.Dropout(config.dropout)
         self.drop_path = drop_path  # stochastic depth rate
 
@@ -182,9 +182,9 @@ class TransformerMoEBlock(nn.Module):
                  drop_path: float = 0.0):
         super().__init__()
         use_rmsnorm = getattr(config, "use_rmsnorm", False)
-        self.ln_1 = _build_norm(config.n_embd, use_rmsnorm)
+        self.ln_1 = build_norm(config.n_embd, use_rmsnorm)
         self.attn = SelfAttention(config)
-        self.ln_2 = _build_norm(config.n_embd, use_rmsnorm)
+        self.ln_2 = build_norm(config.n_embd, use_rmsnorm)
         self.moe = MoELayer(
             input_dim=config.n_embd,
             output_dim=config.n_embd,
@@ -272,7 +272,7 @@ class G_Encoder(nn.Module):
                 wte=embedding_layer,
                 wpe=PositionalEncoding(config),
                 h=nn.ModuleList([build_block(i) for i in range(config.n_g_layer)]),
-                ln_f=_build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)),
+                ln_f=build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)),
             )
         )
 

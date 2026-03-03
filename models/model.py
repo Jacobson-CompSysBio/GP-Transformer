@@ -91,7 +91,7 @@ class FullTransformer(nn.Module):
             def build_block(i):
                 return TransformerBlock(config, drop_path=dpr[i])
         self.blocks = nn.ModuleList([build_block(i) for i in range(config.n_gxe_layer)])
-        self.ln_f = _build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))
+        self.ln_f = build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
@@ -352,7 +352,7 @@ class GxE_Transformer(nn.Module):
                                      dropout=config.dropout) if ld_enc else None
 
         self.moe_w = nn.Parameter(torch.zeros(3)) if moe else None # logits
-        self.fuse_ln = _build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)) # ln for moe fusion
+        self.fuse_ln = build_norm(config.n_embd, getattr(config, "use_rmsnorm", False)) # ln for moe fusion
 
         # append env as a token to final tf layer instead of adding to all reprs
         self.env_as_token = True  # set to false for old behavior
@@ -366,7 +366,7 @@ class GxE_Transformer(nn.Module):
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, config.n_gxe_layer)]
             self.hidden_layers = nn.ModuleList(
             [TransformerBlock(config, drop_path=dpr[i]) for i in range(config.n_gxe_layer)]
-            + [_build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))]
+            + [build_norm(config.n_embd, getattr(config, "use_rmsnorm", False))]
             )
         elif gxe_enc == "mlp":
             self.gxe_enc = "mlp"
