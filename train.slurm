@@ -28,7 +28,7 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=True  # use FullTransformer architecture
+export FULL_TRANSFORMER=False  # use FullTransformer architecture
 
 # MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
@@ -60,12 +60,12 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
-export LOSS="envpcc+mse" # + separated list of losses
-export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
+export LOSS="envpcc" # + separated list of losses
+export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
