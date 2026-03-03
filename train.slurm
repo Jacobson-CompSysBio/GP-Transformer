@@ -58,7 +58,7 @@ export MLP_LAYERS=1
 export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
-export EMB_SIZE=1024
+export EMB_SIZE=256
 export SEED=1
 export SCALE_TARGETS=True
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
@@ -79,7 +79,8 @@ export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
+# Disabled: LEO val doesn't track test. Using holdout year instead.
+export LEO_VAL=False
 export LEO_VAL_FRACTION=0.15
 
 # Holdout year validation for checkpoint selection
