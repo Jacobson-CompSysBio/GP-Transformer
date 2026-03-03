@@ -116,6 +116,7 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    holdout_val_year = _get_arg_or_env("holdout_val_year", "HOLDOUT_VAL_YEAR", None, int)
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
@@ -124,6 +125,10 @@ def main():
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
         print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank) and holdout_val_year is not None:
+        print(f"[INFO] Holdout validation year: {holdout_val_year}")
+        print(f"[INFO] LEO train/val will exclude year {holdout_val_year}")
+        print(f"[INFO] Checkpoint selection will use holdout {holdout_val_year} env-avg PCC")
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -140,6 +145,7 @@ def main():
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
+        holdout_val_year=holdout_val_year,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
@@ -161,10 +167,40 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        holdout_val_year=holdout_val_year,
     )
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
+
+    # Holdout year validation set (separate from LEO, used for checkpoint selection)
+    holdout_ds = None
+    holdout_loader = None
+    if holdout_val_year is not None:
+        holdout_ds = GxE_Dataset(
+            split="val",
+            data_path="data/maize_data_2014-2023_vs_2024_v2/",
+            scaler=env_scaler,
+            y_scalers=y_scalers,
+            scale_targets=args.scale_targets,
+            g_input_type=g_input_type,
+            env_categorical_mode=env_categorical_mode,
+            marker_stats=marker_stats,
+            leo_val=False,       # simple year holdout, not LEO
+            val_year=holdout_val_year,
+        )
+        holdout_sampler = DistributedSampler(holdout_ds, shuffle=False)
+        holdout_loader = DataLoader(
+            holdout_ds,
+            batch_size=args.batch_size,
+            sampler=holdout_sampler,
+            pin_memory=True,
+            num_workers=0,
+            worker_init_fn=seed_worker,
+        )
+        if is_main(rank):
+            print(f"[INFO] Holdout {holdout_val_year} samples: {len(holdout_ds):,}, "
+                  f"Holdout envs: {holdout_ds.env_id_tensor.unique().numel()}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
@@ -465,7 +501,10 @@ def main():
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
+        if holdout_val_year is not None:
+            print(f"[INFO] Checkpoint selection metric: holdout_{holdout_val_year}/env_avg_pearson (maximize)")
+        else:
+            print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -677,6 +716,15 @@ def main():
                 len(val_ds),
                 max_batches=None,
             )
+            
+            # Evaluate on holdout year validation set (if configured)
+            holdout_total, holdout_parts, holdout_env_pcc = None, None, None
+            if holdout_loader is not None:
+                holdout_total, holdout_parts, holdout_env_pcc = eval_loader(
+                    holdout_loader,
+                    len(holdout_ds),
+                    max_batches=None,
+                )
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
@@ -691,22 +739,31 @@ def main():
             log_epoch_payload["train_loss_epoch/env_avg_pearson"] = train_env_pcc
             for k, v in train_parts.items():
                 log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
+            # Log holdout metrics separately
+            if holdout_total is not None:
+                log_epoch_payload["holdout_loss"] = holdout_total.item()
+                log_epoch_payload["holdout_loss/env_avg_pearson"] = holdout_env_pcc
+                for k, v in holdout_parts.items():
+                    log_epoch_payload[f"holdout_loss/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
-            val_loss_value = float(val_total.item())
+            # Checkpoint selection: use holdout env-avg PCC if available,
+            # otherwise fall back to LEO val env-avg PCC
+            ckpt_env_pcc = holdout_env_pcc if holdout_env_pcc is not None else val_env_pcc
+            ckpt_loss = float(holdout_total.item()) if holdout_total is not None else float(val_total.item())
             improved = False
-            if math.isfinite(val_env_pcc):
-                if (val_env_pcc > best_val_env_pcc + 1e-8) or (
-                    abs(val_env_pcc - best_val_env_pcc) <= 1e-8
-                    and val_loss_value < best_val_loss
+            if math.isfinite(ckpt_env_pcc):
+                if (ckpt_env_pcc > best_val_env_pcc + 1e-8) or (
+                    abs(ckpt_env_pcc - best_val_env_pcc) <= 1e-8
+                    and ckpt_loss < best_val_loss
                 ):
                     improved = True
-            elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
+            elif not math.isfinite(best_val_env_pcc) and (ckpt_loss < best_val_loss):
                 improved = True
 
             if improved:
-                best_val_loss = val_loss_value
-                best_val_env_pcc = val_env_pcc
+                best_val_loss = ckpt_loss
+                best_val_env_pcc = ckpt_env_pcc
                 last_improved = 0
                 # collect env scaler and y scalers
                 env_scaler_payload = {
@@ -736,8 +793,10 @@ def main():
                     "model": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch_num,
-                    "val_loss": val_loss_value,
-                    "val_env_avg_pearson": val_env_pcc,
+                    "val_loss": ckpt_loss,
+                    "val_env_avg_pearson": ckpt_env_pcc,
+                    "leo_val_env_avg_pearson": val_env_pcc,
+                    "holdout_val_year": holdout_val_year,
                     "config": {
                         "g_enc": args.g_enc,
                         "e_enc": args.e_enc,
@@ -775,9 +834,10 @@ def main():
                 }
                 ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
                 torch.save(ckpt, ckpt_path)
+                sel_label = f"holdout_{holdout_val_year}" if holdout_val_year else "leo_val"
                 print(
-                    "*** validation env_avg_pearson improved: "
-                    f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
+                    f"*** {sel_label} env_avg_pearson improved: "
+                    f"{best_val_env_pcc:.5f} (loss={best_val_loss:.4e}) ***"
                 )
             else:
                 last_improved += 1
@@ -796,10 +856,14 @@ def main():
                  
         if is_main(rank):
             elapsed = (time.time() - t0) / 60
+            ho_str = ""
+            if holdout_env_pcc is not None:
+                ho_str = f" | ho_pcc={holdout_env_pcc:.5f}"
             print(
                 f"[Epoch {epoch_num}] train_loss={train_total.item():.4e} | "
                 f"val_loss={val_total.item():.4e} | "
-                f"val_env_pcc={val_env_pcc:.5f} | best_env_pcc={best_val_env_pcc:.5f} | "
+                f"val_env_pcc={val_env_pcc:.5f}{ho_str} | "
+                f"best_pcc={best_val_env_pcc:.5f} | "
                 f"elapsed={elapsed:.2f}m"
             )
 

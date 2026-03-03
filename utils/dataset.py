@@ -103,6 +103,7 @@ def compute_leo_val_envs(
     test_year: int = 2024,
     val_fraction: float = 0.15,
     seed: int = 42,
+    holdout_val_year: Optional[int] = None,
 ) -> set:
     """
     Compute which environments should be held out for LEO validation.
@@ -110,6 +111,9 @@ def compute_leo_val_envs(
     Returns a set of environment names that will be used for validation.
     These environments are entirely held out from training to better
     simulate generalization to unseen environments (like the test set).
+    
+    If holdout_val_year is set, environments from that year are excluded
+    from the LEO pool so they can be used as a separate holdout val set.
     """
     rng = np.random.default_rng(seed)
     
@@ -117,6 +121,10 @@ def compute_leo_val_envs(
     x_raw = x_raw.copy()
     x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
     train_val_mask = x_raw['Year'] < test_year
+    
+    # Exclude holdout year from the LEO environment pool
+    if holdout_val_year is not None:
+        train_val_mask = train_val_mask & (x_raw['Year'] != holdout_val_year)
     
     # Get unique environments from train/val pool
     all_envs = x_raw.loc[train_val_mask, 'Env'].unique()
@@ -147,6 +155,7 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 holdout_val_year: Optional[int] = None,
                  ):
         
         """
@@ -166,6 +175,8 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            holdout_val_year (Optional[int]): if set, exclude this year from LEO train/val
+                so it can serve as a separate holdout validation set for checkpoint selection
         """
         super().__init__()
         self.split = split
@@ -225,12 +236,19 @@ class GxE_Dataset(Dataset):
             if leo_val_envs is None:
                 # First call (train split) - compute the held-out environments
                 leo_val_envs = compute_leo_val_envs(
-                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed,
+                    holdout_val_year=holdout_val_year,
                 )
             self.leo_val_envs = leo_val_envs
             
             # Filter to years before test (2014-2023)
             pre_test_mask = x_raw['Year'] < 2024
+            
+            # Exclude holdout year from LEO train/val so it can be
+            # used as a separate checkpoint-selection validation set
+            if holdout_val_year is not None:
+                pre_test_mask = pre_test_mask & (x_raw['Year'] != holdout_val_year)
+            
             env_in_val = x_raw['Env'].isin(leo_val_envs)
             
             if split == "train":

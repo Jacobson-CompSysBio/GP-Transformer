@@ -109,6 +109,9 @@ def parse_args():
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
+    p.add_argument('--holdout_val_year', type=int, default=None,
+                   help='Hold out this year as a separate validation set for checkpoint selection '
+                        '(e.g. 2022). LEO train/val will exclude this year entirely.')
     args = p.parse_args()
     # Backward compatibility for older scripts/configs that used env_cat_embeddings.
     if getattr(args, "env_cat_embeddings", None) is not None and "--env_categorical_mode" not in sys.argv:
