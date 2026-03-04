@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J envmse-scaling
-#SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -J longtest
+#SBATCH -N 2
+#SBATCH -t 24:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -40,7 +40,7 @@ export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
 # calculate microbatch size given global batch size of 8192 and N nodes * 8 gpus/node = 32 gpus
-export GBS=8192
+export GBS=1024
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
@@ -60,10 +60,11 @@ export GXE_LAYERS=1 # applies to FullTF if used
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=True
+export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
+export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
-export LOSS="envmse" # + separated list of losses
+export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
@@ -139,6 +140,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --seed $SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -193,6 +196,7 @@ python -u scripts/eval.py \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
     --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \

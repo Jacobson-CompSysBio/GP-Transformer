@@ -28,6 +28,22 @@ ENV_CATEGORICAL_COLS = ("Irrigated", "Treatment", "Previous_Crop")
 ENV_CAT_UNK = "UNK"
 
 
+def normalize_env_categorical_mode(value: str) -> str:
+    """
+    Normalize env categorical preprocessing mode.
+    - drop: legacy baseline behavior (remove categorical env fields)
+    - onehot: one-hot encode categorical env fields
+    """
+    v = str(value).strip().lower()
+    if v in {"", "false", "0", "off", "none", "no", "drop", "legacy"}:
+        return "drop"
+    if v in {"true", "1", "on", "yes", "onehot", "one_hot", "ohe"}:
+        return "onehot"
+    raise ValueError(
+        f"Unsupported env_categorical_mode='{value}'. Allowed: ['drop', 'onehot']"
+    )
+
+
 def _normalize_env_cat(s: pd.Series) -> pd.Series:
     """Normalize categorical env values and map missing/empty to UNK."""
     out = s.fillna(ENV_CAT_UNK).astype(str).str.strip()
@@ -55,6 +71,20 @@ def encode_env_categorical_features(e_block: pd.DataFrame) -> pd.DataFrame:
 
     e_proc = e_proc.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
     return e_proc
+
+
+def preprocess_env_features(e_block: pd.DataFrame, env_categorical_mode: str) -> pd.DataFrame:
+    """
+    Apply env categorical preprocessing mode and return numeric float32 env matrix.
+    """
+    mode = normalize_env_categorical_mode(env_categorical_mode)
+    if mode == "drop":
+        e_proc = e_block.drop(
+            columns=[c for c in ENV_CATEGORICAL_COLS if c in e_block.columns],
+            errors="ignore",
+        )
+        return e_proc.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(np.float32)
+    return encode_env_categorical_features(e_block)
 
 # ----------------------------------------------------------------
 # helper to get year from locations file
@@ -111,6 +141,7 @@ class GxE_Dataset(Dataset):
                  y_scalers: Optional[Dict[str, LabelScaler]] = None,
                  scale_targets: bool = True,
                  g_input_type: str = "tokens",
+                 env_categorical_mode: str = "drop",
                  marker_stats: Optional[Dict[str, object]] = None,
                  leo_val: bool = False,
                  leo_val_envs: Optional[set] = None,
@@ -129,6 +160,7 @@ class GxE_Dataset(Dataset):
             y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
             scale_targets (bool): if True, scale targets using y_scalers
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
+            env_categorical_mode (str): "drop" (legacy baseline) or "onehot" categorical env handling
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
             leo_val (bool): if True, use Leave-Environment-Out validation
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
@@ -142,6 +174,7 @@ class GxE_Dataset(Dataset):
         self.leo_val = leo_val
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
+        self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
@@ -256,8 +289,7 @@ class GxE_Dataset(Dataset):
         g_block = feature_df.iloc[:, :-N_ENV].astype(np.float32)
         e_block = feature_df.iloc[:, -N_ENV:]
 
-        # Encode categorical management features instead of dropping them.
-        e_block = encode_env_categorical_features(e_block)
+        e_block = preprocess_env_features(e_block, self.env_categorical_mode)
         # Keep val/test schema aligned with the train-fitted scaler feature order.
         if split != "train" and scaler is not None and hasattr(scaler, "feature_names_in_"):
             ref_cols = [str(c) for c in scaler.feature_names_in_.tolist()]

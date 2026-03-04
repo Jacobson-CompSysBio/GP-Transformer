@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import torch
 import random
 import numpy as np
@@ -51,6 +52,10 @@ def parse_args():
     p.add_argument("--residual", type=str2bool, default=False)
     p.add_argument("--g_input_type", type=str, default="tokens", choices=["tokens", "grm"],
                    help="Genotype input representation: tokenized markers ('tokens') or GRM-standardized features ('grm').")
+    p.add_argument("--env_categorical_mode", type=str, default="drop", choices=["drop", "onehot"],
+                   help="Env categorical handling: 'drop' (legacy baseline) or 'onehot' (added feature path).")
+    p.add_argument("--env_cat_embeddings", type=str2bool, default=None,
+                   help="Deprecated alias: True -> env_categorical_mode=onehot, False -> drop.")
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
@@ -104,7 +109,11 @@ def parse_args():
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
-    return p.parse_args()
+    args = p.parse_args()
+    # Backward compatibility for older scripts/configs that used env_cat_embeddings.
+    if getattr(args, "env_cat_embeddings", None) is not None and "--env_categorical_mode" not in sys.argv:
+        args.env_categorical_mode = "onehot" if bool(args.env_cat_embeddings) else "drop"
+    return args
 
 def make_run_name(args) -> str:
     # helper to shorten float
@@ -151,13 +160,22 @@ def make_run_name(args) -> str:
         contr = ""
     
     ginput = "grm+" if getattr(args, "g_input_type", "tokens") == "grm" else ""
+    env_cat_mode_raw = _get_arg_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
+    env_cat_mode = str(env_cat_mode_raw).strip().lower()
+    if env_cat_mode in {"", "false", "0", "off", "none", "no", "drop", "legacy"}:
+        env_cat_mode = "drop"
+    elif env_cat_mode in {"true", "1", "on", "yes", "onehot", "one_hot", "ohe"}:
+        env_cat_mode = "onehot"
+    else:
+        env_cat_mode = "drop"
+    envcat = "env1h+" if env_cat_mode == "onehot" else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""
