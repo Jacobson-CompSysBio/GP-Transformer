@@ -144,6 +144,7 @@ def main():
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
+    parent_vocab = train_ds.parent_vocab  # Pass to val/test for consistent parent IDs
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
     
     if is_main(rank) and leo_val:
@@ -161,6 +162,7 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        parent_vocab=parent_vocab,
     )
     
     if is_main(rank) and leo_val:
@@ -220,6 +222,8 @@ def main():
     )
 
     # set up config
+    use_parent_embeddings = _get_arg_or_env("use_parent_embeddings", "USE_PARENT_EMBEDDINGS", False, str2bool)
+    use_dual_channel = _get_arg_or_env("use_dual_channel", "USE_DUAL_CHANNEL", False, str2bool)
     config = Config(block_size=train_ds.block_size,
                     g_input_type=g_input_type,
                     n_head=args.heads,
@@ -229,7 +233,10 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    n_parents=train_ds.n_parents if use_parent_embeddings else 0,
+                    use_parent_embeddings=use_parent_embeddings,
+                    use_dual_channel=use_dual_channel)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -279,6 +286,9 @@ def main():
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
               f"full_transformer={args.full_transformer}")
+        if use_parent_embeddings or use_dual_channel:
+            print(f"[CONFIG] parent_decomp: parent_embed={use_parent_embeddings} "
+                  f"(n_parents={config.n_parents}), dual_channel={use_dual_channel}")
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -766,6 +776,9 @@ def main():
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "use_parent_embeddings": use_parent_embeddings,
+                        "use_dual_channel": use_dual_channel,
+                        "n_parents": config.n_parents,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,

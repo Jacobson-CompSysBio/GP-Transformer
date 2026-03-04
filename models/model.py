@@ -46,18 +46,45 @@ class FullTransformer(nn.Module):
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
-        if self.g_input_type == "tokens":
+
+        # --- parent decomposition: dual-channel marker projection ---
+        self.use_dual_channel = getattr(config, 'use_dual_channel', False)
+        if self.use_dual_channel:
+            # additive channel projects {-1, 0, 1} → n_embd (GCA signal)
+            self.additive_proj = nn.Linear(1, config.n_embd)
+            # dominance channel projects {0, 1, 0} → n_embd (SCA signal)
+            self.dominance_proj = nn.Linear(1, config.n_embd)
+            self.g_embed = None
+            self.g_scalar_proj = None
+        elif self.g_input_type == "tokens":
+            self.additive_proj = None
+            self.dominance_proj = None
             self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
             self.g_scalar_proj = None
         else:
+            self.additive_proj = None
+            self.dominance_proj = None
             self.g_embed = None
             # Keep tokenizer projection separate from contrastive projection head.
             self.g_scalar_proj = nn.Linear(1, config.n_embd)
+
+        # --- parent decomposition: parent ID embeddings + segment type ---
+        self.use_parent_embeddings = getattr(config, 'use_parent_embeddings', False)
+        n_parents = getattr(config, 'n_parents', 0)
+        if self.use_parent_embeddings and n_parents > 0:
+            self.parent_embed = nn.Embedding(n_parents, config.n_embd)
+            # segment type: {0: CLS, 1: Parent1, 2: Parent2, 3: SNP, 4: Env}
+            self.segment_embed = nn.Embedding(5, config.n_embd)
+        else:
+            self.parent_embed = None
+            self.segment_embed = None
+
         # project each scalar env feature to a token embedding
         self.e_proj = nn.Linear(1, config.n_embd)
 
-        # positional encoding for combined marker + env + cls tokens
-        max_len = config.block_size + config.n_env_fts + 1
+        # positional encoding for combined marker + env + cls (+ optional parent) tokens
+        n_parent_tokens = 2 if self.use_parent_embeddings and n_parents > 0 else 0
+        max_len = config.block_size + config.n_env_fts + 1 + n_parent_tokens
         class _PE(nn.Module):
             def __init__(self, n_embd, max_len, dropout):
                 super().__init__()
@@ -108,16 +135,44 @@ class FullTransformer(nn.Module):
         g = x["g_data"]            # (B, Tm)
         e = x["e_data"]            # (B, Feats)
         B, Tm = g.shape
-        # embeddings
-        if self.g_input_type == "tokens":
+
+        # --- genotype token embeddings ---
+        if self.use_dual_channel:
+            g_add = x["g_additive"]    # (B, Tm) float
+            g_dom = x["g_dominance"]   # (B, Tm) float
+            g_tok = self.additive_proj(g_add.unsqueeze(-1))   # (B, Tm, C)
+            g_tok = g_tok + self.dominance_proj(g_dom.unsqueeze(-1))  # (B, Tm, C)
+        elif self.g_input_type == "tokens":
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
+
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
-        tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
+
+        # --- build sequence: [CLS, (P1, P2,) G1…Gm, E1…Ek] ---
+        if self.use_parent_embeddings and self.parent_embed is not None:
+            parent_ids = x["parent_ids"]  # (B, 2) long
+            p1_tok = self.parent_embed(parent_ids[:, 0]).unsqueeze(1)  # (B, 1, C)
+            p2_tok = self.parent_embed(parent_ids[:, 1]).unsqueeze(1)  # (B, 1, C)
+            tokens = torch.cat([cls, p1_tok, p2_tok, g_tok, e_tok], dim=1)
+            env_start = 1 + 2 + Tm  # CLS + P1 + P2 + markers
+
+            # segment type embeddings: CLS=0, P1=1, P2=2, SNP=3, Env=4
+            Feats = e.shape[1]
+            seg_ids = torch.cat([
+                torch.zeros(B, 1, dtype=torch.long, device=g.device),        # CLS
+                torch.ones(B, 1, dtype=torch.long, device=g.device),         # P1
+                torch.full((B, 1), 2, dtype=torch.long, device=g.device),    # P2
+                torch.full((B, Tm), 3, dtype=torch.long, device=g.device),   # SNP markers
+                torch.full((B, Feats), 4, dtype=torch.long, device=g.device), # Env features
+            ], dim=1)
+            tokens = tokens + self.segment_embed(seg_ids)
+        else:
+            tokens = torch.cat([cls, g_tok, e_tok], dim=1)  # (B, 1+Tm+Feats, C)
+            env_start = 1 + Tm
+
         tokens = self.wpe(tokens)
-        env_start = 1 + Tm
         return tokens, env_start
 
     def _encode_tokens(self, tokens):
@@ -154,8 +209,9 @@ class FullTransformer(nn.Module):
         # This is crucial - now the embeddings contain learned representations
         g_embed = None
         if return_g_embeddings:
-            # G tokens are from index 1 to env_start (excluding CLS at 0)
-            g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
+            # G tokens start after CLS (and optional parent tokens)
+            g_start = 3 if (self.use_parent_embeddings and self.parent_embed is not None) else 1
+            g_tokens = tokens[:, g_start:env_start, :]  # (B, Tm, C)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             # Project through contrastive head (like SimCLR)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
@@ -242,7 +298,8 @@ class FullTransformerResidual(FullTransformer):
         # Extract G embeddings for contrastive loss
         g_embed = None
         if return_g_embeddings:
-            g_tokens = tokens[:, 1:env_start, :]  # G tokens (excluding CLS)
+            g_start = 3 if (self.use_parent_embeddings and self.parent_embed is not None) else 1
+            g_tokens = tokens[:, g_start:env_start, :]  # G tokens (excluding CLS + optional parents)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 

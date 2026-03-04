@@ -56,6 +56,10 @@ def parse_args():
                    help="Env categorical handling: 'drop' (legacy baseline) or 'onehot' (added feature path).")
     p.add_argument("--env_cat_embeddings", type=str2bool, default=None,
                    help="Deprecated alias: True -> env_categorical_mode=onehot, False -> drop.")
+    p.add_argument("--use_parent_embeddings", type=str2bool, default=False,
+                   help="Add P1/P2 parent ID tokens with learned embeddings (parent decomposition).")
+    p.add_argument("--use_dual_channel", type=str2bool, default=False,
+                   help="Use additive + dominance marker projection instead of nn.Embedding tokenizer.")
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)

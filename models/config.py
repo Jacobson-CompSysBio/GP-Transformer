@@ -18,3 +18,8 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+
+    # parent decomposition flags
+    n_parents: int = 0 # total number of unique parents (0 = disabled)
+    use_parent_embeddings: bool = False # add P1/P2 tokens with learned parent embeddings
+    use_dual_channel: bool = False # additive + dominance marker projection (replaces nn.Embedding tokenizer)

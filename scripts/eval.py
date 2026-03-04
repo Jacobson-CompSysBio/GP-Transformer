@@ -305,6 +305,11 @@ def load_model(device: torch.device,
     y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
     marker_stats = _rebuild_marker_stats(payload.get("marker_stats", None))
 
+    # parent decomposition flags
+    use_parent_embeddings = config.get("use_parent_embeddings", getattr(args, "use_parent_embeddings", False))
+    use_dual_channel = config.get("use_dual_channel", getattr(args, "use_dual_channel", False))
+    n_parents = config.get("n_parents", getattr(args, "n_parents", 0))
+
     config = Config(block_size=blk,
                     g_input_type=g_input_type,
                     n_g_layer=g_layer,
@@ -313,7 +318,10 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    n_parents=n_parents,
+                    use_parent_embeddings=use_parent_embeddings,
+                    use_dual_channel=use_dual_channel)
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts

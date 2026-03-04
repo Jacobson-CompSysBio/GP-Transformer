@@ -130,6 +130,7 @@ def main():
         env_scaler = train_ds.scaler
         y_scalers = train_ds.label_scalers
         marker_stats = train_ds.marker_stats
+        parent_vocab = train_ds.parent_vocab
         val_ds = GxE_Dataset(
             split="val",
             data_path="data/maize_data_2014-2023_vs_2024_v2/",
@@ -139,6 +140,7 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=args.g_input_type,
             marker_stats=marker_stats,
+            parent_vocab=parent_vocab,
         )
 
         train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -156,6 +158,8 @@ def main():
             pin_memory=True)
 
         # set up config
+        use_parent_embeddings = getattr(args, 'use_parent_embeddings', False)
+        use_dual_channel = getattr(args, 'use_dual_channel', False)
         config = Config(block_size=train_ds.block_size,
                         g_input_type=args.g_input_type,
                         n_head=args.heads,
@@ -164,7 +168,10 @@ def main():
                         n_mlp_layer=args.mlp_layers,
                         n_gxe_layer=args.gxe_layers,
                         n_embd=args.emb_size,
-                        dropout=args.dropout)
+                        dropout=args.dropout,
+                        n_parents=train_ds.n_parents if use_parent_embeddings else 0,
+                        use_parent_embeddings=use_parent_embeddings,
+                        use_dual_channel=use_dual_channel)
         model = GxE_Transformer(g_enc=args.g_enc,
                                 e_enc=args.e_enc,
                                 ld_enc=args.ld_enc,
@@ -368,7 +375,10 @@ def main():
                             "n_embd": args.emb_size,
                             "g_input_type": args.g_input_type,
                             "loss": args.loss,
-                            "alpha": args.alpha
+                            "alpha": args.alpha,
+                            "use_parent_embeddings": use_parent_embeddings,
+                            "use_dual_channel": use_dual_channel,
+                            "n_parents": config.n_parents,
                         },
                         "env_scaler": env_scaler_payload,
                         "label_scalers": label_scalers_payload,

@@ -46,6 +46,10 @@ export LOSS="both"
 export ALPHA=5e-5 # only used if LOSS is "both"
 export SCALE_TARGETS=True
 
+### parent decomposition ###
+export USE_PARENT_EMBEDDINGS=False  # add P1/P2 parent ID tokens
+export USE_DUAL_CHANNEL=False        # additive + dominance marker projection
+
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
@@ -96,4 +100,6 @@ srun -N ${SLURM_NNODES} \
         --emb_size $EMB_SIZE \
         --loss $LOSS \
         --alpha $ALPHA \
-        --scale_targets $SCALE_TARGETS
+        --scale_targets $SCALE_TARGETS \
+        --use_parent_embeddings $USE_PARENT_EMBEDDINGS \
+        --use_dual_channel $USE_DUAL_CHANNEL

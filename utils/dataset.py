@@ -147,6 +147,7 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 parent_vocab: Optional[Dict[str, int]] = None,
                  ):
         
         """
@@ -166,6 +167,7 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            parent_vocab (Optional[Dict[str, int]]): pre-built parent name -> index mapping (from train split)
         """
         super().__init__()
         self.split = split
@@ -276,6 +278,28 @@ class GxE_Dataset(Dataset):
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
 
+        ### PARENT DECOMPOSITION ###
+        # Extract parent1 / parent2 from hybrid name (format: "Parent1/Parent2")
+        parent1_names = hybrid_names.apply(lambda h: h.split('/')[0] if '/' in h else h)
+        parent2_names = hybrid_names.apply(lambda h: h.split('/')[1] if '/' in h else h)
+
+        # Build or reuse parent vocabulary (index 0 = <UNK> for unseen parents)
+        if parent_vocab is not None:
+            self.parent_vocab = parent_vocab
+        else:
+            # Build vocab from this split (typically train)
+            all_parents = sorted(set(parent1_names) | set(parent2_names))
+            self.parent_vocab = {name: idx + 1 for idx, name in enumerate(all_parents)}
+            # index 0 is reserved for <UNK>
+
+        # Map parent names to vocab indices (0 for unknown)
+        p1_ids = parent1_names.map(lambda n: self.parent_vocab.get(n, 0))
+        p2_ids = parent2_names.map(lambda n: self.parent_vocab.get(n, 0))
+        self.parent_id_tensor = torch.stack([
+            torch.tensor(p1_ids.values, dtype=torch.long),
+            torch.tensor(p2_ids.values, dtype=torch.long),
+        ], dim=1)  # (N, 2)
+
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
         feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
@@ -309,6 +333,13 @@ class GxE_Dataset(Dataset):
         # - grm: standardized dosage features (x - 2p) / sqrt(2p(1-p))
         g_dosage = (g_block * 2.0).astype(np.float32)  # convert from [0, 0.5, 1] -> [0, 1, 2]
         self.g_raw_dosage = g_dosage
+
+        # Additive channel: linear allele effect {-1, 0, 1} (GCA signal)
+        # Dominance channel: heterozygosity indicator {0, 1, 0} (SCA signal)
+        g_dosage_np = g_dosage.to_numpy(dtype=np.float32) if hasattr(g_dosage, 'to_numpy') else g_dosage.values.astype(np.float32)
+        self.g_additive = (g_dosage_np - 1.0).astype(np.float32)   # {-1, 0, 1}
+        self.g_dominance = (1.0 - np.abs(g_dosage_np - 1.0)).astype(np.float32)  # {0, 1, 0}
+
         self.marker_stats = None
         if self.g_input_type == "tokens":
             self.g_data = g_dosage.round().astype('int64')
@@ -397,6 +428,7 @@ class GxE_Dataset(Dataset):
         # block size for tokenizers, etc.
         self.block_size = self.g_data.shape[1]
         self.n_env_fts = len(self.e_cols)
+        self.n_parents = max(self.parent_vocab.values()) + 1 if self.parent_vocab else 1  # includes UNK at 0
 
         # final sanity check 
         assert len(self.env_id_tensor) == len(self.g_data) == len(self.e_data) == len(self.y_data), \
@@ -423,6 +455,11 @@ class GxE_Dataset(Dataset):
         x = {'g_data': g_tensor, 'e_data': env_data}
         if self.g_input_type == "grm":
             x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
+
+        # Parent decomposition tensors (always included; model decides whether to use)
+        x["parent_ids"] = self.parent_id_tensor[index]               # (2,) long
+        x["g_additive"] = torch.tensor(self.g_additive[index], dtype=torch.float32)   # (Tm,)
+        x["g_dominance"] = torch.tensor(self.g_dominance[index], dtype=torch.float32) # (Tm,)
         
         if self.split in ('sub', 'test'):
             row = self.y_data.iloc[index]
