@@ -23,63 +23,58 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 #   - See ROLLING_TRAINING.md for variable semantics + launch recipes.
 
 ### model / training hyperparameters (same surface as train.py/train_residual.py) ###
-export G_ENC=True
-export E_ENC=True
-export LD_ENC=True
-export GXE_ENC=tf
-export WG=True
-export FULL_TRANSFORMER=True
-export RES=False
+export G_ENC=${G_ENC:-True}
+export E_ENC=${E_ENC:-True}
+export LD_ENC=${LD_ENC:-True}
+export GXE_ENC=${GXE_ENC:-tf}
+export WG=${WG:-True}
+export FULL_TRANSFORMER=${FULL_TRANSFORMER:-True}
 
-export G_ENCODER_TYPE=moe
-export FULL_TF_MLP_TYPE=moe
-export MOE_NUM_EXPERTS=8
-export MOE_TOP_K=2
-export MOE_SHARED_EXPERT=True
-export MOE_EXPERT_HIDDEN_DIM=256
-export MOE_SHARED_EXPERT_HIDDEN_DIM=256
-export MOE_LOSS_WEIGHT=0.01
+export G_ENCODER_TYPE=${G_ENCODER_TYPE:-moe}
+export MOE_NUM_EXPERTS=${MOE_NUM_EXPERTS:-8}
+export MOE_TOP_K=${MOE_TOP_K:-2}
+export MOE_SHARED_EXPERT=${MOE_SHARED_EXPERT:-True}
+export MOE_EXPERT_HIDDEN_DIM=${MOE_EXPERT_HIDDEN_DIM:-256}
+export MOE_SHARED_EXPERT_HIDDEN_DIM=${MOE_SHARED_EXPERT_HIDDEN_DIM:-256}
+export MOE_LOSS_WEIGHT=${MOE_LOSS_WEIGHT:-0.01}
 
-export GBS=8192
+export GBS=${GBS:-8192}
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Rolling CV with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=1200
-export LR=1e-4
-export WEIGHT_DECAY=1e-5
-export DROPOUT=0.15
-export EARLY_STOP=100
+export NUM_EPOCHS=${NUM_EPOCHS:-1200}
+export LR=${LR:-1e-4}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-1e-5}
+export DROPOUT=${DROPOUT:-0.15}
+export EARLY_STOP=${EARLY_STOP:-100}
 
-export G_LAYERS=1
-export LD_LAYERS=1
-export MLP_LAYERS=1
-export GXE_LAYERS=1
+export G_LAYERS=${G_LAYERS:-1}
+export LD_LAYERS=${LD_LAYERS:-1}
+export MLP_LAYERS=${MLP_LAYERS:-1}
+export GXE_LAYERS=${GXE_LAYERS:-1}
 
-export HEADS=4
-export EMB_SIZE=256
-export SEED=1
-export SCALE_TARGETS=True
-export G_INPUT_TYPE=tokens
+export HEADS=${HEADS:-4}
+export EMB_SIZE=${EMB_SIZE:-256}
+export SEED=${SEED:-1}
+export SCALE_TARGETS=${SCALE_TARGETS:-False}
+export G_INPUT_TYPE=${G_INPUT_TYPE:-tokens}
+export ENV_CATEGORICAL_MODE=${ENV_CATEGORICAL_MODE:-drop}
 
-export LOSS="envpcc"
-export LOSS_WEIGHTS="1.0"
+export LOSS=${LOSS:-"envpcc"}
+export LOSS_WEIGHTS=${LOSS_WEIGHTS:-"1.0"}
 
-export DETACH_YMEAN=True
-export LAMBDA_YMEAN=0.5
-export LAMBDA_RESID=1.0
+export ENV_STRATIFIED=${ENV_STRATIFIED:-True}
+export MIN_SAMPLES_PER_ENV=${MIN_SAMPLES_PER_ENV:-32}
 
-export ENV_STRATIFIED=True
-export MIN_SAMPLES_PER_ENV=32
-
-export CONTRASTIVE_MODE=none
-export CONTRASTIVE_WEIGHT=0.1
-export CONTRASTIVE_TEMPERATURE=0.1
-export CONTRASTIVE_SIM_TYPE=grm
-export CONTRASTIVE_LOSS_TYPE=mse
-export ENV_CONTRASTIVE_WEIGHT=0.1
-export ENV_CONTRASTIVE_TEMPERATURE=0.5
+export CONTRASTIVE_MODE=${CONTRASTIVE_MODE:-none}
+export CONTRASTIVE_WEIGHT=${CONTRASTIVE_WEIGHT:-0.1}
+export CONTRASTIVE_TEMPERATURE=${CONTRASTIVE_TEMPERATURE:-0.1}
+export CONTRASTIVE_SIM_TYPE=${CONTRASTIVE_SIM_TYPE:-grm}
+export CONTRASTIVE_LOSS_TYPE=${CONTRASTIVE_LOSS_TYPE:-mse}
+export ENV_CONTRASTIVE_WEIGHT=${ENV_CONTRASTIVE_WEIGHT:-0.1}
+export ENV_CONTRASTIVE_TEMPERATURE=${ENV_CONTRASTIVE_TEMPERATURE:-0.5}
 
 ### rolling controls ###
 # Current default below is a tractable recent-years subset (2021-2023).
@@ -99,32 +94,32 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 #       Keep first K folds after ordering.
 #   - ROLLING_SINGLE_VAL_YEAR=YYYY:
 #       Run exactly one fold (overrides ROLLING_MAX_FOLDS).
-export ROLLING_FULL_CV=True
-export ROLLING_VAL_YEARS="2021,2022,2023"
-export ROLLING_TRAIN_START_YEAR=2014
-export ROLLING_TRAIN_END_YEAR=2023
-export ROLLING_MAX_FOLDS=3
-export ROLLING_RECENT_FIRST=False
-export ROLLING_SINGLE_VAL_YEAR=""
-export ROLLING_WANDB_NAME_SUFFIX=""
+export ROLLING_FULL_CV=${ROLLING_FULL_CV:-True}
+export ROLLING_VAL_YEARS=${ROLLING_VAL_YEARS:-"2021,2022,2023"}
+export ROLLING_TRAIN_START_YEAR=${ROLLING_TRAIN_START_YEAR:-2014}
+export ROLLING_TRAIN_END_YEAR=${ROLLING_TRAIN_END_YEAR:-2023}
+export ROLLING_MAX_FOLDS=${ROLLING_MAX_FOLDS:-3}
+export ROLLING_RECENT_FIRST=${ROLLING_RECENT_FIRST:-False}
+export ROLLING_SINGLE_VAL_YEAR=${ROLLING_SINGLE_VAL_YEAR:-""}
+export ROLLING_WANDB_NAME_SUFFIX=${ROLLING_WANDB_NAME_SUFFIX:-""}
 
 # Outer-fold parallel mode (submit as SLURM array):
 #   - Each array task trains exactly one fold.
 #   - ROLLING_PARALLEL_VAL_YEARS controls mapped val years. If empty,
 #     fallback is ROLLING_VAL_YEARS, else full [start+1 .. end] range.
 #   - ROLLING_PARALLEL_MAX_CONCURRENT is used in the printed resubmit hint.
-export ROLLING_PARALLEL_OUTER_FOLDS=False
-export ROLLING_PARALLEL_MAX_CONCURRENT=3
-export ROLLING_PARALLEL_VAL_YEARS=""
+export ROLLING_PARALLEL_OUTER_FOLDS=${ROLLING_PARALLEL_OUTER_FOLDS:-False}
+export ROLLING_PARALLEL_MAX_CONCURRENT=${ROLLING_PARALLEL_MAX_CONCURRENT:-3}
+export ROLLING_PARALLEL_VAL_YEARS=${ROLLING_PARALLEL_VAL_YEARS:-""}
 
 # rolling test-eval controls
 # options: none | best_fold | latest_fold | best_and_latest | all_folds | year:2023
 # recommendation:
 #   - during model selection CV runs: use ROLLING_TEST_EVAL_MODE=none
 #   - final reporting run: set to best_fold (or all_folds for diagnostics)
-export ROLLING_TEST_EVAL_MODE=best_fold
-export ROLLING_TEST_BATCH_SIZE=32
-export ROLLING_TEST_PRIMARY=best_fold
+export ROLLING_TEST_EVAL_MODE=${ROLLING_TEST_EVAL_MODE:-best_fold}
+export ROLLING_TEST_BATCH_SIZE=${ROLLING_TEST_BATCH_SIZE:-32}
+export ROLLING_TEST_PRIMARY=${ROLLING_TEST_PRIMARY:-best_fold}
 
 is_true() {
     case "${1,,}" in
@@ -222,18 +217,13 @@ srun -N ${SLURM_NNODES} \
         --gxe_enc $GXE_ENC \
         --wg $WG \
         --full_transformer $FULL_TRANSFORMER \
-        --residual $RES \
         --g_encoder_type $G_ENCODER_TYPE \
-        --full_tf_mlp_type $FULL_TF_MLP_TYPE \
         --moe_num_experts $MOE_NUM_EXPERTS \
         --moe_top_k $MOE_TOP_K \
         --moe_shared_expert $MOE_SHARED_EXPERT \
         --moe_expert_hidden_dim $MOE_EXPERT_HIDDEN_DIM \
         --moe_shared_expert_hidden_dim $MOE_SHARED_EXPERT_HIDDEN_DIM \
         --moe_loss_weight $MOE_LOSS_WEIGHT \
-        --detach_ymean $DETACH_YMEAN \
-        --lambda_ymean $LAMBDA_YMEAN \
-        --lambda_resid $LAMBDA_RESID \
         --num_epochs $NUM_EPOCHS \
         --lr $LR \
         --weight_decay $WEIGHT_DECAY \
@@ -250,6 +240,7 @@ srun -N ${SLURM_NNODES} \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
         --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
         --contrastive_mode $CONTRASTIVE_MODE \

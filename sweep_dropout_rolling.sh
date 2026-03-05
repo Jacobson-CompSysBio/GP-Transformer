@@ -8,9 +8,9 @@
 #
 # Design (lean — ~20 node-hours total):
 #   - 5 wildly different configs to guarantee a wide performance spread
-#   - 3 folds each (val 2021, 2022, 2023) — mean across folds is the signal
-#   - Micro-runs: 100 epochs, early stop 15 (~20-30 min per fold)
-#   - 2 nodes per job, ~2h wall each
+#   - 5 folds each (val 2019-2023) — mean across folds is the signal
+#   - Micro-runs: 100 epochs, early stop 15 (~15-20 min per fold)
+#   - 2 nodes per job, ~3h wall each
 #   - ROLLING_TEST_EVAL_MODE=all_folds  (evaluates every fold ckpt on test)
 #
 # Configs:
@@ -37,7 +37,7 @@ if [[ "${1:-}" == "--dry" || "${1:-}" == "--dry-run" ]]; then
 fi
 
 # ── Shared training budget (micro-runs — just need relative ranking) ──
-SWEEP_NODES=2
+SWEEP_NODES=4
 SWEEP_TIME="02:00:00"
 SWEEP_PARTITION="batch"
 SWEEP_NUM_EPOCHS=100
@@ -59,7 +59,7 @@ echo "Rolling CV vs 2024 Test — Quick Validation Sweep"
 echo "=================================================================="
 echo "Group        : ${SWEEP_GROUP}"
 echo "Configs      : ${#CONFIGS[@]}"
-echo "Folds        : val 2021, 2022, 2023 (3 micro-folds)"
+echo "Folds        : val 2019-2023 (5 micro-folds)"
 echo "Epochs       : ${SWEEP_NUM_EPOCHS} (early stop: ${SWEEP_EARLY_STOP})"
 echo "Nodes/job    : ${SWEEP_NODES}  wall: ${SWEEP_TIME}"
 echo "SLURM base   : ${SLURM_TEMPLATE}"
@@ -78,6 +78,10 @@ for config_str in "${CONFIGS[@]}"; do
     # When using dense, set expert count to a safe default (ignored by model)
     EXPERT_DIM=${EMB}
     SHARED_DIM=${EMB}
+
+    # Export vars that contain commas BEFORE sbatch (--export uses comma as delimiter)
+    export ROLLING_VAL_YEARS="2019,2020,2021,2022,2023"
+    export ROLLING_SINGLE_VAL_YEAR=""
 
     SBATCH_CMD=(
         sbatch
@@ -100,10 +104,8 @@ GBS=${SWEEP_GBS},\
 NUM_EPOCHS=${SWEEP_NUM_EPOCHS},\
 EARLY_STOP=${SWEEP_EARLY_STOP},\
 ROLLING_FULL_CV=False,\
-ROLLING_VAL_YEARS=2021,2022,2023,\
-ROLLING_MAX_FOLDS=3,\
+ROLLING_MAX_FOLDS=5,\
 ROLLING_RECENT_FIRST=False,\
-ROLLING_SINGLE_VAL_YEAR=,\
 ROLLING_PARALLEL_OUTER_FOLDS=False,\
 ROLLING_TEST_EVAL_MODE=all_folds,\
 ROLLING_TEST_PRIMARY=best_fold,\
@@ -134,7 +136,7 @@ META_FILE="logs/sweeps/${SWEEP_GROUP}-meta.txt"
     echo "num_epochs=${SWEEP_NUM_EPOCHS}"
     echo "early_stop=${SWEEP_EARLY_STOP}"
     echo "nodes_per_job=${SWEEP_NODES}"
-    echo "val_years=2021,2022,2023"
+    echo "val_years=2019,2020,2021,2022,2023"
     echo "wandb_project=gxe-transformer-rolling"
     echo "wandb_entity=$(grep WANDB_ENTITY .env 2>/dev/null | cut -d= -f2 | tr -d '"' || echo 'unknown')"
     for config_str in "${CONFIGS[@]}"; do

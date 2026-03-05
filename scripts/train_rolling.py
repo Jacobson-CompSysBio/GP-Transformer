@@ -317,6 +317,7 @@ def _evaluate_checkpoint_on_test(
         scale_targets=scale_targets,
         g_input_type=g_input_type,
         marker_stats=marker_stats,
+        env_categorical_mode=cfg.get("env_categorical_mode", "drop"),
     )
     test_loader = DataLoader(
         test_ds,
@@ -483,6 +484,9 @@ def main():
     set_seed(args.seed + rank)
 
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
+    env_categorical_mode = normalize_env_categorical_mode(
+        _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
+    )
     env_stratified = _get_arg_or_env("env_stratified", "ENV_STRATIFIED", False, str2bool)
     min_samples_per_env = _get_arg_or_env("min_samples_per_env", "MIN_SAMPLES_PER_ENV", 32, int)
 
@@ -667,6 +671,7 @@ def main():
             "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
             "moe_loss_weight": moe_loss_weight,
             "g_input_type": g_input_type,
+            "env_categorical_mode": env_categorical_mode,
             "contrastive_mode": contrastive_mode,
             "env_stratified": env_stratified,
             "min_samples_per_env": min_samples_per_env,
@@ -707,6 +712,7 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=g_input_type,
             marker_stats=None,
+            env_categorical_mode=env_categorical_mode,
         )
         env_scaler = train_ds.scaler
         y_scalers = train_ds.label_scalers
@@ -722,6 +728,7 @@ def main():
             scale_targets=args.scale_targets,
             g_input_type=g_input_type,
             marker_stats=marker_stats,
+            env_categorical_mode=env_categorical_mode,
         )
 
         train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -1172,6 +1179,7 @@ def main():
                             "lambda_resid": args.lambda_resid,
                             "detach_ymean": args.detach_ymean,
                             "scale_targets": args.scale_targets,
+                            "env_categorical_mode": env_categorical_mode,
                             "contrastive_mode": contrastive_mode,
                             "dropout": args.dropout,
                         },
