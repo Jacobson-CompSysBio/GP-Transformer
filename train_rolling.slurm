@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J train-rolling
+#SBATCH -J 3prong
 #SBATCH -N 4
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -28,7 +28,7 @@ export E_ENC=${E_ENC:-True}
 export LD_ENC=${LD_ENC:-True}
 export GXE_ENC=${GXE_ENC:-tf}
 export WG=${WG:-True}
-export FULL_TRANSFORMER=${FULL_TRANSFORMER:-True}
+export FULL_TRANSFORMER=${FULL_TRANSFORMER:-False}
 
 export G_ENCODER_TYPE=${G_ENCODER_TYPE:-moe}
 export MOE_NUM_EXPERTS=${MOE_NUM_EXPERTS:-8}

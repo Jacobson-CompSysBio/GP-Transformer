@@ -4,3 +4,4 @@
 **/wandb
 *.pyc
 .env
+**/shared_memory
