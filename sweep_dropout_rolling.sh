@@ -1,29 +1,5 @@
 #!/bin/bash
-# ============================================================================
-# Quick Validation: Does Rolling CV Ranking Track 2024 Test Ranking?
-# ============================================================================
-# Purpose: Submit diverse configs, each training 3 micro-folds (val=2021,
-#          2022, 2023), then check whether the MEAN rolling-CV ranking
-#          (cv/mean_val_env_avg_pearson) matches the 2024 test ranking.
-#
-# Design (lean — ~20 node-hours total):
-#   - 5 wildly different configs to guarantee a wide performance spread
-#   - 5 folds each (val 2019-2023) — mean across folds is the signal
-#   - Micro-runs: 100 epochs, early stop 15 (~15-20 min per fold)
-#   - 2 nodes per job, ~3h wall each
-#   - ROLLING_TEST_EVAL_MODE=all_folds  (evaluates every fold ckpt on test)
-#
-# Configs:
-#   A) baseline   — current best (FullTF+MoE, emb=256, drop=0.15)
-#   B) tiny       — emb=64, no MoE (dense), drop=0.10
-#   C) huge_drop  — emb=256, MoE, drop=0.50  (over-regularized)
-#   D) no_moe     — emb=256, dense MLP, drop=0.15
-#   E) zero_drop  — emb=256, MoE, drop=0.00  (under-regularized)
-#
-# Usage:
-#   bash sweep_dropout_rolling.sh          # submit all 5 jobs
-#   bash sweep_dropout_rolling.sh --dry    # print commands without submitting
-# ============================================================================
+# bash sweep_dropout_rolling.sh          # submit all 5 jobs
 
 set -euo pipefail
 
