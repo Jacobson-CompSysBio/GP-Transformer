@@ -381,7 +381,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, payload
 
 def main():
     args = parse_args()
@@ -413,7 +413,7 @@ def main():
     torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, ckpt_payload = load_model(device, args)    
     
     # load data
     print("Loading data...")
@@ -438,6 +438,21 @@ def main():
     print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
     print("Environment-Averaged MSE:", results['env_mse'])
     print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
+
+    # Display tw_select_score from checkpoint for comparison with test perf
+    ckpt_tw_select = ckpt_payload.get("tw_select_score", None)
+    ckpt_tw_point = ckpt_payload.get("tw_point_estimate", None)
+    ckpt_val_env_pcc = ckpt_payload.get("val_env_avg_pearson", None)
+    if ckpt_tw_select is not None:
+        print(f"\n--- Checkpoint validation metrics (for comparison) ---")
+        print(f"  tw_select_score (val):  {ckpt_tw_select:.5f}")
+        if ckpt_tw_point is not None:
+            print(f"  tw_point_estimate (val): {ckpt_tw_point:.5f}")
+        if ckpt_val_env_pcc is not None:
+            print(f"  val/env_avg_pearson:     {ckpt_val_env_pcc:.5f}")
+        print(f"  test/env_avg_pearson:    {results['env_pcc']:.5f}")
+        print(f"---")
+
     for pcc in results['pcc_by_env'].items():
         print(f"Env PCC: {pcc}")
 
@@ -448,6 +463,10 @@ def main():
     run.summary["test/env_avg_mse"] = float(results['env_mse'])
     run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
     run.summary["test/model_type"] = model_type
+    if ckpt_tw_select is not None:
+        run.summary["val/tw_select_score"] = float(ckpt_tw_select)
+    if ckpt_tw_point is not None:
+        run.summary["val/tw_point_estimate"] = float(ckpt_tw_point)
     
     # table for pcc by env
     pcc_series = results['pcc_by_env']

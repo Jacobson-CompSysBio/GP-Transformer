@@ -30,6 +30,7 @@ from utils.loss import (
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
+from utils.eval_with_target_weighting import create_tw_validator, tw_evaluate
 
 load_dotenv()
 os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
@@ -165,6 +166,24 @@ def main():
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
+
+    # --- Target-weighted validator (covariate-shift-aware model selection) ---
+    # Only rank 0 needs the validator (it does numpy-only work on gathered preds)
+    tw_validator = None
+    if is_main(rank):
+        print("[INFO] Initialising target-weighted validator (kernel similarity to 2024 test envs)...")
+        tw_validator = create_tw_validator(
+            data_dir='data/maize_data_2014-2023_vs_2024_v2/',
+            val_year=2023,
+            test_year=2024,
+            weighting_method="kernel",
+            fingerprint_method="mean_std",
+            n_bootstrap=500,
+            pessimistic_quantile=0.10,
+            min_samples=5,
+            verbose=True,
+        )
+        print("[INFO] Target-weighted validator ready.")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
@@ -399,11 +418,17 @@ def main():
         run.define_metric("val_loss", step_metric="epoch")
         run.define_metric("train_loss_epoch/env_avg_pearson", step_metric="epoch")
         run.define_metric("val_loss/env_avg_pearson", step_metric="epoch")
+        # Target-weighted validation metrics
+        run.define_metric("val_loss/tw_select_score", step_metric="epoch")
+        run.define_metric("val_loss/tw_point_estimate", step_metric="epoch")
+        run.define_metric("val_loss/tw_leaderboard_style", step_metric="epoch")
+        run.define_metric("val_loss/tw_bootstrap_mean", step_metric="epoch")
+        run.define_metric("val_loss/tw_bootstrap_std", step_metric="epoch")
 
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
-                             "selection_metric": "val_loss/env_avg_pearson",
+                             "selection_metric": "val_loss/tw_select_score",
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
                              "g_layers": args.g_layers,
@@ -461,11 +486,13 @@ def main():
     # initialize training states
     best_val_loss = float("inf")
     best_val_env_pcc = -float("inf")
+    best_tw_select = -float("inf")
     last_improved = 0
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
+        print("[INFO] Checkpoint/early-stop selection metric: val_loss/tw_select_score (maximize)")
+        print("[INFO] Also logging raw env_avg_pearson for comparison.")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -661,18 +688,18 @@ def main():
                     full_preds, full_targets, full_env_ids, min_samples=2
                 )
                 mean_parts = {k: float(v) for k, v in lparts.items()}
-                return ltot, mean_parts, float(env_pcc.item())
+                return ltot, mean_parts, float(env_pcc.item()), full_preds, full_targets, full_env_ids
             
             # reshuffle train sampler s.t. sampled subset is different each epoch
             if isinstance(train_sampler, DistributedSampler):
                 train_sampler.set_epoch(10_000 + epoch_num)
             # eval on subset of train for speed, full val
-            train_total, train_parts, train_env_pcc = eval_loader(
+            train_total, train_parts, train_env_pcc, _, _, _ = eval_loader(
                 train_loader,
                 len(train_ds),
                 max_batches=int(math.ceil(len(val_loader) / world_size)),
             )
-            val_total, val_parts, val_env_pcc = eval_loader(
+            val_total, val_parts, val_env_pcc, val_full_preds, val_full_targets, val_full_env_ids = eval_loader(
                 val_loader,
                 len(val_ds),
                 max_batches=None,
@@ -680,10 +707,31 @@ def main():
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
+            # --- Target-weighted validation score ---
+            tw_results = tw_evaluate(
+                tw_validator,
+                val_full_preds,
+                val_full_targets,
+                val_full_env_ids,
+                val_ds,
+                y_scalers=y_scalers if args.scale_targets else None,
+            )
+            tw_select = float(tw_results["select_score"])
+            tw_point  = float(tw_results["point_estimate"])
+            tw_lb     = float(tw_results["leaderboard_style"])
+            tw_mean   = float(tw_results["mean"])
+            tw_std    = float(tw_results["std"])
+
             log_epoch_payload = {
                 "epoch": epoch_num,
                 "val_loss": val_total.item(),
                 "val_loss/env_avg_pearson": val_env_pcc,
+                # target-weighted metrics
+                "val_loss/tw_select_score": tw_select,
+                "val_loss/tw_point_estimate": tw_point,
+                "val_loss/tw_leaderboard_style": tw_lb,
+                "val_loss/tw_bootstrap_mean": tw_mean,
+                "val_loss/tw_bootstrap_std": tw_std,
             }
             for k, v in val_parts.items():
                 log_epoch_payload[f"val_loss/{k}"] = float(v)
@@ -693,20 +741,22 @@ def main():
                 log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
+            # --- Checkpoint selection: use tw_select_score ---
             val_loss_value = float(val_total.item())
             improved = False
-            if math.isfinite(val_env_pcc):
-                if (val_env_pcc > best_val_env_pcc + 1e-8) or (
-                    abs(val_env_pcc - best_val_env_pcc) <= 1e-8
+            if math.isfinite(tw_select):
+                if (tw_select > best_tw_select + 1e-8) or (
+                    abs(tw_select - best_tw_select) <= 1e-8
                     and val_loss_value < best_val_loss
                 ):
                     improved = True
-            elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
+            elif not math.isfinite(best_tw_select) and (val_loss_value < best_val_loss):
                 improved = True
 
             if improved:
                 best_val_loss = val_loss_value
                 best_val_env_pcc = val_env_pcc
+                best_tw_select = tw_select
                 last_improved = 0
                 # collect env scaler and y scalers
                 env_scaler_payload = {
@@ -738,6 +788,12 @@ def main():
                     "epoch": epoch_num,
                     "val_loss": val_loss_value,
                     "val_env_avg_pearson": val_env_pcc,
+                    "tw_select_score": tw_select,
+                    "tw_point_estimate": tw_point,
+                    "tw_results": {
+                        k: v for k, v in tw_results.items()
+                        if k != "per_location_r" and k != "leaderboard_per_location"
+                    },
                     "config": {
                         "g_enc": args.g_enc,
                         "e_enc": args.e_enc,
@@ -776,8 +832,9 @@ def main():
                 ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
                 torch.save(ckpt, ckpt_path)
                 print(
-                    "*** validation env_avg_pearson improved: "
-                    f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
+                    "*** tw_select_score improved: "
+                    f"{best_tw_select:.5f} "
+                    f"(env_pcc={best_val_env_pcc:.5f}, val_loss={best_val_loss:.4e}) ***"
                 )
             else:
                 last_improved += 1
@@ -799,7 +856,8 @@ def main():
             print(
                 f"[Epoch {epoch_num}] train_loss={train_total.item():.4e} | "
                 f"val_loss={val_total.item():.4e} | "
-                f"val_env_pcc={val_env_pcc:.5f} | best_env_pcc={best_val_env_pcc:.5f} | "
+                f"val_env_pcc={val_env_pcc:.5f} | "
+                f"tw_select={tw_select:.5f} | best_tw={best_tw_select:.5f} | "
                 f"elapsed={elapsed:.2f}m"
             )
 

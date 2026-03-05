@@ -28,6 +28,7 @@ from utils.loss import (
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
+from utils.eval_with_target_weighting import create_tw_validator, tw_evaluate
 
 load_dotenv()
 os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
@@ -623,6 +624,12 @@ def main():
         # aliases to match residual script naming
         run.define_metric("train/env_avg_pearson", step_metric="epoch")
         run.define_metric("val/env_avg_pearson", step_metric="epoch")
+        # Target-weighted validation metrics (used for val_year=2023 fold)
+        run.define_metric("val_loss/tw_select_score", step_metric="epoch")
+        run.define_metric("val_loss/tw_point_estimate", step_metric="epoch")
+        run.define_metric("val_loss/tw_leaderboard_style", step_metric="epoch")
+        run.define_metric("val_loss/tw_bootstrap_mean", step_metric="epoch")
+        run.define_metric("val_loss/tw_bootstrap_std", step_metric="epoch")
 
         for name in loss_names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -659,7 +666,7 @@ def main():
             "rolling_folds": folds,
             "loss": args.loss,
             "loss_weights": args.loss_weights,
-            "selection_metric": "val_loss/env_avg_pearson",
+            "selection_metric": "val_loss/tw_select_score (2023 fold) / val/env_avg_pearson (others)",
             "residual": args.residual,
             "full_transformer": args.full_transformer,
             "g_encoder_type": g_encoder_type,
@@ -697,6 +704,25 @@ def main():
     fold_records = []
     iter_num_global = 0
     epoch_global = 0
+
+    # --- Target-weighted validator (covariate-shift-aware model selection) ---
+    # Used only for val_year=2023 fold where env overlap with 2024 test exists.
+    tw_validator = None
+    tw_fold_years = {f[1] for f in folds}  # val years in this run
+    if is_main(rank) and 2023 in tw_fold_years:
+        print("[INFO] Initialising target-weighted validator (kernel similarity to 2024 test envs)...")
+        tw_validator = create_tw_validator(
+            data_dir='data/maize_data_2014-2023_vs_2024_v2/',
+            val_year=2023,
+            test_year=2024,
+            weighting_method="kernel",
+            fingerprint_method="mean_std",
+            n_bootstrap=500,
+            pessimistic_quantile=0.10,
+            min_samples=5,
+            verbose=True,
+        )
+        print("[INFO] Target-weighted validator ready (will be used for val_year=2023 fold).")
 
     for fold_idx, (train_year_max, val_year) in enumerate(folds, start=1):
         if is_main(rank):
@@ -876,6 +902,7 @@ def main():
 
         best_val_loss = float("inf")
         best_val_env_pcc = -float("inf")
+        best_tw_select = -float("inf")
         best_ckpt_path = None
         best_epoch = -1
         last_improved = 0
@@ -1073,12 +1100,35 @@ def main():
 
                     env_pcc = macro_env_pearson(full_preds, full_targets, full_env_ids, min_samples=2)
                     mean_parts = {k: float(v) for k, v in lparts.items()}
-                    return ltot, mean_parts, mean_aux_ymean, mean_aux_resid, float(env_pcc.item())
+                    return ltot, mean_parts, mean_aux_ymean, mean_aux_resid, float(env_pcc.item()), full_preds, full_targets, full_env_ids
 
-                train_total, train_parts, aux_train_ymean, aux_train_resid, train_env_pcc = eval_loader(train_loader, len(train_ds))
-                val_total, val_parts, aux_val_ymean, aux_val_resid, val_env_pcc = eval_loader(val_loader, len(val_ds))
+                train_total, train_parts, aux_train_ymean, aux_train_resid, train_env_pcc, _, _, _ = eval_loader(train_loader, len(train_ds))
+                val_total, val_parts, aux_val_ymean, aux_val_resid, val_env_pcc, val_full_preds, val_full_targets, val_full_env_ids = eval_loader(val_loader, len(val_ds))
 
             if is_main(rank):
+                # --- Target-weighted validation (only for val_year=2023) ---
+                tw_select = float("nan")
+                tw_point = float("nan")
+                tw_lb = float("nan")
+                tw_mean = float("nan")
+                tw_std = float("nan")
+                tw_results = {}
+                use_tw = (val_year == 2023 and tw_validator is not None)
+                if use_tw:
+                    tw_results = tw_evaluate(
+                        tw_validator,
+                        val_full_preds,
+                        val_full_targets,
+                        val_full_env_ids,
+                        val_ds,
+                        y_scalers=y_scalers if args.scale_targets else None,
+                    )
+                    tw_select = float(tw_results["select_score"])
+                    tw_point  = float(tw_results["point_estimate"])
+                    tw_lb     = float(tw_results["leaderboard_style"])
+                    tw_mean   = float(tw_results["mean"])
+                    tw_std    = float(tw_results["std"])
+
                 payload = {
                     "epoch": epoch_global,
                     "train_loss_epoch": float(train_total.item()),
@@ -1091,6 +1141,12 @@ def main():
                     "rolling/epoch_in_fold": int(epoch_num),
                     "rolling/val_year": int(val_year),
                 }
+                if use_tw:
+                    payload["val_loss/tw_select_score"] = tw_select
+                    payload["val_loss/tw_point_estimate"] = tw_point
+                    payload["val_loss/tw_leaderboard_style"] = tw_lb
+                    payload["val_loss/tw_bootstrap_mean"] = tw_mean
+                    payload["val_loss/tw_bootstrap_std"] = tw_std
                 for k, v in train_parts.items():
                     payload[f"train_loss_epoch/{k}"] = float(v)
                 for k, v in val_parts.items():
@@ -1100,19 +1156,33 @@ def main():
                     payload["aux_resid_mse_epoch"] = float(aux_val_resid)
                 wandb.log(payload)
 
+                # --- Checkpoint selection ---
+                # For val_year=2023: use tw_select_score (better tracks test)
+                # For other folds:   use env_avg_pearson (tw not applicable)
                 val_loss_value = float(val_total.item())
                 improved = False
-                if math.isfinite(val_env_pcc):
-                    if (val_env_pcc > best_val_env_pcc + 1e-8) or (
-                        abs(val_env_pcc - best_val_env_pcc) <= 1e-8 and val_loss_value < best_val_loss
-                    ):
+                if use_tw:
+                    if math.isfinite(tw_select):
+                        if (tw_select > best_tw_select + 1e-8) or (
+                            abs(tw_select - best_tw_select) <= 1e-8 and val_loss_value < best_val_loss
+                        ):
+                            improved = True
+                    elif not math.isfinite(best_tw_select) and (val_loss_value < best_val_loss):
                         improved = True
-                elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
-                    improved = True
+                else:
+                    if math.isfinite(val_env_pcc):
+                        if (val_env_pcc > best_val_env_pcc + 1e-8) or (
+                            abs(val_env_pcc - best_val_env_pcc) <= 1e-8 and val_loss_value < best_val_loss
+                        ):
+                            improved = True
+                    elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
+                        improved = True
 
                 if improved:
                     best_val_loss = val_loss_value
                     best_val_env_pcc = val_env_pcc
+                    if use_tw:
+                        best_tw_select = tw_select
                     best_epoch = epoch_num
                     last_improved = 0
 
@@ -1149,6 +1219,14 @@ def main():
                         "val_year": val_year,
                         "val_loss": val_loss_value,
                         "val_env_avg_pearson": val_env_pcc,
+                        **({
+                            "tw_select_score": tw_select,
+                            "tw_point_estimate": tw_point,
+                            "tw_results": {
+                                k: v for k, v in tw_results.items()
+                                if k != "per_location_r" and k != "leaderboard_per_location"
+                            },
+                        } if use_tw else {}),
                         "config": {
                             "g_enc": args.g_enc,
                             "e_enc": args.e_enc,
@@ -1196,10 +1274,17 @@ def main():
                     torch.save(ckpt, ckpt_path)
                     best_ckpt_path = str(ckpt_path)
 
-                    print(
-                        f"*** fold {val_year} env_avg_pearson improved: "
-                        f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
-                    )
+                    if use_tw:
+                        print(
+                            f"*** fold {val_year} tw_select_score improved: "
+                            f"{best_tw_select:.5f} "
+                            f"(env_pcc={best_val_env_pcc:.5f}, val_loss={best_val_loss:.4e}) ***"
+                        )
+                    else:
+                        print(
+                            f"*** fold {val_year} env_avg_pearson improved: "
+                            f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
+                        )
                 else:
                     last_improved += 1
                     print(f"Fold {val_year} has not improved in {last_improved} epochs")
@@ -1214,10 +1299,11 @@ def main():
                 break
 
             if is_main(rank):
+                tw_info = f" | tw_select={tw_select:.5f} | best_tw={best_tw_select:.5f}" if use_tw else ""
                 print(
                     f"[Fold {val_year} Epoch {epoch_num}] train_loss={train_total.item():.4e} | "
                     f"val_loss={val_total.item():.4e} | val_env_pcc={val_env_pcc:.5f} | "
-                    f"best_env_pcc={best_val_env_pcc:.5f}"
+                    f"best_env_pcc={best_val_env_pcc:.5f}{tw_info}"
                 )
 
         if is_main(rank):
@@ -1230,6 +1316,8 @@ def main():
                 "best_val_env_avg_pearson": float(best_val_env_pcc),
                 "best_checkpoint": best_ckpt_path,
             }
+            if val_year == 2023:
+                fold_record["best_tw_select_score"] = float(best_tw_select)
             fold_records.append(fold_record)
             wandb.log({
                 "rolling/fold/final/val_year": int(val_year),
