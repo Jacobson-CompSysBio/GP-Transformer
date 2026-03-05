@@ -570,11 +570,29 @@ def main():
 
     run = None
     if is_main(rank):
+        wandb_tags_env = os.getenv("WANDB_TAGS", "").strip()
+        wandb_tags = [t.strip() for t in wandb_tags_env.split(",") if t.strip()] or None
+        wandb_group = os.getenv("SWEEP_GROUP", "").strip() or None
         run = wandb.init(
             project="gxe-transformer-rolling",
             entity=os.getenv("WANDB_ENTITY"),
             name=wandb_run_name,
+            group=wandb_group,
+            tags=wandb_tags,
         )
+
+        # Store sweep metadata in wandb config for analysis filtering
+        sweep_meta = {}
+        sweep_dropout = os.getenv("SWEEP_DROPOUT", "")
+        if sweep_dropout:
+            sweep_meta["sweep_dropout"] = float(sweep_dropout)
+        sweep_tag = os.getenv("SWEEP_TAG", "")
+        if sweep_tag:
+            sweep_meta["sweep_tag"] = sweep_tag
+        if wandb_group:
+            sweep_meta["sweep_group"] = wandb_group
+        if sweep_meta:
+            run.config.update(sweep_meta, allow_val_change=True)
 
         run_id_file = os.environ.get("WANDB_RUN_ID_FILE")
         if run_id_file:
