@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J train-rolling
-#SBATCH -N 8
-#SBATCH -t 24:00:00
-#SBATCH -p extended
+#SBATCH -N 4
+#SBATCH -t 02:00:00
+#SBATCH -p batch
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
 #SBATCH --open-mode=truncate
@@ -44,11 +44,11 @@ MBS=$(($GBS / $NGPUS))
 export BATCH_SIZE=$MBS
 echo "Rolling CV with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
-export NUM_EPOCHS=${NUM_EPOCHS:-1200}
+export NUM_EPOCHS=${NUM_EPOCHS:-100}
 export LR=${LR:-1e-4}
 export WEIGHT_DECAY=${WEIGHT_DECAY:-1e-5}
-export DROPOUT=${DROPOUT:-0.15}
-export EARLY_STOP=${EARLY_STOP:-100}
+export DROPOUT=${DROPOUT:-0.00}
+export EARLY_STOP=${EARLY_STOP:-15}
 
 export G_LAYERS=${G_LAYERS:-1}
 export LD_LAYERS=${LD_LAYERS:-1}
@@ -94,11 +94,11 @@ export ENV_CONTRASTIVE_TEMPERATURE=${ENV_CONTRASTIVE_TEMPERATURE:-0.5}
 #       Keep first K folds after ordering.
 #   - ROLLING_SINGLE_VAL_YEAR=YYYY:
 #       Run exactly one fold (overrides ROLLING_MAX_FOLDS).
-export ROLLING_FULL_CV=${ROLLING_FULL_CV:-True}
-export ROLLING_VAL_YEARS=${ROLLING_VAL_YEARS:-"2021,2022,2023"}
+export ROLLING_FULL_CV=${ROLLING_FULL_CV:-False}
+export ROLLING_VAL_YEARS=${ROLLING_VAL_YEARS:-"2019,2020,2021,2022,2023"}
 export ROLLING_TRAIN_START_YEAR=${ROLLING_TRAIN_START_YEAR:-2014}
 export ROLLING_TRAIN_END_YEAR=${ROLLING_TRAIN_END_YEAR:-2023}
-export ROLLING_MAX_FOLDS=${ROLLING_MAX_FOLDS:-3}
+export ROLLING_MAX_FOLDS=${ROLLING_MAX_FOLDS:-5}
 export ROLLING_RECENT_FIRST=${ROLLING_RECENT_FIRST:-False}
 export ROLLING_SINGLE_VAL_YEAR=${ROLLING_SINGLE_VAL_YEAR:-""}
 export ROLLING_WANDB_NAME_SUFFIX=${ROLLING_WANDB_NAME_SUFFIX:-""}
@@ -117,7 +117,7 @@ export ROLLING_PARALLEL_VAL_YEARS=${ROLLING_PARALLEL_VAL_YEARS:-""}
 # recommendation:
 #   - during model selection CV runs: use ROLLING_TEST_EVAL_MODE=none
 #   - final reporting run: set to best_fold (or all_folds for diagnostics)
-export ROLLING_TEST_EVAL_MODE=${ROLLING_TEST_EVAL_MODE:-best_fold}
+export ROLLING_TEST_EVAL_MODE=${ROLLING_TEST_EVAL_MODE:-all_folds}
 export ROLLING_TEST_BATCH_SIZE=${ROLLING_TEST_BATCH_SIZE:-32}
 export ROLLING_TEST_PRIMARY=${ROLLING_TEST_PRIMARY:-best_fold}
 
