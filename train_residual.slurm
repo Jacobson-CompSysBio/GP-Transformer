@@ -82,7 +82,7 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
-export LEO_VAL=True
+export LEO_VAL=False  # Must be False when using target-weighted validation
 export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
 
 ### wandb settings ###

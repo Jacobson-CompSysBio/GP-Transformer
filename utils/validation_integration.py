@@ -231,6 +231,12 @@ class TargetWeightedValidator:
             "leaderboard_style": lb_score,
             "leaderboard_per_location": lb_per_loc,
         }
+
+        # Diagnostic: count how many val envs had non-zero TW weight
+        unique_envs = np.unique(env_ids_str)
+        n_weighted = sum(1 for e in unique_envs if self.target_weights.get(str(e), 0.0) > 0)
+        results["n_val_envs"] = len(unique_envs)
+        results["n_weighted_envs"] = n_weighted
         return results
 
     # ------------------------------------------------------------------

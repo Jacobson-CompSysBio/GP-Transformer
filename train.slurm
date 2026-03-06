@@ -28,7 +28,7 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=True  # use FullTransformer architecture
+export FULL_TRANSFORMER=False  # use FullTransformer architecture
 
 # MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
@@ -49,7 +49,7 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export DROPOUT=0.0
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -79,8 +79,8 @@ export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
-export LEO_VAL_FRACTION=0.10
+export LEO_VAL=False
+export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

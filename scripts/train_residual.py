@@ -192,6 +192,11 @@ def main():
             verbose=True,
         )
         print("[INFO] Target-weighted validator ready.")
+        if leo_val:
+            print("[WARNING] LEO_VAL=True with target-weighted validation!")
+            print("[WARNING] LEO holds out random envs from all years, but TW weights")
+            print("[WARNING] are keyed to 2023 envs only.  Non-2023 envs will be excluded")
+            print("[WARNING] from TW score (weight=0). Consider setting LEO_VAL=False.")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)

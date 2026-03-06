@@ -184,6 +184,12 @@ def main():
             verbose=True,
         )
         print("[INFO] Target-weighted validator ready.")
+        if leo_val:
+            print("[WARNING] LEO_VAL=True with target-weighted validation!")
+            print("[WARNING] LEO holds out random envs from all years, but TW weights")
+            print("[WARNING] are keyed to 2023 envs only.  Non-2023 envs will be excluded")
+            print("[WARNING] from the TW score (weight=0). This will reduce the effective")
+            print("[WARNING] val set size.  Consider setting LEO_VAL=False for clean TW eval.")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
@@ -721,6 +727,15 @@ def main():
             tw_lb     = float(tw_results["leaderboard_style"])
             tw_mean   = float(tw_results["mean"])
             tw_std    = float(tw_results["std"])
+
+            # Diagnostic: on first epoch, log how many envs contribute to TW
+            if epoch_num == 0:
+                nv = tw_results.get("n_val_envs", "?")
+                nw = tw_results.get("n_weighted_envs", "?")
+                print(f"[TW-DIAG] Val envs: {nv}, TW-weighted envs: {nw}")
+                if isinstance(nw, int) and nw < 10:
+                    print(f"[TW-WARN] Only {nw} envs have non-zero TW weight. "
+                          f"If LEO is on, most envs are from non-target years and get weight=0.")
 
             log_epoch_payload = {
                 "epoch": epoch_num,

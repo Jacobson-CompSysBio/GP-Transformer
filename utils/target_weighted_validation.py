@@ -251,10 +251,16 @@ def compute_target_weighted_score(
         r, _ = stats.pearsonr(pred_loc, targ_loc)
         per_location[loc_str] = float(r)
 
+        # Only include locations that have explicit target weights.
+        # Locations absent from the weight dict (e.g. non-2023 envs when
+        # weights were derived for 2023→2024) are excluded entirely.
+        w_target = target_weights.get(loc_str, 0.0)
+        if w_target <= 0.0:
+            continue
+
         z = fisher_z(r) if use_fisher_z else r
         z_values[loc_str] = z
 
-        w_target = target_weights.get(loc_str, 1.0)
         w_n = max(n - 3, 1) if weight_by_n else 1.0
         combined_weights[loc_str] = w_target * w_n
 

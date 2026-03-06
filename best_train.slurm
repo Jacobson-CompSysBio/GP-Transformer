@@ -72,7 +72,7 @@ export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
 
 # LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
+export LEO_VAL=False  # Must be False when using target-weighted validation
 export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###

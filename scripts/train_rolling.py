@@ -723,6 +723,7 @@ def main():
             verbose=True,
         )
         print("[INFO] Target-weighted validator ready (will be used for val_year=2023 fold).")
+        # train_rolling doesn't use LEO, so no LEO+TW conflict here.
 
     for fold_idx, (train_year_max, val_year) in enumerate(folds, start=1):
         if is_main(rank):
