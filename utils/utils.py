@@ -35,6 +35,7 @@ def str2bool(v):
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--pref", type=str, default=None)
     p.add_argument("--g_enc", type=str2bool, default=True)
     p.add_argument("--e_enc", type=str2bool, default=True)
     p.add_argument("--ld_enc", type=str2bool, default=True)
@@ -249,6 +250,7 @@ def make_run_name(args) -> str:
         else f"{args.g_layers}g_{args.ld_layers}ld_{args.mlp_layers}mlp_{args.gxe_layers}gxe_"
     )
     return (
+        f"{args.pref + '_' if args.pref else ''}"
         f"{model_type}"
         f"{'_' + contr_tag if contr_tag else ''}"
         f"{'_' + moe_tag if moe_tag else ''}"
