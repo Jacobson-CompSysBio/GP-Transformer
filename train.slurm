@@ -28,7 +28,7 @@ export E_ENC=True
 export LD_ENC=True
 export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
 export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=False  # use FullTransformer architecture
+export FULL_TRANSFORMER=True  # use FullTransformer architecture
 
 # MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
 export G_ENCODER_TYPE=moe  # options: "dense", "moe"
