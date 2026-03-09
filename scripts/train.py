@@ -54,6 +54,8 @@ def setup_ddp():
     world_size = int(os.environ["SLURM_NTASKS"])
     local_rank = int(os.environ.get("SLURM_LOCALID", 0))
 
+    # On Frontier, srun --gpus-per-task=1 sets ROCR_VISIBLE_DEVICES so each
+    # task sees exactly one GCD.  PyTorch therefore always uses cuda:0.
     local_rank = 0
     torch.cuda.set_device(local_rank)
 
