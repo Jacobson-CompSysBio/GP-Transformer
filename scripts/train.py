@@ -169,9 +169,12 @@ def main():
 
     # --- Target-weighted validator (covariate-shift-aware model selection) ---
     # Only rank 0 needs the validator (it does numpy-only work on gathered preds)
+    tw_geno_alpha = float(os.environ.get("TW_GENO_ALPHA", "0.0"))
+    tw_geno_method = os.environ.get("TW_GENO_METHOD", "diversity")
     tw_validator = None
     if is_main(rank):
-        print("[INFO] Initialising target-weighted validator (kernel similarity to 2024 test envs)...")
+        print(f"[INFO] Initialising target-weighted validator "
+              f"(env kernel + geno alpha={tw_geno_alpha:.2f}, method={tw_geno_method})...")
         tw_validator = create_tw_validator(
             data_dir='data/maize_data_2014-2023_vs_2024_v2/',
             val_year=2023,
@@ -181,6 +184,8 @@ def main():
             n_bootstrap=500,
             pessimistic_quantile=0.10,
             min_samples=5,
+            genotype_alpha=tw_geno_alpha,
+            genotype_method=tw_geno_method,
             verbose=True,
         )
         print("[INFO] Target-weighted validator ready.")
@@ -467,7 +472,9 @@ def main():
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
                              "full_transformer": args.full_transformer,
-                             "full_tf_mlp_type": full_tf_mlp_type},
+                             "full_tf_mlp_type": full_tf_mlp_type,
+                             "tw_genotype_alpha": tw_geno_alpha,
+                             "tw_genotype_method": tw_geno_method},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")

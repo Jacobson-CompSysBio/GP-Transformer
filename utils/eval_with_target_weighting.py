@@ -32,10 +32,26 @@ def create_tw_validator(
     n_bootstrap: int = 500,
     pessimistic_quantile: float = 0.10,
     min_samples: int = 5,
+    genotype_alpha: float = 0.0,
+    genotype_method: str = "diversity",
     verbose: bool = True,
 ) -> TargetWeightedValidator:
     """
     Create and initialise the validator.  Call once at training start.
+
+    Parameters
+    ----------
+    genotype_alpha : float
+        Blend factor for genotype vs environment weights.
+        0.0 = pure environment (backward compatible).
+        1.0 = pure genotype (tester distribution + novelty rate).
+        0.5 = balanced blend.
+    genotype_method : str
+        "diversity" — Shannon entropy of tester distribution (default).
+                      Upweights val envs with diverse testers.
+        "kernel"    — RBF kernel similarity on tester fingerprints.
+                      Upweights val envs with similar tester proportions
+                      to test (may invert signal when mismatch is extreme).
     """
     v = TargetWeightedValidator(
         data_dir=data_dir,
@@ -47,6 +63,8 @@ def create_tw_validator(
         n_bootstrap=n_bootstrap,
         pessimistic_quantile=pessimistic_quantile,
         min_samples=min_samples,
+        genotype_alpha=genotype_alpha,
+        genotype_method=genotype_method,
         verbose=verbose,
     )
     v.fit_weights()

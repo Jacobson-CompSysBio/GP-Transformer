@@ -21,7 +21,7 @@ import numpy as np
 from scipy import stats
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from typing import Dict, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +380,156 @@ def compute_leaderboard_score(
     if not per_loc:
         return 0.0, per_loc
     return float(np.mean(list(per_loc.values()))), per_loc
+
+
+# ---------------------------------------------------------------------------
+# Genotype fingerprinting (for genotype covariate shift correction)
+# ---------------------------------------------------------------------------
+
+def _parse_hybrid_parts(sample_id: str) -> Tuple[str, str, str]:
+    """Parse 'ENV-parent1/parent2' → (hybrid_str, parent1, parent2)."""
+    parts = str(sample_id).split("-", 1)
+    if len(parts) < 2:
+        return str(sample_id), "", ""
+    hybrid_str = parts[1]
+    pp = hybrid_str.split("/", 1)
+    return hybrid_str, pp[0], pp[1] if len(pp) > 1 else ""
+
+
+def compute_genotype_fingerprint(
+    sample_ids: np.ndarray,
+    env_ids: np.ndarray,
+    prior_hybrids: Optional[Set[str]] = None,
+    all_testers: Optional[List[str]] = None,
+) -> Tuple[Dict[str, np.ndarray], List[str]]:
+    """
+    Per-environment genotype fingerprint: tester distribution + novelty rate.
+
+    For each environment, produces a vector:
+      [frac_tester_0, frac_tester_1, ..., frac_tester_K, novelty_fraction]
+
+    Parameters
+    ----------
+    sample_ids : array of str
+        Sample IDs in format "{Env}-{parent1}/{parent2}".
+    env_ids : array of str
+        Environment identifier per sample (e.g. "DEH1_2023").
+    prior_hybrids : set of str or None
+        Hybrid IDs from prior training years, used to compute novelty
+        fraction.  If None, novelty is set to 0.
+    all_testers : list of str or None
+        Ordered tester vocabulary.  If None, discovered from data.
+
+    Returns
+    -------
+    fingerprints : dict {env_id: np.ndarray}
+    all_testers : list of str — the tester ordering used
+    """
+    parsed = [_parse_hybrid_parts(sid) for sid in sample_ids]
+    hybrids = np.array([p[0] for p in parsed])
+    parent2s = np.array([p[2] for p in parsed])
+
+    if all_testers is None:
+        all_testers = sorted(set(parent2s) - {""})
+    tester_idx = {t: i for i, t in enumerate(all_testers)}
+    n_testers = len(all_testers)
+
+    fingerprints: Dict[str, np.ndarray] = {}
+    for env in np.unique(env_ids):
+        mask = env_ids == env
+        env_p2 = parent2s[mask]
+        env_hy = hybrids[mask]
+        n = int(mask.sum())
+
+        # Tester distribution histogram (normalized)
+        hist = np.zeros(n_testers, dtype=np.float64)
+        for p2 in env_p2:
+            idx = tester_idx.get(p2)
+            if idx is not None:
+                hist[idx] += 1
+        if n > 0:
+            hist /= n
+
+        # Novelty fraction
+        novelty = 0.0
+        if prior_hybrids is not None:
+            uniq = set(env_hy)
+            novelty = sum(1 for h in uniq if h not in prior_hybrids) / max(len(uniq), 1)
+
+        fingerprints[str(env)] = np.concatenate([hist, [novelty]])
+
+    return fingerprints, all_testers
+
+
+def compute_genotype_diversity_weights(
+    val_fingerprints: Dict[str, np.ndarray],
+    test_fingerprints: Dict[str, np.ndarray],
+) -> Dict[str, float]:
+    """
+    Genotype weights based on tester diversity (Shannon entropy).
+
+    Upweights validation environments with more diverse tester
+    compositions, which test the model's cross-tester generalization
+    ability — more informative about test performance with novel testers.
+
+    The RBF kernel approach (compute_kernel_similarity_weights) can
+    invert the desired signal when val and test tester distributions
+    are extremely different: it upweights val envs with the LEAST
+    minor-tester diversity (since those are numerically closest to
+    test envs that also have trace amounts of minor testers).
+
+    Parameters
+    ----------
+    val_fingerprints : dict {env_id: np.ndarray}
+        From compute_genotype_fingerprint.  Last element is novelty.
+    test_fingerprints : dict {env_id: np.ndarray}
+        Used only to compute the target entropy for normalization.
+
+    Returns
+    -------
+    weights : dict {val_env: float}
+    """
+    # Compute entropy for each val env (tester histogram only, not novelty)
+    entropies: Dict[str, float] = {}
+    for env, fp in val_fingerprints.items():
+        tester_hist = fp[:-1]  # exclude novelty
+        nonzero = tester_hist[tester_hist > 0]
+        if len(nonzero) > 0:
+            entropies[env] = float(-np.sum(nonzero * np.log(nonzero)))
+        else:
+            entropies[env] = 0.0
+
+    # Normalize to [0, 1] using max observed entropy
+    max_ent = max(entropies.values()) if entropies else 1.0
+    if max_ent < 1e-10:
+        return {env: 1.0 for env in val_fingerprints}
+
+    weights = {env: h / max_ent for env, h in entropies.items()}
+    return weights
+
+
+def combine_weights(
+    env_weights: Dict[str, float],
+    geno_weights: Dict[str, float],
+    alpha: float = 0.5,
+) -> Dict[str, float]:
+    """
+    Combine environment and genotype similarity weights multiplicatively.
+
+    w_final = w_env^(1 - alpha) * w_geno^alpha
+
+    alpha=0.0 → pure environment weights (backward compatible)
+    alpha=1.0 → pure genotype weights
+    """
+    all_locs = set(env_weights) | set(geno_weights)
+    combined: Dict[str, float] = {}
+    for loc in all_locs:
+        we = max(env_weights.get(loc, 0.0), 0.0)
+        wg = max(geno_weights.get(loc, 0.0), 0.0)
+        if we <= 0 and alpha < 1.0:
+            combined[loc] = 0.0
+        elif wg <= 0 and alpha > 0.0:
+            combined[loc] = 0.0
+        else:
+            combined[loc] = float((we ** (1.0 - alpha)) * (wg ** alpha))
+    return combined

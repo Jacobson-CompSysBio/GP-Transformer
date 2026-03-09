@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J longtest
+#SBATCH -J 3p-tw-g
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -81,6 +81,13 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=False
 export LEO_VAL_FRACTION=0.15
+
+# Target-weighted validation: genotype shift correction
+# TW_GENO_ALPHA: 0.0 = env-only (default), 0.5 = balanced, 1.0 = genotype-only
+# TW_GENO_METHOD: "diversity" = Shannon entropy (upweights diverse testers)
+#                 "kernel"   = RBF kernel on tester distributions
+export TW_GENO_ALPHA=0.5
+export TW_GENO_METHOD=diversity
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

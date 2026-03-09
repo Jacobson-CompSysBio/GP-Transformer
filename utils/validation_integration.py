@@ -26,6 +26,9 @@ from utils.target_weighted_validation import (
     compute_density_ratio_weights,
     bootstrap_validation_score,
     compute_leaderboard_score,
+    compute_genotype_fingerprint,
+    compute_genotype_diversity_weights,
+    combine_weights,
 )
 
 
@@ -104,6 +107,8 @@ class TargetWeightedValidator:
         n_bootstrap: int = 1000,
         pessimistic_quantile: float = 0.10,
         min_samples: int = 5,
+        genotype_alpha: float = 0.0,
+        genotype_method: str = "diversity",
         verbose: bool = True,
     ):
         self.data_dir = Path(data_dir)
@@ -115,12 +120,18 @@ class TargetWeightedValidator:
         self.n_bootstrap = n_bootstrap
         self.pessimistic_quantile = pessimistic_quantile
         self.min_samples = min_samples
+        self.genotype_alpha = genotype_alpha
+        self.genotype_method = genotype_method
         self.verbose = verbose
 
         # populated by fit_weights()
         self.target_weights: Optional[Dict[str, float]] = None
+        self.env_weights: Optional[Dict[str, float]] = None
+        self.geno_weights: Optional[Dict[str, float]] = None
         self.val_fingerprints: Optional[Dict[str, np.ndarray]] = None
         self.test_fingerprints: Optional[Dict[str, np.ndarray]] = None
+        self.val_geno_fingerprints: Optional[Dict[str, np.ndarray]] = None
+        self.test_geno_fingerprints: Optional[Dict[str, np.ndarray]] = None
         self.numeric_env_cols: Optional[List[str]] = None
         self.val_envs: Optional[np.ndarray] = None
         self.test_envs: Optional[np.ndarray] = None
@@ -165,22 +176,111 @@ class TargetWeightedValidator:
             test_features, test_locs, method=self.fingerprint_method,
         )
 
-        # ---- weights ----
+        # ---- environment weights ----
         if self.weighting_method == "kernel":
-            self.target_weights = compute_kernel_similarity_weights(
+            self.env_weights = compute_kernel_similarity_weights(
                 self.val_fingerprints, self.test_fingerprints, tau=self.tau,
             )
         elif self.weighting_method == "density_ratio":
-            self.target_weights = compute_density_ratio_weights(
+            self.env_weights = compute_density_ratio_weights(
                 self.val_fingerprints, self.test_fingerprints,
             )
         else:
             raise ValueError(f"Unknown weighting_method: {self.weighting_method}")
 
+        # ---- genotype weights (if alpha > 0) ----
+        if self.genotype_alpha > 0:
+            self._compute_genotype_weights()
+            self.target_weights = combine_weights(
+                self.env_weights, self.geno_weights, alpha=self.genotype_alpha,
+            )
+        else:
+            self.target_weights = dict(self.env_weights)
+            self.geno_weights = None
+
         if self.verbose:
             self._print_weight_summary()
 
         return self
+
+    # ------------------------------------------------------------------
+    def _compute_genotype_weights(self):
+        """
+        Compute genotype similarity weights based on tester distribution
+        and hybrid novelty rate per environment.
+        """
+        x_train_path = str(self.data_dir / "X_train.csv")
+        x_test_path = str(self.data_dir / "X_test.csv")
+
+        # Load only id + Env columns (lightweight)
+        df_train_ids = pd.read_csv(x_train_path, usecols=["id", "Env"])
+        df_test_ids = pd.read_csv(x_test_path, usecols=["id", "Env"])
+
+        df_train_ids["Year"] = df_train_ids["Env"].apply(_env_year)
+
+        # Val-year samples
+        val_ids_df = df_train_ids[df_train_ids["Year"] == self.val_year]
+
+        # Prior training hybrids (years < val_year) — for val novelty
+        prior_df = df_train_ids[df_train_ids["Year"] < self.val_year]
+        prior_hybrids = set(
+            prior_df["id"].str.split("-", n=1).str[1].dropna().unique()
+        )
+
+        # All training hybrids — for test novelty
+        all_train_hybrids = set(
+            df_train_ids["id"].str.split("-", n=1).str[1].dropna().unique()
+        )
+
+        # Discover all testers across val + test for consistent histogram
+        val_testers = set(val_ids_df["id"].str.split("/").str[1].dropna().unique())
+        test_testers = set(df_test_ids["id"].str.split("/").str[1].dropna().unique())
+        all_testers = sorted(val_testers | test_testers)
+
+        # Val genotype fingerprints
+        self.val_geno_fingerprints, _ = compute_genotype_fingerprint(
+            val_ids_df["id"].values,
+            val_ids_df["Env"].values,
+            prior_hybrids=prior_hybrids,
+            all_testers=all_testers,
+        )
+
+        # Test genotype fingerprints
+        self.test_geno_fingerprints, _ = compute_genotype_fingerprint(
+            df_test_ids["id"].values,
+            df_test_ids["Env"].values,
+            prior_hybrids=all_train_hybrids,
+            all_testers=all_testers,
+        )
+
+        # Genotype weights — method depends on genotype_method
+        if self.genotype_method == "kernel":
+            self.geno_weights = compute_kernel_similarity_weights(
+                self.val_geno_fingerprints,
+                self.test_geno_fingerprints,
+                tau=None,
+            )
+        elif self.genotype_method == "diversity":
+            self.geno_weights = compute_genotype_diversity_weights(
+                self.val_geno_fingerprints,
+                self.test_geno_fingerprints,
+            )
+        else:
+            raise ValueError(f"Unknown genotype_method: {self.genotype_method}")
+
+        if self.verbose:
+            print(f"\n  Genotype fingerprinting (method={self.genotype_method}):")
+            print(f"    Testers in vocabulary: {len(all_testers)}")
+            print(f"    Val envs: {len(self.val_geno_fingerprints)}, "
+                  f"Test envs: {len(self.test_geno_fingerprints)}")
+            gw = self.geno_weights
+            print(f"    Genotype weight range: [{min(gw.values()):.4f}, {max(gw.values()):.4f}]")
+            print(f"    Genotype alpha: {self.genotype_alpha}")
+            for loc in sorted(gw, key=lambda x: -gw[x]):
+                we = self.env_weights.get(loc, 0.0)
+                wg = gw[loc]
+                wf = self.target_weights.get(loc, 0.0) if self.target_weights else 0.0
+                print(f"      {loc:20s}  w_env={we:.4f}  w_geno={wg:.4f}  w_final={wf:.4f}")
 
     # ------------------------------------------------------------------
     def evaluate(

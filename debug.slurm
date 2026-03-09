@@ -76,6 +76,13 @@ export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
 
+# Target-weighted validation: genotype shift correction
+# TW_GENO_ALPHA: 0.0 = env-only (default), 0.5 = balanced, 1.0 = genotype-only
+# TW_GENO_METHOD: "diversity" = Shannon entropy (upweights diverse testers)
+#                 "kernel"   = RBF kernel on tester distributions
+export TW_GENO_ALPHA=0.0
+export TW_GENO_METHOD=diversity
+
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
