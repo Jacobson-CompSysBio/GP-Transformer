@@ -119,7 +119,11 @@ class SINNEModel(nn.Module):
 
 
 class SINNGxEModel(nn.Module):
-    """Two-prong GxE: pretrained G_Encoder + E_Encoder → self-attention fusion → prediction."""
+    """Two-prong GxE: pretrained G_Encoder + E_Encoder → self-attention fusion → prediction.
+
+    Includes auxiliary G/E heads that can be used as regularizers during finetune
+    to keep encoder representations faithful to the decomposition.
+    """
 
     def __init__(self, config, n_gxe_layers=1, **encoder_kwargs):
         super().__init__()
@@ -144,7 +148,25 @@ class SINNGxEModel(nn.Module):
         nn.init.normal_(self.head[-1].weight, std=0.01)
         nn.init.zeros_(self.head[-1].bias)
 
-    def forward(self, x):
+        # Auxiliary heads: predict G_hat / E_hat from encoder representations.
+        # These don't participate in the main prediction path — they act as
+        # regularizers during finetune to anchor encoder outputs to decomposition.
+        self.g_aux_head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.GELU(),
+            nn.Linear(config.n_embd // 4, 1),
+        )
+        self.e_aux_head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.GELU(),
+            nn.Linear(config.n_embd // 4, 1),
+        )
+        nn.init.normal_(self.g_aux_head[-1].weight, std=0.01)
+        nn.init.zeros_(self.g_aux_head[-1].bias)
+        nn.init.normal_(self.e_aux_head[-1].weight, std=0.01)
+        nn.init.zeros_(self.e_aux_head[-1].bias)
+
+    def forward(self, x, return_aux=False):
         g_enc = self.g_encoder(x["g_data"])   # (B, T+1, C) with CLS at [0]
         e_enc = self.e_encoder(x["e_data"])   # (B, C)
         e_tok = e_enc.unsqueeze(1)             # (B, 1, C)
@@ -153,7 +175,16 @@ class SINNGxEModel(nn.Module):
             tokens = block(tokens)
         tokens = self.ln_f(tokens)
         cls_repr = tokens[:, 0]               # CLS token → (B, C)
-        return self.head(cls_repr)             # (B, 1)
+        pred = self.head(cls_repr)             # (B, 1)
+
+        if not return_aux:
+            return pred
+
+        # Auxiliary predictions from pre-attention encoder representations
+        g_cls = g_enc[:, 0]                    # (B, C) — G CLS before GxE attention
+        g_aux = self.g_aux_head(g_cls)         # (B, 1)
+        e_aux = self.e_aux_head(e_enc)         # (B, 1)
+        return pred, g_aux, e_aux
 
 
 # ── Arg parser ───────────────────────────────────────────────────
@@ -218,6 +249,11 @@ def parse_sinn_args():
     # finetune phase options
     p.add_argument("--finetune_lr", type=float, default=1e-5,
                    help="Lower LR for fine-tuning phase")
+    # auxiliary decomposition loss weights (finetune regularization)
+    p.add_argument("--aux_g_weight", type=float, default=0.0,
+                   help="Weight for G_hat auxiliary MSE loss during finetune")
+    p.add_argument("--aux_e_weight", type=float, default=0.0,
+                   help="Weight for E_hat auxiliary MSE loss during finetune")
     return p.parse_args()
 
 
@@ -406,6 +442,10 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         loss_fn = nn.MSELoss()
         uses_env = False
 
+    # Auxiliary decomposition losses for finetune regularization
+    use_aux = phase == "finetune" and (args.aux_g_weight > 0 or args.aux_e_weight > 0)
+    aux_mse_fn = nn.MSELoss() if use_aux else None
+
     # DDP
     ddp_model = DDP(model, device_ids=[0], output_device=0, find_unused_parameters=True)
 
@@ -440,6 +480,8 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             "dropout": args.dropout,
             "early_stop": args.early_stop,
             "decomp_path": args.decomp_path,
+            "aux_g_weight": args.aux_g_weight,
+            "aux_e_weight": args.aux_e_weight,
         }, allow_val_change=True)
         run.define_metric("iter_num")
         run.define_metric("train_loss", step_metric="iter_num")
@@ -482,7 +524,10 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             env_id = yb["env_id"].to(device, non_blocking=True).long()
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                preds = ddp_model(xb)
+                if use_aux:
+                    preds, g_aux_pred, e_aux_pred = ddp_model(xb, return_aux=True)
+                else:
+                    preds = ddp_model(xb)
                 if isinstance(preds, dict):
                     preds = preds["total"]
                 preds = preds.squeeze(-1)
@@ -492,6 +537,17 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                     loss_total, loss_parts = loss_fn(preds, target, env_id=env_id)
                 else:
                     loss_total = loss_fn(preds, target)
+
+                # Auxiliary decomposition regularization
+                if use_aux:
+                    if args.aux_g_weight > 0:
+                        g_hat_target = yb["g_hat"].to(device, non_blocking=True).float().squeeze(-1)
+                        loss_g_aux = aux_mse_fn(g_aux_pred.squeeze(-1), g_hat_target)
+                        loss_total = loss_total + args.aux_g_weight * loss_g_aux
+                    if args.aux_e_weight > 0:
+                        e_hat_target = yb["e_hat"].to(device, non_blocking=True).float().squeeze(-1)
+                        loss_e_aux = aux_mse_fn(e_aux_pred.squeeze(-1), e_hat_target)
+                        loss_total = loss_total + args.aux_e_weight * loss_e_aux
 
                 # MoE aux loss
                 moe_aux = getattr(ddp_model.module, "moe_aux_loss", None)
@@ -512,11 +568,16 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             optimizer.zero_grad(set_to_none=True)
 
             if is_main(rank):
-                wandb.log({
+                log_dict = {
                     "train_loss": loss_total.item(),
                     "learning_rate": current_lr,
                     "iter_num": iter_num,
-                })
+                }
+                if use_aux and args.aux_g_weight > 0:
+                    log_dict["aux_g_mse"] = loss_g_aux.item()
+                if use_aux and args.aux_e_weight > 0:
+                    log_dict["aux_e_mse"] = loss_e_aux.item()
+                wandb.log(log_dict)
             iter_num += 1
             pbar.update(1)
         pbar.close()

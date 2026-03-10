@@ -79,10 +79,12 @@ FREEZE_ENCODERS=True
 FT_LR=1e-5
 FT_EPOCHS=1000
 FT_EARLY_STOP=200
-FT_LOSS="envpcc"
-FT_LOSS_WEIGHTS="1.0"
+FT_LOSS="envpcc+mse"
+FT_LOSS_WEIGHTS="1.0,0.1"
 ENV_STRATIFIED=True
 MIN_SAMPLES_PER_ENV=32
+AUX_G_WEIGHT=0.1
+AUX_E_WEIGHT=0.1
 
 # Compute microbatch size for multi-GPU
 NGPUS=$(($SLURM_NNODES * 8))
@@ -328,6 +330,8 @@ if [[ "$RUN_PHASE_FINETUNE" == "True" ]]; then
             --scale_targets $SCALE_TARGETS \
             --leo_val $LEO_VAL \
             --leo_val_fraction $LEO_VAL_FRACTION \
+            --aux_g_weight $AUX_G_WEIGHT \
+            --aux_e_weight $AUX_E_WEIGHT \
             $FT_EXTRA_ARGS
 
     if [[ -f "$CHECKPOINT_DIR_FILE" ]]; then
