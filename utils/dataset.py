@@ -147,6 +147,7 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 decomposition_path: Optional[str] = None,
                  ):
         
         """
@@ -166,6 +167,8 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            decomposition_path (Optional[str]): path to JSON from fit_decomposition.py; when set,
+                computes per-row G_hat, E_hat, GE_hat targets for SINN-style training
         """
         super().__init__()
         self.split = split
@@ -394,6 +397,50 @@ class GxE_Dataset(Dataset):
         self.env_mean = ymean.reset_index(drop=True)
         self.residual = resid.reset_index(drop=True)
 
+        ### SINN DECOMPOSITION TARGETS (optional) ###
+        self.decomposition_path = decomposition_path
+        self.has_decomposition = False
+        if decomposition_path is not None and split not in ('sub', 'test'):
+            import json
+            with open(decomposition_path, 'r') as f:
+                decomp = json.load(f)
+            mu = decomp['mu']
+            G_lookup = decomp['G']  # hybrid_name -> G_hat
+            E_lookup = decomp['E']  # env_name -> E_hat
+
+            # Parse hybrid names from id column: "{Env}-{Hybrid}"
+            hybrid_names = self.meta['id'].astype(str).apply(
+                lambda x: x.split('-', 1)[1] if '-' in x else x
+            )
+            env_names = self.meta['Env'].astype(str)
+
+            # Map to per-row decomposition targets
+            g_hat = hybrid_names.map(G_lookup).astype(float)
+            e_hat = env_names.map(E_lookup).astype(float)
+
+            # For novel hybrids/envs not in decomposition, G_hat/E_hat = 0.0
+            # (they have no fixed-effect estimate; the neural net must generalize)
+            n_missing_g = int(g_hat.isna().sum())
+            n_missing_e = int(e_hat.isna().sum())
+            if n_missing_g > 0:
+                print(f"[Decomposition] {n_missing_g}/{len(g_hat)} rows have no G_hat "
+                      f"(novel hybrids) — set to 0.0")
+            if n_missing_e > 0:
+                print(f"[Decomposition] {n_missing_e}/{len(e_hat)} rows have no E_hat "
+                      f"(novel envs) — set to 0.0")
+            g_hat = g_hat.fillna(0.0)
+            e_hat = e_hat.fillna(0.0)
+
+            # GE_hat = y - mu - G_hat - E_hat (computed from unscaled yield)
+            raw_yield = self.y_data['Yield_Mg_ha'].astype(float)
+            ge_hat = raw_yield - mu - g_hat - e_hat
+
+            self.decomp_mu = mu
+            self.decomp_g = g_hat.reset_index(drop=True)
+            self.decomp_e = e_hat.reset_index(drop=True)
+            self.decomp_ge = ge_hat.reset_index(drop=True)
+            self.has_decomposition = True
+
         # block size for tokenizers, etc.
         self.block_size = self.g_data.shape[1]
         self.n_env_fts = len(self.e_cols)
@@ -438,7 +485,12 @@ class GxE_Dataset(Dataset):
         hybrid_id = self.hybrid_id_tensor[index]
 
         if not self.residual_flag:
-            return x, {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
+            y_dict = {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
+            if self.has_decomposition:
+                y_dict['g_hat'] = torch.tensor([self.decomp_g.iloc[index]], dtype=torch.float32)
+                y_dict['e_hat'] = torch.tensor([self.decomp_e.iloc[index]], dtype=torch.float32)
+                y_dict['ge_hat'] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
+            return x, y_dict
 
         # residual out
         y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
@@ -450,4 +502,8 @@ class GxE_Dataset(Dataset):
             'env_id': env_id,
             'hybrid_id': hybrid_id,
         }
+        if self.has_decomposition:
+            targets['g_hat'] = torch.tensor([self.decomp_g.iloc[index]], dtype=torch.float32)
+            targets['e_hat'] = torch.tensor([self.decomp_e.iloc[index]], dtype=torch.float32)
+            targets['ge_hat'] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
         return x, targets
