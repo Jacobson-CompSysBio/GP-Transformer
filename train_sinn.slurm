@@ -58,8 +58,8 @@ export MOE_LOSS_WEIGHT=0.01
 ### Phase-specific hyperparameters ###
 # Phase g (genotype encoder)
 G_LR=1e-3
-G_EPOCHS=500
-G_EARLY_STOP=100
+G_EPOCHS=100
+G_EARLY_STOP=25
 G_BATCH_SIZE=256
 
 # Phase e (environment encoder)
@@ -264,13 +264,6 @@ if [[ "$RUN_PHASE_GE" == "True" ]]; then
             --scale_targets $SCALE_TARGETS \
             --leo_val $LEO_VAL \
             --leo_val_fraction $LEO_VAL_FRACTION \
-            --full_tf_mlp_type $FULL_TF_MLP_TYPE \
-            --moe_num_experts $MOE_NUM_EXPERTS \
-            --moe_top_k $MOE_TOP_K \
-            --moe_shared_expert $MOE_SHARED_EXPERT \
-            --moe_expert_hidden_dim $MOE_EXPERT_HIDDEN_DIM \
-            --moe_shared_expert_hidden_dim $MOE_SHARED_EXPERT_HIDDEN_DIM \
-            --moe_loss_weight $MOE_LOSS_WEIGHT \
             --freeze_encoders $FREEZE_ENCODERS \
             $GE_EXTRA_ARGS
 
@@ -335,13 +328,6 @@ if [[ "$RUN_PHASE_FINETUNE" == "True" ]]; then
             --scale_targets $SCALE_TARGETS \
             --leo_val $LEO_VAL \
             --leo_val_fraction $LEO_VAL_FRACTION \
-            --full_tf_mlp_type $FULL_TF_MLP_TYPE \
-            --moe_num_experts $MOE_NUM_EXPERTS \
-            --moe_top_k $MOE_TOP_K \
-            --moe_shared_expert $MOE_SHARED_EXPERT \
-            --moe_expert_hidden_dim $MOE_EXPERT_HIDDEN_DIM \
-            --moe_shared_expert_hidden_dim $MOE_SHARED_EXPERT_HIDDEN_DIM \
-            --moe_loss_weight $MOE_LOSS_WEIGHT \
             $FT_EXTRA_ARGS
 
     if [[ -f "$CHECKPOINT_DIR_FILE" ]]; then

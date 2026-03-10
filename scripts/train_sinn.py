@@ -4,8 +4,8 @@ SINN-style staged training for GP-Transformer.
 Phases:
   g        — Train G encoder on G_hat targets (genotype main effect)
   e        — Train E encoder on E_hat targets (environment main effect)
-  ge       — Train full model on GE_hat targets (interaction residual),
-             initializing G/E encoders from phases g/e
+  ge       — Two-prong model: pretrained G_Encoder + E_Encoder fused via
+             self-attention, trained on GE_hat targets (interaction residual)
   finetune — End-to-end fine-tune on raw yield using envpcc loss,
              initializing from phase ge checkpoint
 
@@ -32,8 +32,8 @@ import wandb
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import GxE_Dataset, normalize_env_categorical_mode
-from models.model import FullTransformer
-from models.transformer import G_Encoder
+from models.model import FullTransformer  # kept for eval compatibility
+from models.transformer import G_Encoder, TransformerBlock
 from models.mlp import E_Encoder
 from models.config import Config
 from utils.get_lr import get_lr
@@ -116,6 +116,44 @@ class SINNEModel(nn.Module):
     def forward(self, x):
         e_enc = self.encoder(x["e_data"])         # (B, C)
         return self.head(e_enc)                    # (B, 1)
+
+
+class SINNGxEModel(nn.Module):
+    """Two-prong GxE: pretrained G_Encoder + E_Encoder → self-attention fusion → prediction."""
+
+    def __init__(self, config, n_gxe_layers=1, **encoder_kwargs):
+        super().__init__()
+        self.g_encoder = G_Encoder(config, **encoder_kwargs)
+        self.e_encoder = E_Encoder(
+            input_dim=config.n_env_fts,
+            output_dim=config.n_embd,
+            hidden_dim=config.n_embd,
+            n_hidden=config.n_mlp_layer,
+            dropout=config.dropout,
+        )
+        # GxE interaction: self-attention over concatenated G + E tokens
+        self.gxe_blocks = nn.ModuleList([
+            TransformerBlock(config) for _ in range(n_gxe_layers)
+        ])
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.GELU(),
+            nn.Linear(config.n_embd // 4, 1),
+        )
+        nn.init.normal_(self.head[-1].weight, std=0.01)
+        nn.init.zeros_(self.head[-1].bias)
+
+    def forward(self, x):
+        g_enc = self.g_encoder(x["g_data"])   # (B, T+1, C) with CLS at [0]
+        e_enc = self.e_encoder(x["e_data"])   # (B, C)
+        e_tok = e_enc.unsqueeze(1)             # (B, 1, C)
+        tokens = torch.cat([g_enc, e_tok], dim=1)  # (B, T+2, C)
+        for block in self.gxe_blocks:
+            tokens = block(tokens)
+        tokens = self.ln_f(tokens)
+        cls_repr = tokens[:, 0]               # CLS token → (B, C)
+        return self.head(cls_repr)             # (B, 1)
 
 
 # ── Arg parser ───────────────────────────────────────────────────
@@ -261,18 +299,12 @@ def build_model(args, config, device):
     elif phase == "e":
         model = SINNEModel(config).to(device)
     elif phase in ("ge", "finetune"):
-        model = FullTransformer(
+        model = SINNGxEModel(
             config,
-            mlp_type=args.full_tf_mlp_type,
-            moe_num_experts=args.moe_num_experts,
-            moe_top_k=args.moe_top_k,
-            moe_expert_hidden_dim=args.moe_expert_hidden_dim,
-            moe_shared_expert=args.moe_shared_expert,
-            moe_shared_expert_hidden_dim=args.moe_shared_expert_hidden_dim,
-            moe_loss_weight=args.moe_loss_weight,
+            n_gxe_layers=args.gxe_layers,
+            encoder_type="dense",
         ).to(device)
 
-        # Load pretrained encoder weights for ge phase
         if phase == "ge":
             _load_encoder_weights(model, args, device)
         elif phase == "finetune" and args.ge_ckpt:
@@ -286,26 +318,41 @@ def build_model(args, config, device):
     return model
 
 
-def _load_encoder_weights(full_model, args, device):
-    """Load G and E encoder weights from phase g/e checkpoints into FullTransformer."""
+def _load_encoder_weights(model, args, device):
+    """Load G and E encoder weights from phase g/e checkpoints into SINNGxEModel."""
     if args.g_ckpt:
         g_ckpt = torch.load(args.g_ckpt, map_location=device, weights_only=False)
-        # Map SINNGModel.encoder.* → FullTransformer.g_embed/wpe (token embedding path)
-        # FullTransformer uses g_embed (Embedding) while G_Encoder uses transformer.wte (Embedding)
-        # They serve the same purpose but have different structures.
-        # For FullTransformer, we can't directly inject G_Encoder weights since architectures differ.
-        # Instead, log that G encoder was pretrained and its val metrics.
+        g_state = g_ckpt["model"]
+        # SINNGModel saves as encoder.* → load into SINNGxEModel.g_encoder.*
+        g_encoder_state = {
+            k.replace("encoder.", "", 1): v
+            for k, v in g_state.items() if k.startswith("encoder.")
+        }
+        missing, unexpected = model.g_encoder.load_state_dict(g_encoder_state, strict=False)
         if is_main(0):
             best_val = g_ckpt.get("best_val_metric", "N/A")
-            print(f"[SINN] G encoder pretrained — val MSE: {best_val}")
-            print(f"[SINN] Note: G_Encoder architecture differs from FullTransformer's G path.")
-            print(f"[SINN] G encoder weights inform the diagnostic, not direct transfer to FullTransformer.")
+            print(f"[SINN] Loaded G encoder weights (val MSE: {best_val})")
+            if missing:
+                print(f"[SINN]   G missing keys: {missing}")
+            if unexpected:
+                print(f"[SINN]   G unexpected keys: {unexpected}")
 
     if args.e_ckpt:
         e_ckpt = torch.load(args.e_ckpt, map_location=device, weights_only=False)
+        e_state = e_ckpt["model"]
+        # SINNEModel saves as encoder.* → load into SINNGxEModel.e_encoder.*
+        e_encoder_state = {
+            k.replace("encoder.", "", 1): v
+            for k, v in e_state.items() if k.startswith("encoder.")
+        }
+        missing, unexpected = model.e_encoder.load_state_dict(e_encoder_state, strict=False)
         if is_main(0):
             best_val = e_ckpt.get("best_val_metric", "N/A")
-            print(f"[SINN] E encoder pretrained — val MSE: {best_val}")
+            print(f"[SINN] Loaded E encoder weights (val MSE: {best_val})")
+            if missing:
+                print(f"[SINN]   E missing keys: {missing}")
+            if unexpected:
+                print(f"[SINN]   E unexpected keys: {unexpected}")
 
 
 def _get_target(yb, phase):
@@ -332,7 +379,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         encoder_params = []
         other_params = []
         for name, param in model.named_parameters():
-            if "g_embed" in name or "e_proj" in name:
+            if name.startswith("g_encoder.") or name.startswith("e_encoder."):
                 encoder_params.append(param)
             else:
                 other_params.append(param)
@@ -342,7 +389,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         ], weight_decay=args.weight_decay)
     elif phase == "ge" and args.freeze_encoders:
         for name, param in model.named_parameters():
-            if "g_embed" in name or "e_proj" in name:
+            if name.startswith("g_encoder.") or name.startswith("e_encoder."):
                 param.requires_grad = False
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
@@ -374,7 +421,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
     run_name = f"sinn-{phase}-e{args.emb_size}-g{args.g_layers}-gxe{args.gxe_layers}-lr{lr:.0e}-s{args.seed}"
     if is_main(rank):
         run = wandb.init(
-            project="sinn-training",
+            project="gxe-transformer",
             entity=os.getenv("WANDB_ENTITY"),
             name=run_name,
         )
