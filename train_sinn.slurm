@@ -4,7 +4,7 @@
 #SBATCH -N 1
 #SBATCH -t 2:00:00
 #SBATCH -p batch
-##SBATCH -q debug
+#SBATCH -q debug
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
 #SBATCH --open-mode=truncate

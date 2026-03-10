@@ -374,7 +374,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
     run_name = f"sinn-{phase}-e{args.emb_size}-g{args.g_layers}-gxe{args.gxe_layers}-lr{lr:.0e}-s{args.seed}"
     if is_main(rank):
         run = wandb.init(
-            project=os.getenv("WANDB_PROJECT"),
+            project="sinn-training",
             entity=os.getenv("WANDB_ENTITY"),
             name=run_name,
         )
