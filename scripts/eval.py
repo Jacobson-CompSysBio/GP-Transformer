@@ -338,6 +338,7 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
+    config.e_mlp_layers = config_dict.get("e_mlp_layers", mlp_layer)
 
     # Check if this is a SINN checkpoint — build SINN model instead of legacy
     sinn_phase = config_dict.get("sinn_phase", None)

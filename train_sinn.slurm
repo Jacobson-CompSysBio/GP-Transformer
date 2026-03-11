@@ -39,11 +39,12 @@ export LEO_VAL=True
 export LEO_VAL_FRACTION=0.10
 
 # Model size (shared across phases)
-export EMB_SIZE=256
+export EMB_SIZE=512
 export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
-export GXE_LAYERS=1
+export E_MLP_LAYERS=3
+export GXE_LAYERS=2
 export DROPOUT=0.1
 
 # MoE settings (for ge/finetune FullTransformer)
@@ -51,8 +52,8 @@ export FULL_TF_MLP_TYPE=moe
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
-export MOE_EXPERT_HIDDEN_DIM=256
-export MOE_SHARED_EXPERT_HIDDEN_DIM=256
+export MOE_EXPERT_HIDDEN_DIM=512
+export MOE_SHARED_EXPERT_HIDDEN_DIM=512
 export MOE_LOSS_WEIGHT=0.01
 
 ### Phase-specific hyperparameters ###
@@ -70,10 +71,11 @@ E_BATCH_SIZE=256
 
 # Phase ge (interaction)
 GE_LR=5e-4
+GE_ENCODER_LR=5e-5
 GE_EPOCHS=500
 GE_EARLY_STOP=100
 GE_BATCH_SIZE=256
-FREEZE_ENCODERS=True
+FREEZE_ENCODERS=False
 
 # Phase finetune
 FT_LR=1e-4
@@ -202,6 +204,7 @@ if [[ "$RUN_PHASE_E" == "True" ]]; then
             --heads $HEADS \
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
+            --e_mlp_layers $E_MLP_LAYERS \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --seed $SEED \
@@ -220,7 +223,7 @@ if [[ "$RUN_PHASE_E" == "True" ]]; then
 fi
 
 ### ═══════════════════════════════════════════════════════════════
-### Phase GE: Train interaction on non-genomic signal (E_hat + GE_hat)
+### Phase GE: Train interaction on GE_hat (interaction residual)
 ### ═══════════════════════════════════════════════════════════════
 if [[ "$RUN_PHASE_GE" == "True" ]]; then
     echo ""
@@ -260,6 +263,7 @@ if [[ "$RUN_PHASE_GE" == "True" ]]; then
             --heads $HEADS \
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
+            --e_mlp_layers $E_MLP_LAYERS \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --seed $SEED \
@@ -267,6 +271,7 @@ if [[ "$RUN_PHASE_GE" == "True" ]]; then
             --leo_val $LEO_VAL \
             --leo_val_fraction $LEO_VAL_FRACTION \
             --freeze_encoders $FREEZE_ENCODERS \
+            --ge_encoder_lr $GE_ENCODER_LR \
             $GE_EXTRA_ARGS
 
     if [[ -f "$CHECKPOINT_DIR_FILE" ]]; then
@@ -324,6 +329,7 @@ if [[ "$RUN_PHASE_FINETUNE" == "True" ]]; then
             --heads $HEADS \
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
+            --e_mlp_layers $E_MLP_LAYERS \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --seed $SEED \

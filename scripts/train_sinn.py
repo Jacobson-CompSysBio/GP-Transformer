@@ -98,11 +98,12 @@ class SINNEModel(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
         self.encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
             hidden_dim=config.n_embd,
-            n_hidden=config.n_mlp_layer,
+            n_hidden=e_layers,
             dropout=config.dropout,
         )
         self.head = nn.Sequential(
@@ -128,11 +129,12 @@ class SINNGxEModel(nn.Module):
     def __init__(self, config, n_gxe_layers=1, **encoder_kwargs):
         super().__init__()
         self.g_encoder = G_Encoder(config, **encoder_kwargs)
+        e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
         self.e_encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
             hidden_dim=config.n_embd,
-            n_hidden=config.n_mlp_layer,
+            n_hidden=e_layers,
             dropout=config.dropout,
         )
         # GxE interaction: self-attention over concatenated G + E tokens
@@ -229,6 +231,8 @@ def parse_sinn_args():
     # model size
     p.add_argument("--g_layers", type=int, default=1)
     p.add_argument("--mlp_layers", type=int, default=1)
+    p.add_argument("--e_mlp_layers", type=int, default=None,
+                   help="E encoder MLP depth (defaults to --mlp_layers if not set)")
     p.add_argument("--gxe_layers", type=int, default=1)
     p.add_argument("--heads", type=int, default=4)
     p.add_argument("--emb_size", type=int, default=256)
@@ -242,8 +246,11 @@ def parse_sinn_args():
     p.add_argument("--leo_val", type=str2bool, default=True)
     p.add_argument("--leo_val_fraction", type=float, default=0.10)
     # GE phase options
-    p.add_argument("--freeze_encoders", type=str2bool, default=True,
+    p.add_argument("--freeze_encoders", type=str2bool, default=False,
                    help="Freeze G/E encoders during ge phase")
+    p.add_argument("--ge_encoder_lr", type=float, default=None,
+                   help="Explicit LR for encoder params in ge phase (if not frozen). "
+                        "Falls back to lr * encoder_lr_mult if not set.")
     p.add_argument("--encoder_lr_mult", type=float, default=0.1,
                    help="LR multiplier for encoder params in ge phase (if not frozen)")
     # finetune phase options
@@ -423,8 +430,7 @@ def _get_target(yb, phase):
     elif phase == "e":
         return yb["e_hat"]
     elif phase == "ge":
-        # Non-genomic signal: E_hat + GE_hat (= y - mu - G_hat)
-        return yb["e_hat"] + yb["ge_hat"]
+        return yb["ge_hat"]
     else:  # finetune
         return yb["y"]
 
@@ -445,9 +451,10 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                 encoder_params.append(param)
             else:
                 other_params.append(param)
+        enc_lr = args.ge_encoder_lr if args.ge_encoder_lr is not None else lr * args.encoder_lr_mult
         optimizer = torch.optim.AdamW([
-            {"params": other_params, "lr": lr},
-            {"params": encoder_params, "lr": lr * args.encoder_lr_mult},
+            {"params": other_params, "lr": lr, "initial_lr": lr},
+            {"params": encoder_params, "lr": enc_lr, "initial_lr": enc_lr},
         ], weight_decay=args.weight_decay)
     elif phase == "ge" and args.freeze_encoders:
         for name, param in model.named_parameters():
@@ -459,6 +466,10 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         )
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
+
+    # Store initial_lr for all param groups (used by cosine schedule)
+    for pg in optimizer.param_groups:
+        pg.setdefault("initial_lr", pg["lr"])
 
     # Loss function
     if phase == "finetune":
@@ -598,10 +609,11 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             if torch.isnan(loss_total):
                 raise RuntimeError(f"[SINN {phase}] Loss is NaN at iter {iter_num}")
 
-            # LR schedule
+            # LR schedule — preserve ratio between param groups for differential LR
             current_lr = get_lr(iter_num, warmup_iters, lr_decay_iters, max_lr, min_lr)
+            lr_scale = current_lr / max_lr if max_lr > 0 else 1.0
             for pg in optimizer.param_groups:
-                pg["lr"] = current_lr
+                pg["lr"] = pg.get("initial_lr", max_lr) * lr_scale
 
             loss_total.backward()
             torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), max_norm=1.0)
@@ -783,6 +795,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                         "n_env_fts": train_ds.n_env_fts,
                         "g_layers": args.g_layers,
                         "mlp_layers": args.mlp_layers,
+                        "e_mlp_layers": args.e_mlp_layers if args.e_mlp_layers is not None else args.mlp_layers,
                         "gxe_layers": args.gxe_layers,
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
@@ -867,6 +880,7 @@ def main():
         print(f"[SINN] has_decomposition: {train_ds.has_decomposition}")
 
     # Config
+    e_mlp_layers = args.e_mlp_layers if args.e_mlp_layers is not None else args.mlp_layers
     config = Config(
         block_size=train_ds.block_size,
         g_input_type=args.g_input_type,
@@ -879,6 +893,7 @@ def main():
         dropout=args.dropout,
         n_env_fts=train_ds.n_env_fts,
     )
+    config.e_mlp_layers = e_mlp_layers
 
     # Model
     model = build_model(args, config, device)
