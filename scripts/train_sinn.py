@@ -96,15 +96,16 @@ class SINNGModel(nn.Module):
 class SINNEModel(nn.Module):
     """E_Encoder + prediction head → scalar E_hat."""
 
-    def __init__(self, config):
+    def __init__(self, config, e_dropout=None):
         super().__init__()
         e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
+        drop = e_dropout if e_dropout is not None else config.dropout
         self.encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
             hidden_dim=config.n_embd,
             n_hidden=e_layers,
-            dropout=config.dropout,
+            dropout=drop,
         )
         self.head = nn.Sequential(
             nn.Linear(config.n_embd, config.n_embd // 4),
@@ -126,16 +127,17 @@ class SINNGxEModel(nn.Module):
     to keep encoder representations faithful to the decomposition.
     """
 
-    def __init__(self, config, n_gxe_layers=1, **encoder_kwargs):
+    def __init__(self, config, n_gxe_layers=1, e_dropout=None, **encoder_kwargs):
         super().__init__()
         self.g_encoder = G_Encoder(config, **encoder_kwargs)
         e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
+        drop = e_dropout if e_dropout is not None else config.dropout
         self.e_encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
             hidden_dim=config.n_embd,
             n_hidden=e_layers,
-            dropout=config.dropout,
+            dropout=drop,
         )
         # GxE interaction: self-attention over concatenated G + E tokens
         self.gxe_blocks = nn.ModuleList([
@@ -163,10 +165,18 @@ class SINNGxEModel(nn.Module):
             nn.GELU(),
             nn.Linear(config.n_embd // 4, 1),
         )
+        # Year-mean head: predict mu_t from E encoder output
+        self.year_mean_head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 4),
+            nn.GELU(),
+            nn.Linear(config.n_embd // 4, 1),
+        )
         nn.init.normal_(self.g_aux_head[-1].weight, std=0.01)
         nn.init.zeros_(self.g_aux_head[-1].bias)
         nn.init.normal_(self.e_aux_head[-1].weight, std=0.01)
         nn.init.zeros_(self.e_aux_head[-1].bias)
+        nn.init.normal_(self.year_mean_head[-1].weight, std=0.01)
+        nn.init.zeros_(self.year_mean_head[-1].bias)
 
     def forward(self, x, return_aux=False):
         g_enc = self.g_encoder(x["g_data"])   # (B, T+1, C) with CLS at [0]
@@ -186,7 +196,8 @@ class SINNGxEModel(nn.Module):
         g_cls = g_enc[:, 0]                    # (B, C) — G CLS before GxE attention
         g_aux = self.g_aux_head(g_cls)         # (B, 1)
         e_aux = self.e_aux_head(e_enc)         # (B, 1)
-        return pred, g_aux, e_aux
+        year_aux = self.year_mean_head(e_enc)  # (B, 1) — year mean from E repr
+        return pred, g_aux, e_aux, year_aux
 
 
 # ── Arg parser ───────────────────────────────────────────────────
@@ -261,6 +272,11 @@ def parse_sinn_args():
                    help="Weight for G_hat auxiliary MSE loss during finetune")
     p.add_argument("--aux_e_weight", type=float, default=0.0,
                    help="Weight for E_hat auxiliary MSE loss during finetune")
+    p.add_argument("--aux_year_weight", type=float, default=0.0,
+                   help="Weight for year-mean auxiliary MSE loss during finetune")
+    # E encoder dropout (higher than global to prevent E overfitting)
+    p.add_argument("--e_dropout", type=float, default=None,
+                   help="Dropout for E encoder (defaults to --dropout if not set)")
     return p.parse_args()
 
 
@@ -340,11 +356,12 @@ def build_model(args, config, device):
     if phase == "g":
         model = SINNGModel(config, encoder_type="dense").to(device)
     elif phase == "e":
-        model = SINNEModel(config).to(device)
+        model = SINNEModel(config, e_dropout=args.e_dropout).to(device)
     elif phase in ("ge", "finetune"):
         model = SINNGxEModel(
             config,
             n_gxe_layers=args.gxe_layers,
+            e_dropout=args.e_dropout,
             encoder_type="dense",
         ).to(device)
 
@@ -480,7 +497,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         uses_env = False
 
     # Auxiliary decomposition losses for finetune regularization
-    use_aux = phase == "finetune" and (args.aux_g_weight > 0 or args.aux_e_weight > 0)
+    use_aux = phase == "finetune" and (args.aux_g_weight > 0 or args.aux_e_weight > 0 or args.aux_year_weight > 0)
     aux_mse_fn = nn.MSELoss() if use_aux else None
 
     # DDP
@@ -565,7 +582,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 if use_aux:
-                    preds, g_aux_pred, e_aux_pred = ddp_model(xb, return_aux=True)
+                    preds, g_aux_pred, e_aux_pred, year_aux_pred = ddp_model(xb, return_aux=True)
                 else:
                     preds = ddp_model(xb)
                 if isinstance(preds, dict):
@@ -600,6 +617,10 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                         e_hat_target = yb["e_hat"].to(device, non_blocking=True).float().squeeze(-1)
                         loss_e_aux = aux_mse_fn(e_aux_pred.squeeze(-1), e_hat_target)
                         loss_total = loss_total + args.aux_e_weight * loss_e_aux
+                    if args.aux_year_weight > 0 and "year_mean" in yb:
+                        year_target = yb["year_mean"].to(device, non_blocking=True).float().squeeze(-1)
+                        loss_year_aux = aux_mse_fn(year_aux_pred.squeeze(-1), year_target)
+                        loss_total = loss_total + args.aux_year_weight * loss_year_aux
 
                 # MoE aux loss
                 moe_aux = getattr(ddp_model.module, "moe_aux_loss", None)
@@ -630,6 +651,8 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                     log_dict["aux_g_mse"] = loss_g_aux.item()
                 if use_aux and args.aux_e_weight > 0:
                     log_dict["aux_e_mse"] = loss_e_aux.item()
+                if use_aux and args.aux_year_weight > 0 and "year_mean" in yb:
+                    log_dict["aux_year_mse"] = loss_year_aux.item()
                 wandb.log(log_dict)
             iter_num += 1
             pbar.update(1)
@@ -649,7 +672,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                 env_id = yb["env_id"].to(device, non_blocking=True).long()
 
                 if has_aux_model:
-                    preds, g_aux, e_aux = ddp_model(xb, return_aux=True)
+                    preds, g_aux, e_aux, _year_aux = ddp_model(xb, return_aux=True)
                     all_g_aux.append(g_aux.squeeze(-1))
                     all_e_aux.append(e_aux.squeeze(-1))
                     all_g_hat.append(yb["g_hat"].to(device).float().squeeze(-1))
@@ -808,6 +831,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "e_dropout": args.e_dropout,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,

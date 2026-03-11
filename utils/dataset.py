@@ -408,11 +408,26 @@ class GxE_Dataset(Dataset):
             G_lookup = decomp['G']  # hybrid_name -> G_hat
             E_lookup = decomp['E']  # env_name -> E_hat
 
+            # Yearly means: use per-year mu if available, else global mu
+            year_means = decomp.get('year_means', {})
+            # year_means keys are strings in JSON; convert to int
+            year_means = {int(k): float(v) for k, v in year_means.items()}
+
             # Parse hybrid names from id column: "{Env}-{Hybrid}"
             hybrid_names = self.meta['id'].astype(str).apply(
                 lambda x: x.split('-', 1)[1] if '-' in x else x
             )
             env_names = self.meta['Env'].astype(str)
+
+            # Extract year per row for yearly mu lookup
+            def _extract_year(env_str):
+                for part in str(env_str).split("_"):
+                    if len(part) == 4 and part.isdigit():
+                        return int(part)
+                return None
+            row_years = env_names.apply(_extract_year)
+            # Per-row year mean (fallback to global mu for novel years)
+            row_mu_year = row_years.map(year_means).fillna(mu).astype(float)
 
             # Map to per-row decomposition targets
             g_hat = hybrid_names.map(G_lookup).astype(float)
@@ -435,11 +450,13 @@ class GxE_Dataset(Dataset):
             g_hat = g_hat.fillna(0.0)
             e_hat = e_hat.fillna(0.0)
 
-            # GE_hat = y - mu - G_hat - E_hat (computed from unscaled yield)
+            # GE_hat = y - mu_year - G_hat - E_hat (using yearly mean)
             raw_yield = self.y_data['Yield_Mg_ha'].astype(float)
-            ge_hat = raw_yield - mu - g_hat - e_hat
+            ge_hat = raw_yield - row_mu_year - g_hat - e_hat
 
             self.decomp_mu = mu
+            self.decomp_year_means = year_means
+            self.decomp_mu_year = row_mu_year.reset_index(drop=True)
             self.decomp_g = g_hat.reset_index(drop=True)
             self.decomp_e = e_hat.reset_index(drop=True)
             self.decomp_ge = ge_hat.reset_index(drop=True)
@@ -496,6 +513,7 @@ class GxE_Dataset(Dataset):
                 y_dict['ge_hat'] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
                 y_dict['has_g_hat'] = torch.tensor([self._has_g_hat.iloc[index]], dtype=torch.bool)
                 y_dict['has_e_hat'] = torch.tensor([self._has_e_hat.iloc[index]], dtype=torch.bool)
+                y_dict['year_mean'] = torch.tensor([self.decomp_mu_year.iloc[index]], dtype=torch.float32)
             return x, y_dict
 
         # residual out

@@ -23,9 +23,9 @@ from utils.loss import macro_env_pearson
 from utils.utils import *
 
 # SINN model (lazy import to avoid circular deps if train_sinn is not present)
-def _build_sinn_gxe_model(config, gxe_layers=1):
+def _build_sinn_gxe_model(config, gxe_layers=1, e_dropout=None):
     from scripts.train_sinn import SINNGxEModel
-    return SINNGxEModel(config, n_gxe_layers=gxe_layers)
+    return SINNGxEModel(config, n_gxe_layers=gxe_layers, e_dropout=e_dropout)
 
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -343,7 +343,8 @@ def load_model(device: torch.device,
     # Check if this is a SINN checkpoint — build SINN model instead of legacy
     sinn_phase = config_dict.get("sinn_phase", None)
     if sinn_phase in ("ge", "finetune"):
-        model = _build_sinn_gxe_model(config, gxe_layers=gxe_layer).to(device)
+        e_dropout = config_dict.get("e_dropout", None)
+        model = _build_sinn_gxe_model(config, gxe_layers=gxe_layer, e_dropout=e_dropout).to(device)
     elif full_transformer:
         if residual:
             model = FullTransformerResidual(
