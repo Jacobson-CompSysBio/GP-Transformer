@@ -22,6 +22,11 @@ from models.model import *
 from utils.loss import macro_env_pearson
 from utils.utils import *
 
+# SINN model (lazy import to avoid circular deps if train_sinn is not present)
+def _build_sinn_gxe_model(config, gxe_layers=1):
+    from scripts.train_sinn import SINNGxEModel
+    return SINNGxEModel(config, n_gxe_layers=gxe_layers)
+
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = 'data/maize_data_2014-2023_vs_2024_v2/'
@@ -251,7 +256,17 @@ def load_model(device: torch.device,
     if not ckpt_root.exists():
         raise FileNotFoundError(f"Checkpoint directory {ckpt_root} does not exist.")
 
+    # Support both legacy checkpoint_*.pt and SINN best_*.pt naming
     ckpts = sorted([p for p in ckpt_root.glob("checkpoint_*.pt") if p.is_file()])
+    if not ckpts:
+        # For SINN, prefer best_finetune.pt > best_ge.pt > any best_*.pt
+        sinn_ckpts = sorted([p for p in ckpt_root.glob("best_*.pt") if p.is_file()])
+        for preferred in ("best_finetune.pt", "best_ge.pt"):
+            candidate = ckpt_root / preferred
+            if candidate.is_file():
+                sinn_ckpts = [candidate]
+                break
+        ckpts = sinn_ckpts
     if not ckpts:
         raise FileNotFoundError(f"No checkpoint files found in {ckpt_root}.")
     
@@ -259,40 +274,40 @@ def load_model(device: torch.device,
     print(f"Loading model from {best_path}")
     payload = torch.load(best_path, map_location="cpu")
     state = payload["model"]
-    config = payload.get("config", {})
+    config_dict = payload.get("config", {})
 
-    g_enc = config.get("g_enc", args.g_enc)
-    e_enc = config.get("e_enc", args.e_enc)
-    ld_enc = config.get("ld_enc", args.ld_enc)
-    gxe_enc = config.get("gxe_enc", args.gxe_enc)
-    blk = config.get("block_size", None)
-    n_env_fts = config.get("n_env_fts", None)
-    g_layer = config.get("g_layers", args.g_layers)
-    ld_layer = config.get("ld_layers", args.ld_layers)
-    mlp_layer = config.get("mlp_layers", args.mlp_layers)
-    gxe_layer = config.get("gxe_layers", args.gxe_layers)
-    n_head = config.get("n_head", args.heads)
-    n_embd = config.get("n_embd", args.emb_size)
+    g_enc = config_dict.get("g_enc", args.g_enc)
+    e_enc = config_dict.get("e_enc", args.e_enc)
+    ld_enc = config_dict.get("ld_enc", args.ld_enc)
+    gxe_enc = config_dict.get("gxe_enc", args.gxe_enc)
+    blk = config_dict.get("block_size", None)
+    n_env_fts = config_dict.get("n_env_fts", None)
+    g_layer = config_dict.get("g_layers", args.g_layers)
+    ld_layer = config_dict.get("ld_layers", args.ld_layers)
+    mlp_layer = config_dict.get("mlp_layers", args.mlp_layers)
+    gxe_layer = config_dict.get("gxe_layers", args.gxe_layers)
+    n_head = config_dict.get("n_head", args.heads)
+    n_embd = config_dict.get("n_embd", args.emb_size)
     # Support both old "moe" key and new "wg" key for backwards compatibility
-    moe = config.get("wg", config.get("moe", args.wg))
-    loss = config.get("loss", args.loss)
-    loss_weights = config.get("loss_weights", args.loss_weights)
-    residual = config.get("residual", args.residual)
-    full_transformer = config.get("full_transformer", getattr(args, "full_transformer", False))
-    g_encoder_type = config.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
-    moe_num_experts = config.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
-    moe_top_k = config.get("moe_top_k", getattr(args, "moe_top_k", 2))
-    moe_expert_hidden_dim = config.get("moe_expert_hidden_dim", getattr(args, "moe_expert_hidden_dim", None))
-    moe_shared_expert = config.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
-    moe_shared_expert_hidden_dim = config.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
-    moe_loss_weight = config.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
-    g_input_type = config.get("g_input_type", getattr(args, "g_input_type", "tokens"))
-    env_categorical_mode = config.get(
+    moe = config_dict.get("wg", config_dict.get("moe", args.wg))
+    loss = config_dict.get("loss", args.loss)
+    loss_weights = config_dict.get("loss_weights", args.loss_weights)
+    residual = config_dict.get("residual", args.residual)
+    full_transformer = config_dict.get("full_transformer", getattr(args, "full_transformer", False))
+    g_encoder_type = config_dict.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
+    moe_num_experts = config_dict.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
+    moe_top_k = config_dict.get("moe_top_k", getattr(args, "moe_top_k", 2))
+    moe_expert_hidden_dim = config_dict.get("moe_expert_hidden_dim", getattr(args, "moe_expert_hidden_dim", None))
+    moe_shared_expert = config_dict.get("moe_shared_expert", getattr(args, "moe_shared_expert", False))
+    moe_shared_expert_hidden_dim = config_dict.get("moe_shared_expert_hidden_dim", getattr(args, "moe_shared_expert_hidden_dim", None))
+    moe_loss_weight = config_dict.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01))
+    g_input_type = config_dict.get("g_input_type", getattr(args, "g_input_type", "tokens"))
+    env_categorical_mode = config_dict.get(
         "env_categorical_mode",
-        ("onehot" if bool(config.get("env_cat_embeddings", False)) else getattr(args, "env_categorical_mode", "drop")),
+        ("onehot" if bool(config_dict.get("env_cat_embeddings", False)) else getattr(args, "env_categorical_mode", "drop")),
     )
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
-    full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
+    full_tf_mlp_type = config_dict.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
     if isinstance(full_tf_mlp_type, str):
@@ -323,7 +338,12 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
-    if full_transformer:
+
+    # Check if this is a SINN checkpoint — build SINN model instead of legacy
+    sinn_phase = config_dict.get("sinn_phase", None)
+    if sinn_phase in ("ge", "finetune"):
+        model = _build_sinn_gxe_model(config, gxe_layers=gxe_layer).to(device)
+    elif full_transformer:
         if residual:
             model = FullTransformerResidual(
                 config,
@@ -378,6 +398,7 @@ def load_model(device: torch.device,
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
                                 config=config).to(device)
+
     model.load_state_dict(state, strict=False)
     model.eval()
 

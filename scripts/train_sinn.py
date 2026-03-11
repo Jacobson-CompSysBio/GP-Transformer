@@ -391,6 +391,31 @@ def _load_encoder_weights(model, args, device):
                 print(f"[SINN]   E unexpected keys: {unexpected}")
 
 
+def _env_level_pearson(preds, targets, env_ids, eps=1e-8):
+    """Pearson correlation across environments (one mean-pred per env vs target).
+
+    For environment-level targets like E_hat (constant within env),
+    macro_env_pearson returns NaN because within-env variance is zero.
+    This function instead aggregates to one value per env and correlates across envs.
+    """
+    env_preds, env_targets = [], []
+    for eid in torch.unique(env_ids):
+        mask = env_ids == eid
+        env_preds.append(preds[mask].mean())
+        env_targets.append(targets[mask][0])  # constant within env
+    if len(env_preds) < 3:
+        return float("nan")
+    p = torch.stack(env_preds).float()
+    t = torch.stack(env_targets).float()
+    p_c = p - p.mean()
+    t_c = t - t.mean()
+    num = (p_c * t_c).sum()
+    den = (p_c.norm() * t_c.norm())
+    if den < eps:
+        return float("nan")
+    return float((num / den).clamp(-1, 1).item())
+
+
 def _get_target(yb, phase):
     """Extract the correct target for the current SINN phase."""
     if phase == "g":
@@ -398,7 +423,8 @@ def _get_target(yb, phase):
     elif phase == "e":
         return yb["e_hat"]
     elif phase == "ge":
-        return yb["ge_hat"]
+        # Non-genomic signal: E_hat + GE_hat (= y - mu - G_hat)
+        return yb["e_hat"] + yb["ge_hat"]
     else:  # finetune
         return yb["y"]
 
@@ -486,8 +512,11 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
         run.define_metric("iter_num")
         run.define_metric("train_loss", step_metric="iter_num")
         run.define_metric("epoch")
-        run.define_metric("val_mse", step_metric="epoch")
-        run.define_metric("val_env_pcc", step_metric="epoch")
+        run.define_metric("val/mse", step_metric="epoch")
+        run.define_metric("val/env_pcc", step_metric="epoch")
+        run.define_metric("val/G_enc_loss", step_metric="epoch")
+        run.define_metric("val/E_enc_loss", step_metric="epoch")
+        run.define_metric("val/GxE_loss", step_metric="epoch")
 
         run_id_file = os.environ.get("WANDB_RUN_ID_FILE")
         if run_id_file:
@@ -532,6 +561,18 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                     preds = preds["total"]
                 preds = preds.squeeze(-1)
                 target = target.squeeze(-1)
+
+                # Mask novel-env rows for E-phase (E_hat=0 is meaningless)
+                if phase == "e" and "has_e_hat" in yb:
+                    mask = yb["has_e_hat"].to(device, non_blocking=True).squeeze(-1)
+                    if mask.any():
+                        preds = preds[mask]
+                        target = target[mask]
+                    else:
+                        # Skip batch entirely if no valid targets
+                        pbar.update(1)
+                        iter_num += 1
+                        continue
 
                 if uses_env:
                     loss_total, loss_parts = loss_fn(preds, target, env_id=env_id)
@@ -584,19 +625,32 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
 
         # ── Validation ───────────────────────────────────────────
         ddp_model.eval()
+        # Only use aux heads during finetune (they're untrained during GE)
+        has_aux_model = phase == "finetune" and hasattr(ddp_model.module, "g_aux_head")
         with torch.no_grad():
             all_preds, all_targets, all_env_ids = [], [], []
+            all_g_hat, all_e_hat, all_g_aux, all_e_aux = [], [], [], []
+            all_has_e_hat = []
             for xb, yb in val_loader:
                 xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
                 target = _get_target(yb, phase).to(device, non_blocking=True).float()
                 env_id = yb["env_id"].to(device, non_blocking=True).long()
 
-                preds = ddp_model(xb)
+                if has_aux_model:
+                    preds, g_aux, e_aux = ddp_model(xb, return_aux=True)
+                    all_g_aux.append(g_aux.squeeze(-1))
+                    all_e_aux.append(e_aux.squeeze(-1))
+                    all_g_hat.append(yb["g_hat"].to(device).float().squeeze(-1))
+                    all_e_hat.append(yb["e_hat"].to(device).float().squeeze(-1))
+                else:
+                    preds = ddp_model(xb)
                 if isinstance(preds, dict):
                     preds = preds["total"]
                 all_preds.append(preds.squeeze(-1))
                 all_targets.append(target.squeeze(-1))
                 all_env_ids.append(env_id)
+                if "has_e_hat" in yb:
+                    all_has_e_hat.append(yb["has_e_hat"].to(device).squeeze(-1))
 
             local_preds = torch.cat(all_preds) if all_preds else torch.empty(0, device=device)
             local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, device=device)
@@ -619,9 +673,42 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             full_env_ids = _all_gather_flat(local_env_ids.float()).long()[:len(val_ds)]
 
             val_mse = nn.functional.mse_loss(full_preds, full_targets).item()
-            val_env_pcc = float(macro_env_pearson(
-                full_preds, full_targets, full_env_ids, min_samples=2
-            ).item())
+            # For phases with env-level targets (E_hat is constant per env),
+            # macro_env_pearson is undefined (zero within-env variance).
+            # Compute env-level PCC instead: mean pred per env vs E_hat.
+            if phase == "e":
+                val_env_pcc = _env_level_pearson(full_preds, full_targets, full_env_ids)
+            else:
+                val_env_pcc = float(macro_env_pearson(
+                    full_preds, full_targets, full_env_ids, min_samples=2
+                ).item())
+
+            # Per-encoder validation metrics (GE / finetune phases)
+            val_g_enc_mse = float("nan")
+            val_e_enc_mse = float("nan")
+            if has_aux_model and all_g_aux:
+                full_g_aux = _all_gather_flat(torch.cat(all_g_aux))[:len(val_ds)]
+                full_e_aux = _all_gather_flat(torch.cat(all_e_aux))[:len(val_ds)]
+                full_g_hat = _all_gather_flat(torch.cat(all_g_hat))[:len(val_ds)]
+                full_e_hat = _all_gather_flat(torch.cat(all_e_hat))[:len(val_ds)]
+                val_g_enc_mse = nn.functional.mse_loss(full_g_aux, full_g_hat).item()
+                # E encoder loss only on rows with valid E_hat
+                if all_has_e_hat:
+                    full_has_e = _all_gather_flat(torch.cat(all_has_e_hat).float())[:len(val_ds)].bool()
+                    if full_has_e.any():
+                        val_e_enc_mse = nn.functional.mse_loss(
+                            full_e_aux[full_has_e], full_e_hat[full_has_e]
+                        ).item()
+                else:
+                    val_e_enc_mse = nn.functional.mse_loss(full_e_aux, full_e_hat).item()
+
+            # For phase E: compute val_mse only on valid (non-novel) rows
+            if phase == "e" and all_has_e_hat:
+                full_has_e = _all_gather_flat(torch.cat(all_has_e_hat).float())[:len(val_ds)].bool()
+                if full_has_e.any():
+                    val_mse = nn.functional.mse_loss(
+                        full_preds[full_has_e], full_targets[full_has_e]
+                    ).item()
 
         # ── Checkpoint / early stop ──────────────────────────────
         if is_main(rank):
@@ -634,11 +721,23 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                 metric = val_mse
                 improved = metric < best_val_metric - 1e-8
 
-            wandb.log({
+            val_log = {
                 "epoch": epoch,
-                "val_mse": val_mse,
-                "val_env_pcc": val_env_pcc,
-            })
+                "val/mse": val_mse,
+                "val/env_pcc": val_env_pcc,
+            }
+            # Per-encoder tracking
+            if phase == "g":
+                val_log["val/G_enc_loss"] = val_mse
+            elif phase == "e":
+                val_log["val/E_enc_loss"] = val_mse
+            elif phase in ("ge", "finetune"):
+                if not math.isnan(val_g_enc_mse):
+                    val_log["val/G_enc_loss"] = val_g_enc_mse
+                if not math.isnan(val_e_enc_mse):
+                    val_log["val/E_enc_loss"] = val_e_enc_mse
+                val_log["val/GxE_loss"] = val_mse
+            wandb.log(val_log)
 
             if improved:
                 best_val_metric = metric
@@ -723,8 +822,13 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
 
         if is_main(rank) and epoch % 10 == 0:
             elapsed = (time.time() - t0) / 60
+            extra = ""
+            if has_aux_model and not math.isnan(val_g_enc_mse):
+                extra += f" | G_enc={val_g_enc_mse:.4f}"
+            if has_aux_model and not math.isnan(val_e_enc_mse):
+                extra += f" | E_enc={val_e_enc_mse:.4f}"
             print(f"[{phase} epoch {epoch}] val_mse={val_mse:.6f} | "
-                  f"val_env_pcc={val_env_pcc:.5f} | best={best_val_metric:.6f} | "
+                  f"val_env_pcc={val_env_pcc:.5f} | best={best_val_metric:.6f}{extra} | "
                   f"elapsed={elapsed:.1f}m")
 
     dist.barrier()

@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -A SYB114
 #SBATCH -J sinn
-#SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
-#SBATCH -q debug
+#SBATCH -N 1
+#SBATCH -t 08:00:00
+#SBATCH -p extended
+##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
 #SBATCH --open-mode=truncate
@@ -60,28 +60,28 @@ export MOE_LOSS_WEIGHT=0.01
 G_LR=1e-3
 G_EPOCHS=100
 G_EARLY_STOP=25
-G_BATCH_SIZE=1024
+G_BATCH_SIZE=256
 
 # Phase e (environment encoder)
 E_LR=1e-3
 E_EPOCHS=500
 E_EARLY_STOP=100
-E_BATCH_SIZE=1024
+E_BATCH_SIZE=256
 
 # Phase ge (interaction)
 GE_LR=5e-4
 GE_EPOCHS=500
 GE_EARLY_STOP=100
-GE_BATCH_SIZE=1024
+GE_BATCH_SIZE=256
 FREEZE_ENCODERS=True
 
 # Phase finetune
-FT_LR=1e-5
+FT_LR=1e-4
 FT_EPOCHS=1000
 FT_EARLY_STOP=200
 FT_LOSS="envpcc+mse"
 FT_LOSS_WEIGHTS="1.0,0.1"
-ENV_STRATIFIED=True
+ENV_STRATIFIED=False
 MIN_SAMPLES_PER_ENV=32
 AUX_G_WEIGHT=0.1
 AUX_E_WEIGHT=0.1
@@ -220,7 +220,7 @@ if [[ "$RUN_PHASE_E" == "True" ]]; then
 fi
 
 ### ═══════════════════════════════════════════════════════════════
-### Phase GE: Train interaction on GE_hat residual
+### Phase GE: Train interaction on non-genomic signal (E_hat + GE_hat)
 ### ═══════════════════════════════════════════════════════════════
 if [[ "$RUN_PHASE_GE" == "True" ]]; then
     echo ""

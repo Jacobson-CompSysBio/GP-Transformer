@@ -428,6 +428,10 @@ class GxE_Dataset(Dataset):
             if n_missing_e > 0:
                 print(f"[Decomposition] {n_missing_e}/{len(e_hat)} rows have no E_hat "
                       f"(novel envs) — set to 0.0")
+            # Track which rows have valid (non-novel) decomposition targets
+            self._has_g_hat = (~g_hat.isna()).reset_index(drop=True)
+            self._has_e_hat = (~e_hat.isna()).reset_index(drop=True)
+
             g_hat = g_hat.fillna(0.0)
             e_hat = e_hat.fillna(0.0)
 
@@ -490,6 +494,8 @@ class GxE_Dataset(Dataset):
                 y_dict['g_hat'] = torch.tensor([self.decomp_g.iloc[index]], dtype=torch.float32)
                 y_dict['e_hat'] = torch.tensor([self.decomp_e.iloc[index]], dtype=torch.float32)
                 y_dict['ge_hat'] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
+                y_dict['has_g_hat'] = torch.tensor([self._has_g_hat.iloc[index]], dtype=torch.bool)
+                y_dict['has_e_hat'] = torch.tensor([self._has_e_hat.iloc[index]], dtype=torch.bool)
             return x, y_dict
 
         # residual out
