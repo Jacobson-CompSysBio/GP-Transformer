@@ -23,9 +23,23 @@ from utils.loss import macro_env_pearson
 from utils.utils import *
 
 # SINN model (lazy import to avoid circular deps if train_sinn is not present)
-def _build_sinn_gxe_model(config, gxe_layers=1, e_dropout=None):
+def _build_sinn_gxe_model(
+    config,
+    gxe_layers=1,
+    e_dropout=None,
+    interaction_type="self_attn",
+    interaction_rank=None,
+    output_mode="additive",
+):
     from scripts.train_sinn import SINNGxEModel
-    return SINNGxEModel(config, n_gxe_layers=gxe_layers, e_dropout=e_dropout)
+    return SINNGxEModel(
+        config,
+        n_gxe_layers=gxe_layers,
+        e_dropout=e_dropout,
+        interaction_type=interaction_type,
+        interaction_rank=interaction_rank,
+        output_mode=output_mode,
+    )
 
 RESULTS_DIR = Path("data/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -344,7 +358,20 @@ def load_model(device: torch.device,
     sinn_phase = config_dict.get("sinn_phase", None)
     if sinn_phase in ("ge", "finetune"):
         e_dropout = config_dict.get("e_dropout", None)
-        model = _build_sinn_gxe_model(config, gxe_layers=gxe_layer, e_dropout=e_dropout).to(device)
+        interaction_type = config_dict.get("sinn_interaction", "self_attn")
+        interaction_rank = config_dict.get("interaction_rank", None)
+        output_mode = config_dict.get(
+            "sinn_output_mode",
+            "additive" if sinn_phase == "finetune" else "ge",
+        )
+        model = _build_sinn_gxe_model(
+            config,
+            gxe_layers=gxe_layer,
+            e_dropout=e_dropout,
+            interaction_type=interaction_type,
+            interaction_rank=interaction_rank,
+            output_mode=output_mode,
+        ).to(device)
     elif full_transformer:
         if residual:
             model = FullTransformerResidual(

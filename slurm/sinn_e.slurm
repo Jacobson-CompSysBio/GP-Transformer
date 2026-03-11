@@ -25,14 +25,17 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### Shared model config ###
 export DECOMP_PATH="data/decomposition/decomposition_2022.json"
+export DECOMP_SOURCE=split
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
 export SCALE_TARGETS=False
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.10
+export E_SELECT_METRIC=mse_minus_corr
+export E_CORR_WEIGHT=5.0
 
-export EMB_SIZE=512
+export EMB_SIZE=64
 export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
@@ -85,6 +88,7 @@ srun -N ${SLURM_NNODES} \
     python -u scripts/train_sinn.py \
         --sinn_phase e \
         --decomp_path "$DECOMP_PATH" \
+        --decomp_source $DECOMP_SOURCE \
         --batch_size $E_BATCH_SIZE \
         --gbs $GBS \
         --lr $E_LR \
@@ -103,7 +107,9 @@ srun -N ${SLURM_NNODES} \
         --seed $SEED \
         --scale_targets $SCALE_TARGETS \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --e_select_metric $E_SELECT_METRIC \
+        --e_corr_weight $E_CORR_WEIGHT
 
 if [[ -f "$CHECKPOINT_DIR_FILE" ]]; then
     E_CKPT_DIR=$(cat "$CHECKPOINT_DIR_FILE")

@@ -29,12 +29,14 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### Shared model config ###
 export DECOMP_PATH="data/decomposition/decomposition_2022.json"
+export DECOMP_SOURCE=split
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
 export SCALE_TARGETS=False
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.10
+export SINN_INTERACTION=bilinear
 
 export EMB_SIZE=512
 export HEADS=4
@@ -60,7 +62,7 @@ GE_ENCODER_LR=5e-5
 GE_EPOCHS=500
 GE_EARLY_STOP=100
 GE_BATCH_SIZE=256
-FREEZE_ENCODERS=True
+FREEZE_ENCODERS=False
 
 ### Compute ###
 NGPUS=$(($SLURM_NNODES * 8))
@@ -128,6 +130,7 @@ srun -N ${SLURM_NNODES} \
     python -u scripts/train_sinn.py \
         --sinn_phase ge \
         --decomp_path "$DECOMP_PATH" \
+        --decomp_source $DECOMP_SOURCE \
         --batch_size $GE_BATCH_SIZE \
         --gbs $GBS \
         --lr $GE_LR \
@@ -142,6 +145,7 @@ srun -N ${SLURM_NNODES} \
         --e_mlp_layers $E_MLP_LAYERS \
         --gxe_layers $GXE_LAYERS \
         --dropout $DROPOUT \
+        --sinn_interaction $SINN_INTERACTION \
         --e_dropout $E_DROPOUT \
         --seed $SEED \
         --scale_targets $SCALE_TARGETS \

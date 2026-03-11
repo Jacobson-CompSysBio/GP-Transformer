@@ -25,6 +25,7 @@ source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
 ### Shared model config ###
 export DECOMP_PATH="data/decomposition/decomposition_2022.json"
+export DECOMP_SOURCE=split
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
@@ -86,6 +87,7 @@ srun -N ${SLURM_NNODES} \
     python -u scripts/train_sinn.py \
         --sinn_phase g \
         --decomp_path "$DECOMP_PATH" \
+        --decomp_source $DECOMP_SOURCE \
         --batch_size $G_BATCH_SIZE \
         --gbs $GBS \
         --lr $G_LR \

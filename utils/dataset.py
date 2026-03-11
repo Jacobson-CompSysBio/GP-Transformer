@@ -148,6 +148,7 @@ class GxE_Dataset(Dataset):
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
                  decomposition_path: Optional[str] = None,
+                 decomposition_payload: Optional[Dict[str, object]] = None,
                  ):
         
         """
@@ -169,6 +170,8 @@ class GxE_Dataset(Dataset):
             leo_seed (int): random seed for LEO environment selection
             decomposition_path (Optional[str]): path to JSON from fit_decomposition.py; when set,
                 computes per-row G_hat, E_hat, GE_hat targets for SINN-style training
+            decomposition_payload (Optional[Dict[str, object]]): pre-loaded decomposition dict;
+                takes precedence over decomposition_path when provided
         """
         super().__init__()
         self.split = split
@@ -399,11 +402,15 @@ class GxE_Dataset(Dataset):
 
         ### SINN DECOMPOSITION TARGETS (optional) ###
         self.decomposition_path = decomposition_path
+        self.decomposition_payload = decomposition_payload
         self.has_decomposition = False
-        if decomposition_path is not None and split not in ('sub', 'test'):
+        if (decomposition_payload is not None or decomposition_path is not None) and split not in ('sub', 'test'):
             import json
-            with open(decomposition_path, 'r') as f:
-                decomp = json.load(f)
+            if decomposition_payload is not None:
+                decomp = decomposition_payload
+            else:
+                with open(decomposition_path, 'r') as f:
+                    decomp = json.load(f)
             mu = decomp['mu']
             G_lookup = decomp['G']  # hybrid_name -> G_hat
             E_lookup = decomp['E']  # env_name -> E_hat
