@@ -38,7 +38,7 @@ export LEO_VAL=True
 export LEO_VAL_FRACTION=0.10
 export SINN_INTERACTION=bilinear
 
-export EMB_SIZE=512
+export EMB_SIZE=256
 export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
