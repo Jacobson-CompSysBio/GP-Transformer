@@ -30,24 +30,25 @@ export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
 export SCALE_TARGETS=False
-export LEO_VAL=True
+export LEO_VAL=False
 export LEO_VAL_FRACTION=0.10
 export E_SELECT_METRIC=mse_minus_corr
 export E_CORR_WEIGHT=5.0
 
-export EMB_SIZE=64
+export EMB_SIZE=256
 export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
 export E_MLP_LAYERS=1
+export E_HIDDEN_DIM=8
 export GXE_LAYERS=2
 export DROPOUT=0.1
-export E_DROPOUT=0.25
+export E_DROPOUT=0.1
 
 ### Phase E hyperparameters ###
-E_LR=1e-3
+E_LR=3e-4
 E_EPOCHS=500
-E_EARLY_STOP=100
+E_EARLY_STOP=15
 E_BATCH_SIZE=256
 
 ### Compute ###
@@ -101,6 +102,7 @@ srun -N ${SLURM_NNODES} \
         --g_layers $G_LAYERS \
         --mlp_layers $MLP_LAYERS \
         --e_mlp_layers $E_MLP_LAYERS \
+        --e_hidden_dim $E_HIDDEN_DIM \
         --gxe_layers $GXE_LAYERS \
         --dropout $DROPOUT \
         --e_dropout $E_DROPOUT \

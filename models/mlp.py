@@ -38,7 +38,7 @@ class Block(nn.Module):
         return x
 
 # create MLP encoder for environmental covariates
-class E_Encoder(nn.Module):
+class E_Encoder_Small(nn.Module):
 
     def __init__(self,
                  input_dim: int,
@@ -62,6 +62,56 @@ class E_Encoder(nn.Module):
         self.final_activation = activation
         # Add output layer norm for scale consistency with other encoders
         self.output_ln = nn.LayerNorm(output_dim)
+
+    # forward pass
+    def forward(self, x):
+        # through hidden layers
+        for i, layer in enumerate(self.hidden_layers):
+            # can't use residual connection for first layer, since input since doesn't match hidden layer sizes
+            if i == 0:
+                x = layer(x)
+            else: 
+                x = x + layer(x)
+
+        # through final layer with normalization
+        x = self.final_activation(self.final_layer(x))
+        x = self.output_ln(x)
+
+        return x
+
+# minimal E encoder for sinn
+class E_Encoder(nn.Module):
+
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int = 128,
+                 hidden_dim: int = 128,
+                 n_hidden: int = 1,
+                 activation: nn.Module = nn.GELU(),
+                 dropout: float = 0.25,
+                 layernorm: bool = True,
+                 ):
+        super().__init__()
+
+        if n_hidden < 1:
+            # if no hidden layers, just do linear projection with activation and layernorm
+            self.hidden_layers = nn.ModuleList()
+            self.final_layer = nn.Linear(input_dim, output_dim)
+            self.final_activation = activation
+            self.output_ln = nn.LayerNorm(output_dim)
+
+        else:
+            layers=[]
+            for i in range(n_hidden):
+                in_dim = input_dim if i == 0 else hidden_dim
+                layers.append(Block(in_dim, hidden_dim, activation, dropout, layernorm))
+            self.hidden_layers = nn.ModuleList(layers)
+
+            # add final layer
+            self.final_layer = nn.Linear(hidden_dim, output_dim)
+            self.final_activation = activation
+            # Add output layer norm for scale consistency with other encoders
+            self.output_ln = nn.LayerNorm(output_dim)
 
     # forward pass
     def forward(self, x):

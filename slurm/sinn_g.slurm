@@ -30,7 +30,7 @@ export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
 export SCALE_TARGETS=False
-export LEO_VAL=True
+export LEO_VAL=False
 export LEO_VAL_FRACTION=0.10
 
 export EMB_SIZE=256
@@ -40,7 +40,7 @@ export MLP_LAYERS=1
 export E_MLP_LAYERS=1
 export GXE_LAYERS=2
 export DROPOUT=0.1
-export E_DROPOUT=0.25
+export E_DROPOUT=0.1
 
 ### Phase G hyperparameters ###
 G_LR=1e-3

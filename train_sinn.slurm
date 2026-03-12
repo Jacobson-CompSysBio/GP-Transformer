@@ -48,6 +48,7 @@ export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
 export E_MLP_LAYERS=3
+export E_HIDDEN_DIM=64
 export GXE_LAYERS=2
 export DROPOUT=0.1
 export E_DROPOUT=0.25
@@ -213,6 +214,7 @@ if [[ "$RUN_PHASE_E" == "True" ]]; then
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
             --e_mlp_layers $E_MLP_LAYERS \
+            --e_hidden_dim $E_HIDDEN_DIM \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --e_dropout $E_DROPOUT \
@@ -276,6 +278,7 @@ if [[ "$RUN_PHASE_GE" == "True" ]]; then
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
             --e_mlp_layers $E_MLP_LAYERS \
+            --e_hidden_dim $E_HIDDEN_DIM \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --sinn_interaction $SINN_INTERACTION \
@@ -345,6 +348,7 @@ if [[ "$RUN_PHASE_FINETUNE" == "True" ]]; then
             --g_layers $G_LAYERS \
             --mlp_layers $MLP_LAYERS \
             --e_mlp_layers $E_MLP_LAYERS \
+            --e_hidden_dim $E_HIDDEN_DIM \
             --gxe_layers $GXE_LAYERS \
             --dropout $DROPOUT \
             --sinn_interaction $SINN_INTERACTION \

@@ -27,11 +27,14 @@ def _build_sinn_gxe_model(
     config,
     gxe_layers=1,
     e_dropout=None,
+    e_hidden_dim=None,
     interaction_type="self_attn",
     interaction_rank=None,
     output_mode="additive",
 ):
     from scripts.train_sinn import SINNGxEModel
+    if e_hidden_dim is not None:
+        config.e_hidden_dim = e_hidden_dim
     return SINNGxEModel(
         config,
         n_gxe_layers=gxe_layers,
@@ -353,11 +356,13 @@ def load_model(device: torch.device,
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
     config.e_mlp_layers = config_dict.get("e_mlp_layers", mlp_layer)
+    config.e_hidden_dim = config_dict.get("e_hidden_dim", n_embd)
 
     # Check if this is a SINN checkpoint — build SINN model instead of legacy
     sinn_phase = config_dict.get("sinn_phase", None)
     if sinn_phase in ("ge", "finetune"):
         e_dropout = config_dict.get("e_dropout", None)
+        e_hidden_dim = config_dict.get("e_hidden_dim", n_embd)
         interaction_type = config_dict.get("sinn_interaction", "self_attn")
         interaction_rank = config_dict.get("interaction_rank", None)
         output_mode = config_dict.get(
@@ -368,6 +373,7 @@ def load_model(device: torch.device,
             config,
             gxe_layers=gxe_layer,
             e_dropout=e_dropout,
+            e_hidden_dim=e_hidden_dim,
             interaction_type=interaction_type,
             interaction_rank=interaction_rank,
             output_mode=output_mode,

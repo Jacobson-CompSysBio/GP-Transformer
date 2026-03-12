@@ -38,7 +38,7 @@ from models.transformer import G_Encoder, TransformerBlock
 from models.mlp import E_Encoder
 from models.config import Config
 from utils.get_lr import get_lr
-from utils.loss import build_loss, macro_env_pearson
+from utils.loss import build_loss, macro_env_pearson, envwise_mse
 from utils.utils import set_seed, seed_worker, str2bool, EnvStratifiedSampler
 from scripts.fit_decomposition import load_training_frame, fit_decomposition_from_df
 
@@ -109,11 +109,12 @@ class SINNEModel(nn.Module):
     def __init__(self, config, e_dropout=None):
         super().__init__()
         e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
+        e_hidden_dim = getattr(config, "e_hidden_dim", config.n_embd)
         drop = e_dropout if e_dropout is not None else config.dropout
         self.encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
-            hidden_dim=config.n_embd,
+            hidden_dim=e_hidden_dim,
             n_hidden=e_layers,
             dropout=drop,
         )
@@ -146,11 +147,12 @@ class SINNGxEModel(nn.Module):
         super().__init__()
         self.g_encoder = G_Encoder(config, **encoder_kwargs)
         e_layers = getattr(config, "e_mlp_layers", config.n_mlp_layer)
+        e_hidden_dim = getattr(config, "e_hidden_dim", config.n_embd)
         drop = e_dropout if e_dropout is not None else config.dropout
         self.e_encoder = E_Encoder(
             input_dim=config.n_env_fts,
             output_dim=config.n_embd,
-            hidden_dim=config.n_embd,
+            hidden_dim=e_hidden_dim,
             n_hidden=e_layers,
             dropout=drop,
         )
@@ -292,6 +294,8 @@ def parse_sinn_args():
     p.add_argument("--mlp_layers", type=int, default=1)
     p.add_argument("--e_mlp_layers", type=int, default=None,
                    help="E encoder MLP depth (defaults to --mlp_layers if not set)")
+    p.add_argument("--e_hidden_dim", type=int, default=None,
+                   help="Hidden width for the E encoder bottleneck (defaults to --emb_size)")
     p.add_argument("--gxe_layers", type=int, default=1)
     p.add_argument("--heads", type=int, default=4)
     p.add_argument("--emb_size", type=int, default=256)
@@ -335,6 +339,9 @@ def parse_sinn_args():
                    help="Model selection objective for the E phase")
     p.add_argument("--e_corr_weight", type=float, default=5.0,
                    help="Weight on env-level PCC when e_select_metric=mse_minus_corr")
+    p.add_argument("--e_loss", type=str, default="envmse",
+                   choices=["mse", "envmse"],
+                   help="Training loss for the E phase")
     return p.parse_args()
 
 
@@ -345,6 +352,14 @@ def _loss_terms(loss_name: str) -> set[str]:
 
 def _loss_uses_env_groups(loss_name: str) -> bool:
     return bool(_loss_terms(loss_name) & ENVWISE_LOSS_TERMS)
+
+
+def _phase_uses_env_groups(args) -> bool:
+    if args.sinn_phase == "finetune":
+        return _loss_uses_env_groups(args.loss)
+    if args.sinn_phase == "e":
+        return args.e_loss == "envmse"
+    return False
 
 
 def _build_split_decomposition_payload(args, verbose=False):
@@ -408,11 +423,11 @@ def build_dataloaders(args, train_ds, val_ds, rank, world_size):
 
     use_batch_sampler = False
     use_env_stratified = (
-        args.sinn_phase == "finetune"
-        and (args.env_stratified or _loss_uses_env_groups(args.loss))
+        args.sinn_phase in ("e", "finetune")
+        and (args.env_stratified or _phase_uses_env_groups(args))
     )
     if use_env_stratified and not args.env_stratified and is_main(rank):
-        print("[SINN] Enabling env-stratified batches because finetune loss uses env-wise terms.")
+        print("[SINN] Enabling env-stratified batches because the selected phase uses env-wise terms.")
     if use_env_stratified:
         train_sampler = EnvStratifiedSampler(
             env_ids=train_ds.env_id_tensor.tolist(),
@@ -628,6 +643,9 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
     if phase == "finetune":
         loss_fn = build_loss(args.loss, args.loss_weights)
         uses_env = True
+    elif phase == "e" and args.e_loss == "envmse":
+        loss_fn = build_loss("envmse")
+        uses_env = True
     else:
         loss_fn = nn.MSELoss()
         uses_env = False
@@ -664,6 +682,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             "lr": lr,
             "batch_size": args.batch_size,
             "n_embd": args.emb_size,
+            "e_hidden_dim": args.e_hidden_dim if args.e_hidden_dim is not None else args.emb_size,
             "g_layers": args.g_layers,
             "gxe_layers": args.gxe_layers,
             "heads": args.heads,
@@ -676,6 +695,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             "interaction_rank": args.interaction_rank,
             "e_select_metric": args.e_select_metric,
             "e_corr_weight": args.e_corr_weight,
+            "e_loss": args.e_loss,
             "aux_g_weight": args.aux_g_weight,
             "aux_e_weight": args.aux_e_weight,
             "aux_year_weight": args.aux_year_weight,
@@ -741,6 +761,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                     if mask.any():
                         preds = preds[mask]
                         target = target[mask]
+                        env_id = env_id[mask]
                     else:
                         # Skip batch entirely if no valid targets
                         pbar.update(1)
@@ -886,9 +907,13 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
             if phase == "e" and all_has_e_hat:
                 full_has_e = _all_gather_flat(torch.cat(all_has_e_hat).float())[:len(val_ds)].bool()
                 if full_has_e.any():
-                    val_mse = F.mse_loss(
-                        full_preds[full_has_e], full_targets[full_has_e]
-                    ).item()
+                    valid_preds = full_preds[full_has_e]
+                    valid_targets = full_targets[full_has_e]
+                    valid_env_ids = full_env_ids[full_has_e]
+                    if args.e_loss == "envmse":
+                        val_mse = float(envwise_mse(valid_preds, valid_targets, valid_env_ids).item())
+                    else:
+                        val_mse = F.mse_loss(valid_preds, valid_targets).item()
 
         # ── Checkpoint / early stop ──────────────────────────────
         if is_main(rank):
@@ -967,6 +992,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                         "g_layers": args.g_layers,
                         "mlp_layers": args.mlp_layers,
                         "e_mlp_layers": args.e_mlp_layers if args.e_mlp_layers is not None else args.mlp_layers,
+                        "e_hidden_dim": args.e_hidden_dim if args.e_hidden_dim is not None else args.emb_size,
                         "gxe_layers": args.gxe_layers,
                         "n_head": args.heads,
                         "n_embd": args.emb_size,
@@ -987,6 +1013,7 @@ def train_phase(args, model, train_loader, val_loader, train_sampler,
                         "sinn_output_mode": getattr(ddp_model.module, "output_mode", "ge"),
                         "e_select_metric": args.e_select_metric,
                         "e_corr_weight": args.e_corr_weight,
+                        "e_loss": args.e_loss,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
@@ -1077,6 +1104,7 @@ def main():
         n_env_fts=train_ds.n_env_fts,
     )
     config.e_mlp_layers = e_mlp_layers
+    config.e_hidden_dim = args.e_hidden_dim if args.e_hidden_dim is not None else args.emb_size
 
     # Model
     model = build_model(args, config, device, rank)

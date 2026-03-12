@@ -43,9 +43,10 @@ export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
 export E_MLP_LAYERS=1
+export E_HIDDEN_DIM=8
 export GXE_LAYERS=2
 export DROPOUT=0.1
-export E_DROPOUT=0.25
+export E_DROPOUT=0.1
 
 # MoE settings
 export FULL_TF_MLP_TYPE=moe
@@ -143,6 +144,7 @@ srun -N ${SLURM_NNODES} \
         --g_layers $G_LAYERS \
         --mlp_layers $MLP_LAYERS \
         --e_mlp_layers $E_MLP_LAYERS \
+        --e_hidden_dim $E_HIDDEN_DIM \
         --gxe_layers $GXE_LAYERS \
         --dropout $DROPOUT \
         --sinn_interaction $SINN_INTERACTION \

@@ -35,18 +35,19 @@ export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 export SEED=1
 export SCALE_TARGETS=False
-export LEO_VAL=True
+export LEO_VAL=False
 export LEO_VAL_FRACTION=0.10
 export SINN_INTERACTION=bilinear
 
-export EMB_SIZE=512
+export EMB_SIZE=256
 export HEADS=4
 export G_LAYERS=1
 export MLP_LAYERS=1
 export E_MLP_LAYERS=1
+export E_HIDDEN_DIM=8
 export GXE_LAYERS=2
 export DROPOUT=0.1
-export E_DROPOUT=0.25
+export E_DROPOUT=0.1
 
 # MoE settings
 export FULL_TF_MLP_TYPE=moe
@@ -63,7 +64,7 @@ FT_EPOCHS=1000
 FT_EARLY_STOP=200
 FT_LOSS="envpcc+mse"
 FT_LOSS_WEIGHTS="1.0,0.1"
-ENV_STRATIFIED=True
+ENV_STRATIFIED=False
 MIN_SAMPLES_PER_ENV=32
 AUX_G_WEIGHT=0.1
 AUX_E_WEIGHT=0.1
@@ -146,6 +147,7 @@ srun -N ${SLURM_NNODES} \
         --g_layers $G_LAYERS \
         --mlp_layers $MLP_LAYERS \
         --e_mlp_layers $E_MLP_LAYERS \
+        --e_hidden_dim $E_HIDDEN_DIM \
         --gxe_layers $GXE_LAYERS \
         --dropout $DROPOUT \
         --sinn_interaction $SINN_INTERACTION \
