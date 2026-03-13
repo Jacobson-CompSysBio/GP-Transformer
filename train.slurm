@@ -49,7 +49,7 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export DROPOUT=0.0
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -64,8 +64,8 @@ export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
-export LOSS="envpcc" # + separated list of losses
-export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
+export LOSS="envpcc+envmse" # + separated list of losses
+export LOSS_WEIGHTS="1.0,1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 

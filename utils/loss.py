@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from contextlib import nullcontext
 from torchsort import soft_rank
 from typing import Callable, Union, Tuple, Dict, List, Optional
 
@@ -869,17 +870,162 @@ class CompositeLoss(nn.Module):
         self.losses = nn.ModuleList([l for _, l, _ in losses])
         self.names = [n for n, _, _ in losses]
         self.weights = [w for _, _, w in losses]
+        self.active_term_count = sum(abs(w) > 0.0 for w in self.weights)
+        self.pcgrad_enabled = self.active_term_count > 1
 
-    def forward(self, pred, target, env_id=None):
+    def forward(self, pred, target, env_id=None, return_terms: bool = False):
         total = torch.zeros((), device=pred.device, dtype=pred.dtype)
         parts = {}
+        terms = []
         for name, fn, w in zip(self.names, self.losses, self.weights):
             val = fn(pred, target, env_id)
             if not torch.is_tensor(val):
                 val = torch.tensor(val, device=pred.device, dtype=pred.dtype)
-            total = total + (w * val)
+            weighted = w * val
+            total = total + weighted
             parts[name] = float(val.detach().item())
+            terms.append(
+                {
+                    "name": name,
+                    "weight": w,
+                    "raw": val,
+                    "weighted": weighted,
+                }
+            )
+        if return_terms:
+            return total, parts, terms
         return total, parts
+
+
+def _flatten_grad_list(
+    grads: Tuple[Optional[torch.Tensor], ...],
+    params: List[torch.nn.Parameter],
+) -> torch.Tensor:
+    flat_chunks = []
+    for grad, param in zip(grads, params):
+        if grad is None:
+            flat_chunks.append(torch.zeros(param.numel(), device=param.device, dtype=param.dtype))
+        else:
+            flat_chunks.append(grad.detach().reshape(-1))
+    if not flat_chunks:
+        return torch.zeros(0)
+    return torch.cat(flat_chunks)
+
+
+def _assign_flat_grad(params: List[torch.nn.Parameter], flat_grad: torch.Tensor) -> None:
+    offset = 0
+    for param in params:
+        numel = param.numel()
+        grad_view = flat_grad[offset:offset + numel].view_as(param)
+        param.grad = grad_view.clone()
+        offset += numel
+
+
+def _pcgrad_merge(task_grads: List[torch.Tensor], eps: float = 1e-12) -> Tuple[torch.Tensor, Dict[str, float]]:
+    if not task_grads:
+        raise ValueError("PCGrad requires at least one task gradient.")
+
+    if len(task_grads) == 1:
+        return task_grads[0], {
+            "pcgrad_applied": 0.0,
+            "pcgrad_active_terms": 1.0,
+            "pcgrad_conflict_pairs": 0.0,
+            "pcgrad_conflict_ratio": 0.0,
+            "pcgrad_min_cosine": 0.0,
+        }
+
+    projected = [g.clone() for g in task_grads]
+    pair_count = 0
+    conflict_pairs = 0
+    min_cosine = None
+
+    # Deterministic ordering keeps runs reproducible across ranks.
+    for i in range(len(task_grads)):
+        for j in range(i + 1, len(task_grads)):
+            gij = torch.dot(task_grads[i], task_grads[j])
+            pair_count += 1
+            if gij < 0:
+                conflict_pairs += 1
+
+            denom = task_grads[i].norm() * task_grads[j].norm()
+            if denom > eps:
+                cosine = gij / denom.clamp_min(eps)
+                min_cosine = cosine if min_cosine is None else torch.minimum(min_cosine, cosine)
+
+        for j in range(len(task_grads)):
+            if i == j:
+                continue
+            gj = task_grads[j]
+            gj_norm_sq = torch.dot(gj, gj)
+            if gj_norm_sq <= eps:
+                continue
+            dot = torch.dot(projected[i], gj)
+            if dot < 0:
+                projected[i] = projected[i] - (dot / gj_norm_sq.clamp_min(eps)) * gj
+
+    merged = torch.stack(projected, dim=0).sum(dim=0)
+    stats = {
+        "pcgrad_applied": 1.0,
+        "pcgrad_active_terms": float(len(task_grads)),
+        "pcgrad_conflict_pairs": float(conflict_pairs),
+        "pcgrad_conflict_ratio": float(conflict_pairs / pair_count) if pair_count else 0.0,
+        "pcgrad_min_cosine": float(min_cosine.item()) if min_cosine is not None else 0.0,
+    }
+    return merged, stats
+
+
+def pcgrad_backward(
+    model: nn.Module,
+    task_losses: List[torch.Tensor],
+    extra_loss: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    """
+    Apply PCGrad to a list of scalar task losses and write the projected,
+    DDP-averaged gradient into each parameter's `.grad`.
+
+    `task_losses` should already include any per-term weighting specified by the user.
+    `extra_loss` is added normally after the PCGrad projection (for auxiliary terms
+    that are not part of the explicit composite loss string).
+    """
+    params = [p for p in model.parameters() if p.requires_grad]
+    active_losses = [loss for loss in task_losses if loss is not None]
+    if not active_losses:
+        raise ValueError("pcgrad_backward requires at least one loss tensor.")
+    if not params:
+        raise ValueError("pcgrad_backward found no trainable parameters.")
+
+    extra_requires_grad = torch.is_tensor(extra_loss) and extra_loss.requires_grad
+    sync_context = model.no_sync() if hasattr(model, "no_sync") else nullcontext()
+
+    with sync_context:
+        task_grads = []
+        for idx, loss in enumerate(active_losses):
+            retain_graph = (idx + 1) < len(active_losses) or extra_requires_grad
+            grads = torch.autograd.grad(
+                loss,
+                params,
+                retain_graph=retain_graph,
+                allow_unused=True,
+            )
+            task_grads.append(_flatten_grad_list(grads, params))
+
+        merged_grad, stats = _pcgrad_merge(task_grads)
+
+        if extra_requires_grad:
+            extra_grads = torch.autograd.grad(
+                extra_loss,
+                params,
+                retain_graph=False,
+                allow_unused=True,
+            )
+            merged_grad = merged_grad + _flatten_grad_list(extra_grads, params)
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(merged_grad, op=dist.ReduceOp.SUM)
+        merged_grad /= dist.get_world_size()
+
+    _assign_flat_grad(params, merged_grad)
+    return stats
 
 # loss builder
 def build_loss(name: str, weights: str = None) -> CompositeLoss:

@@ -27,6 +27,7 @@ from utils.loss import (
     compute_ibs_similarity,
     compute_grm_similarity,
     macro_env_pearson,
+    pcgrad_backward,
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
@@ -288,6 +289,12 @@ def main():
     
     # build loss
     loss_function = build_loss(args.loss, args.loss_weights)
+    use_pcgrad = loss_function.pcgrad_enabled
+    if is_main(rank):
+        if use_pcgrad:
+            print(f"[INFO] PCGrad enabled for weighted composite loss: {loss_function.names}")
+        else:
+            print("[INFO] PCGrad disabled (single active loss term).")
     
     # contrastive objectives (ablation mode: none, g, e, g+e)
     contrastive_mode = _normalize_choice(
@@ -403,6 +410,7 @@ def main():
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
+                             "pcgrad_enabled": use_pcgrad,
                              "selection_metric": "val_loss/env_avg_pearson",
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
@@ -442,6 +450,12 @@ def main():
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if use_pcgrad:
+            run.define_metric("train_loss/pcgrad_applied", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_active_terms", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_pairs", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_ratio", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_min_cosine", step_metric="iter_num")
         if use_g_contrastive:
             run.define_metric("train_loss/contrastive_g", step_metric="iter_num")
             run.define_metric("train_loss_epoch/contrastive_g", step_metric="epoch")
@@ -509,8 +523,18 @@ def main():
                     preds = model(xb)
                     g_embeddings = None
                     e_embeddings = None
-                    
-                loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+
+                if use_pcgrad:
+                    loss_total, loss_parts, loss_terms = loss_function(
+                        preds,
+                        y_true,
+                        env_id=env_id,
+                        return_terms=True,
+                    )
+                else:
+                    loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+                    loss_terms = None
+                aux_loss_total = None
                 
                 # Add contrastive loss if enabled (with warmup).
                 contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
@@ -523,7 +547,9 @@ def main():
                         if use_g_contrastive and g_embeddings is not None and g_contrastive_loss_fn is not None:
                             g_contr = g_contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
                             g_weight_eff = contrastive_weight * warmup_factor
-                            loss_total = loss_total + g_weight_eff * g_contr
+                            g_contr_weighted = g_weight_eff * g_contr
+                            loss_total = loss_total + g_contr_weighted
+                            aux_loss_total = g_contr_weighted if aux_loss_total is None else aux_loss_total + g_contr_weighted
                             loss_parts["contrastive_g"] = float(g_contr.detach().item())
                             loss_parts["contrastive_weight_eff_g"] = g_weight_eff
                             contrastive_total += float(g_contr.detach().item())
@@ -537,7 +563,9 @@ def main():
                                 e_data=xb["e_data"],
                             )
                             e_weight_eff = env_contrastive_weight * warmup_factor
-                            loss_total = loss_total + e_weight_eff * e_contr
+                            e_contr_weighted = e_weight_eff * e_contr
+                            loss_total = loss_total + e_contr_weighted
+                            aux_loss_total = e_contr_weighted if aux_loss_total is None else aux_loss_total + e_contr_weighted
                             loss_parts["contrastive_e"] = float(e_contr.detach().item())
                             loss_parts["contrastive_weight_eff_e"] = e_weight_eff
                             contrastive_total += float(e_contr.detach().item())
@@ -560,6 +588,7 @@ def main():
                     # Don't detach - gradients need to flow to gate network for load balancing
                     # DDP handles this with find_unused_parameters=True
                     loss_total = loss_total + moe_aux_loss
+                    aux_loss_total = moe_aux_loss if aux_loss_total is None else aux_loss_total + moe_aux_loss
                     loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
@@ -574,7 +603,15 @@ def main():
                 pg['lr'] = lr
 
             # clip gradients on bwd to avoid unstable training 
-            loss_total.backward()
+            if use_pcgrad:
+                pcgrad_stats = pcgrad_backward(
+                    model,
+                    [term["weighted"] for term in loss_terms if abs(term["weight"]) > 0.0],
+                    extra_loss=aux_loss_total,
+                )
+                loss_parts.update(pcgrad_stats)
+            else:
+                loss_total.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)

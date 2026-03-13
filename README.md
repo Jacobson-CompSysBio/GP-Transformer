@@ -71,7 +71,7 @@ Training uses **PyTorch DDP** across multiple AMD MI250X GPUs on ORNL Frontier. 
 
 ### Loss Functions
 
-Composite losses are specified via `LOSS` (e.g., `"envpcc"`, `"mse+envpcc"`) with per-component weights in `LOSS_WEIGHTS`.
+Composite losses are specified via `LOSS` (e.g., `"envpcc"`, `"mse+envpcc"`) with per-component weights in `LOSS_WEIGHTS`. When `LOSS` contains multiple nonzero terms, training applies PCGrad to the weighted per-term gradients; validation and checkpoint metrics still use the weighted scalar sum.
 
 | Loss | Description |
 |------|-------------|

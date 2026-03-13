@@ -27,6 +27,7 @@ from utils.loss import (
     compute_ibs_similarity,
     compute_grm_similarity,
     macro_env_pearson,
+    pcgrad_backward,
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
@@ -329,6 +330,12 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_function = build_loss(args.loss, args.loss_weights)
+    use_pcgrad = loss_function.pcgrad_enabled
+    if is_main(rank):
+        if use_pcgrad:
+            print(f"[INFO] PCGrad enabled for weighted composite loss: {loss_function.names}")
+        else:
+            print("[INFO] PCGrad disabled (single active loss term).")
 
     # contrastive objectives (ablation mode: none, g, e, g+e)
     contrastive_mode = _normalize_choice(
@@ -445,6 +452,7 @@ def main():
         # loss tracking
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
+                             "pcgrad_enabled": use_pcgrad,
                              "selection_metric": "val/env_avg_pearson",
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
@@ -488,6 +496,12 @@ def main():
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if use_pcgrad:
+            run.define_metric("train_loss/pcgrad_applied", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_active_terms", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_pairs", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_ratio", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_min_cosine", step_metric="iter_num")
         
         # track contrastive loss
         if use_g_contrastive:
@@ -567,14 +581,36 @@ def main():
                 # residual: compute main and aux losses
                 loss_aux_ymean = None
                 loss_aux_resid = None
+                aux_loss_total = None
                 if args.residual:
                     pred_total = logits["total"]
-                    loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                    if use_pcgrad:
+                        loss_main, loss_parts, loss_terms = loss_function(
+                            pred_total,
+                            yb["total"],
+                            env_id=yb["env_id"],
+                            return_terms=True,
+                        )
+                    else:
+                        loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                        loss_terms = None
                     loss_aux_ymean = F.mse_loss(logits["ymean"], yb["ymean"])
                     loss_aux_resid = F.mse_loss(logits["resid"], yb["resid"])
-                    loss = loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid)
+                    aux_ymean_weighted = args.lambda_ymean * loss_aux_ymean
+                    aux_resid_weighted = args.lambda_resid * loss_aux_resid
+                    aux_loss_total = aux_ymean_weighted + aux_resid_weighted
+                    loss = loss_main + aux_loss_total
                 else:
-                    loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
+                    if use_pcgrad:
+                        loss, loss_parts, loss_terms = loss_function(
+                            logits,
+                            yb["y"],
+                            env_id=yb["env_id"],
+                            return_terms=True,
+                        )
+                    else:
+                        loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
+                        loss_terms = None
 
                 # Add contrastive loss if enabled (with warmup)
                 contrastive_warmup_epochs = 50
@@ -586,7 +622,9 @@ def main():
                         if use_g_contrastive and g_embeddings is not None and g_contrastive_loss_fn is not None:
                             g_contr = g_contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
                             g_weight_eff = contrastive_weight * warmup_factor
-                            loss = loss + g_weight_eff * g_contr
+                            g_contr_weighted = g_weight_eff * g_contr
+                            loss = loss + g_contr_weighted
+                            aux_loss_total = g_contr_weighted if aux_loss_total is None else aux_loss_total + g_contr_weighted
                             loss_parts["contrastive_g"] = float(g_contr.detach().item())
                             loss_parts["contrastive_weight_eff_g"] = g_weight_eff
                             contrastive_total += float(g_contr.detach().item())
@@ -600,7 +638,9 @@ def main():
                                 e_data=xb["e_data"],
                             )
                             e_weight_eff = env_contrastive_weight * warmup_factor
-                            loss = loss + e_weight_eff * e_contr
+                            e_contr_weighted = e_weight_eff * e_contr
+                            loss = loss + e_contr_weighted
+                            aux_loss_total = e_contr_weighted if aux_loss_total is None else aux_loss_total + e_contr_weighted
                             loss_parts["contrastive_e"] = float(e_contr.detach().item())
                             loss_parts["contrastive_weight_eff_e"] = e_weight_eff
                             contrastive_total += float(e_contr.detach().item())
@@ -623,6 +663,7 @@ def main():
                     # Don't detach - gradients need to flow to gate network for load balancing
                     # DDP handles this with find_unused_parameters=True
                     loss = loss + moe_aux_loss
+                    aux_loss_total = moe_aux_loss if aux_loss_total is None else aux_loss_total + moe_aux_loss
                     loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
 
             if torch.isnan(loss):
@@ -642,7 +683,15 @@ def main():
                 pg['lr'] = lr
 
             # double check that ddp accumulates gradients 
-            loss.backward()
+            if use_pcgrad:
+                pcgrad_stats = pcgrad_backward(
+                    model,
+                    [term["weighted"] for term in loss_terms if abs(term["weight"]) > 0.0],
+                    extra_loss=aux_loss_total,
+                )
+                loss_parts.update(pcgrad_stats)
+            else:
+                loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 

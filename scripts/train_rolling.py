@@ -25,6 +25,7 @@ from utils.loss import (
     GenomicContrastiveLoss,
     EnvironmentContrastiveLoss,
     macro_env_pearson,
+    pcgrad_backward,
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
@@ -570,7 +571,14 @@ def main():
         run_ckpt_dir.mkdir(parents=True, exist_ok=True)
     dist.barrier()
 
-    loss_names = build_loss(args.loss, args.loss_weights).names
+    loss_template = build_loss(args.loss, args.loss_weights)
+    loss_names = loss_template.names
+    use_pcgrad = loss_template.pcgrad_enabled
+    if is_main(rank):
+        if use_pcgrad:
+            print(f"[INFO] PCGrad enabled for weighted composite loss: {loss_names}")
+        else:
+            print("[INFO] PCGrad disabled (single active loss term).")
 
     run = None
     if is_main(rank):
@@ -628,6 +636,12 @@ def main():
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
             run.define_metric(f"val_loss/{name}", step_metric="epoch")
+        if use_pcgrad:
+            run.define_metric("train_loss/pcgrad_applied", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_active_terms", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_pairs", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_conflict_ratio", step_metric="iter_num")
+            run.define_metric("train_loss/pcgrad_min_cosine", step_metric="iter_num")
         if use_g_contrastive:
             run.define_metric("train_loss/contrastive_g", step_metric="iter_num")
             run.define_metric("train_loss_epoch/contrastive_g", step_metric="epoch")
@@ -659,6 +673,7 @@ def main():
             "rolling_folds": folds,
             "loss": args.loss,
             "loss_weights": args.loss_weights,
+            "pcgrad_enabled": use_pcgrad,
             "selection_metric": "val_loss/env_avg_pearson",
             "residual": args.residual,
             "full_transformer": args.full_transformer,
@@ -865,6 +880,7 @@ def main():
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         loss_function = build_loss(args.loss, args.loss_weights)
+        fold_use_pcgrad = loss_function.pcgrad_enabled
 
         batches_per_epoch = len(train_loader)
         effective_epochs = min(args.early_stop * 2, args.num_epochs)
@@ -910,14 +926,36 @@ def main():
 
                     loss_aux_ymean = None
                     loss_aux_resid = None
+                    aux_loss_total = None
                     if args.residual:
                         pred_total = logits["total"]
-                        loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                        if fold_use_pcgrad:
+                            loss_main, loss_parts, loss_terms = loss_function(
+                                pred_total,
+                                yb["total"],
+                                env_id=yb["env_id"],
+                                return_terms=True,
+                            )
+                        else:
+                            loss_main, loss_parts = loss_function(pred_total, yb["total"], env_id=yb["env_id"])
+                            loss_terms = None
                         loss_aux_ymean = F.mse_loss(logits["ymean"], yb["ymean"])
                         loss_aux_resid = F.mse_loss(logits["resid"], yb["resid"])
-                        loss = loss_main + (args.lambda_ymean * loss_aux_ymean) + (args.lambda_resid * loss_aux_resid)
+                        aux_ymean_weighted = args.lambda_ymean * loss_aux_ymean
+                        aux_resid_weighted = args.lambda_resid * loss_aux_resid
+                        aux_loss_total = aux_ymean_weighted + aux_resid_weighted
+                        loss = loss_main + aux_loss_total
                     else:
-                        loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
+                        if fold_use_pcgrad:
+                            loss, loss_parts, loss_terms = loss_function(
+                                logits,
+                                yb["y"],
+                                env_id=yb["env_id"],
+                                return_terms=True,
+                            )
+                        else:
+                            loss, loss_parts = loss_function(logits, yb["y"], env_id=yb["env_id"])
+                            loss_terms = None
 
                     contrastive_warmup_epochs = 50
                     if use_g_contrastive or use_e_contrastive:
@@ -928,7 +966,9 @@ def main():
                             if use_g_contrastive and g_embeddings is not None and g_contrastive_loss_fn is not None:
                                 g_contr = g_contrastive_loss_fn(g_embeddings, g_data=xb["g_data"])
                                 g_weight_eff = contrastive_weight * warmup_factor
-                                loss = loss + g_weight_eff * g_contr
+                                g_contr_weighted = g_weight_eff * g_contr
+                                loss = loss + g_contr_weighted
+                                aux_loss_total = g_contr_weighted if aux_loss_total is None else aux_loss_total + g_contr_weighted
                                 loss_parts["contrastive_g"] = float(g_contr.detach().item())
                                 loss_parts["contrastive_weight_eff_g"] = g_weight_eff
                                 contrastive_total += float(g_contr.detach().item())
@@ -936,7 +976,9 @@ def main():
                             if use_e_contrastive and e_embeddings is not None and e_contrastive_loss_fn is not None:
                                 e_contr = e_contrastive_loss_fn(e_embeddings, e_data=xb["e_data"])
                                 e_weight_eff = env_contrastive_weight * warmup_factor
-                                loss = loss + e_weight_eff * e_contr
+                                e_contr_weighted = e_weight_eff * e_contr
+                                loss = loss + e_contr_weighted
+                                aux_loss_total = e_contr_weighted if aux_loss_total is None else aux_loss_total + e_contr_weighted
                                 loss_parts["contrastive_e"] = float(e_contr.detach().item())
                                 loss_parts["contrastive_weight_eff_e"] = e_weight_eff
                                 contrastive_total += float(e_contr.detach().item())
@@ -954,6 +996,7 @@ def main():
                     moe_aux_loss = getattr(model.module, "moe_aux_loss", None)
                     if moe_aux_loss is not None:
                         loss = loss + moe_aux_loss
+                        aux_loss_total = moe_aux_loss if aux_loss_total is None else aux_loss_total + moe_aux_loss
                         loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
 
                 if torch.isnan(loss):
@@ -963,7 +1006,15 @@ def main():
                 for pg in optimizer.param_groups:
                     pg['lr'] = lr
 
-                loss.backward()
+                if fold_use_pcgrad:
+                    pcgrad_stats = pcgrad_backward(
+                        model,
+                        [term["weighted"] for term in loss_terms if abs(term["weight"]) > 0.0],
+                        extra_loss=aux_loss_total,
+                    )
+                    loss_parts.update(pcgrad_stats)
+                else:
+                    loss.backward()
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
