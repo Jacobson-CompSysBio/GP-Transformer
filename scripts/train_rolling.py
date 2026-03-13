@@ -210,6 +210,12 @@ def _build_model_from_checkpoint_payload(
         getattr(args, "moe_shared_expert_hidden_dim", None),
     )
     moe_loss_weight = float(cfg.get("moe_loss_weight", getattr(args, "moe_loss_weight", 0.01)))
+    env_encoder_type = str(cfg.get("env_encoder_type", getattr(args, "env_encoder_type", "split"))).strip().lower()
+    if env_encoder_type not in {"flat", "split"}:
+        env_encoder_type = "flat"
+    stage_n_heads = int(cfg.get("stage_n_heads", getattr(args, "stage_n_heads", 4)))
+    stage_n_layers = int(cfg.get("stage_n_layers", getattr(args, "stage_n_layers", 1)))
+    env_feature_names = cfg.get("env_feature_names", None)
 
     config = Config(
         block_size=int(cfg["block_size"]),
@@ -222,6 +228,10 @@ def _build_model_from_checkpoint_payload(
         n_embd=int(cfg.get("n_embd", args.emb_size)),
         dropout=float(cfg.get("dropout", args.dropout)),
         n_env_fts=int(cfg["n_env_fts"]),
+        env_encoder_type=env_encoder_type,
+        env_feature_names=tuple(env_feature_names) if env_feature_names is not None else None,
+        stage_n_heads=stage_n_heads,
+        stage_n_layers=stage_n_layers,
     )
 
     if full_transformer:
@@ -487,6 +497,11 @@ def main():
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
+    env_encoder_type = str(_get_arg_or_env("env_encoder_type", "ENV_ENCODER_TYPE", "split", str)).strip().lower()
+    if env_encoder_type not in {"flat", "split"}:
+        raise ValueError(f"env_encoder_type must be 'flat' or 'split' (got {env_encoder_type})")
+    stage_n_heads = int(_get_arg_or_env("stage_n_heads", "STAGE_N_HEADS", 4, int))
+    stage_n_layers = int(_get_arg_or_env("stage_n_layers", "STAGE_N_LAYERS", 1, int))
     env_stratified = _get_arg_or_env("env_stratified", "ENV_STRATIFIED", False, str2bool)
     min_samples_per_env = _get_arg_or_env("min_samples_per_env", "MIN_SAMPLES_PER_ENV", 32, int)
 
@@ -672,6 +687,9 @@ def main():
             "moe_loss_weight": moe_loss_weight,
             "g_input_type": g_input_type,
             "env_categorical_mode": env_categorical_mode,
+            "env_encoder_type": env_encoder_type,
+            "stage_n_heads": stage_n_heads,
+            "stage_n_layers": stage_n_layers,
             "contrastive_mode": contrastive_mode,
             "env_stratified": env_stratified,
             "min_samples_per_env": min_samples_per_env,
@@ -785,6 +803,10 @@ def main():
             n_embd=args.emb_size,
             dropout=args.dropout,
             n_env_fts=train_ds.n_env_fts,
+            env_encoder_type=env_encoder_type,
+            env_feature_names=tuple(train_ds.e_cols),
+            stage_n_heads=stage_n_heads,
+            stage_n_layers=stage_n_layers,
         )
 
         if args.full_transformer:
@@ -1159,6 +1181,10 @@ def main():
                             "full_tf_mlp_type": full_tf_mlp_type,
                             "block_size": config.block_size,
                             "n_env_fts": config.n_env_fts,
+                            "env_encoder_type": config.env_encoder_type,
+                            "env_feature_names": list(train_ds.e_cols),
+                            "stage_n_heads": config.stage_n_heads,
+                            "stage_n_layers": config.stage_n_layers,
                             "g_layers": args.g_layers,
                             "ld_layers": args.ld_layers,
                             "mlp_layers": args.mlp_layers,

@@ -292,6 +292,12 @@ def load_model(device: torch.device,
         ("onehot" if bool(config.get("env_cat_embeddings", False)) else getattr(args, "env_categorical_mode", "drop")),
     )
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
+    env_encoder_type = str(config.get("env_encoder_type", getattr(args, "env_encoder_type", "split"))).strip().lower()
+    if env_encoder_type not in {"flat", "split"}:
+        env_encoder_type = "flat"
+    stage_n_heads = int(config.get("stage_n_heads", getattr(args, "stage_n_heads", 4)))
+    stage_n_layers = int(config.get("stage_n_layers", getattr(args, "stage_n_layers", 1)))
+    env_feature_names = config.get("env_feature_names", None)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
@@ -313,7 +319,11 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    env_encoder_type=env_encoder_type,
+                    env_feature_names=tuple(env_feature_names) if env_feature_names is not None else None,
+                    stage_n_heads=stage_n_heads,
+                    stage_n_layers=stage_n_layers)
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts

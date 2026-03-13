@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Optional, Sequence
 
 @dataclass
 class Config:
@@ -18,3 +19,7 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+    env_encoder_type: str = "split" # "flat" or "split"
+    env_feature_names: Optional[Sequence[str]] = None # ordered env feature names for split encoder
+    stage_n_heads: int = 4 # stage-transformer attention heads
+    stage_n_layers: int = 1 # stage-transformer encoder layers

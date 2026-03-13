@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J longtest
+#SBATCH -J multi-enc-mse
 #SBATCH -N 4
 #SBATCH -t 2:00:00
 #SBATCH -p batch
@@ -49,7 +49,7 @@ echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)
 export NUM_EPOCHS=3000
 export LR=1e-4
 export WEIGHT_DECAY=1e-5
-export DROPOUT=0.0
+export DROPOUT=0.15
 export EARLY_STOP=200
 
 export G_LAYERS=1
@@ -80,7 +80,7 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
-export LEO_VAL_FRACTION=0.10
+export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128

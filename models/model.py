@@ -53,11 +53,34 @@ class FullTransformer(nn.Module):
             self.g_embed = None
             # Keep tokenizer projection separate from contrastive projection head.
             self.g_scalar_proj = nn.Linear(1, config.n_embd)
-        # project each scalar env feature to a token embedding
-        self.e_proj = nn.Linear(1, config.n_embd)
+        # Environmental path:
+        # - legacy: scalar projection per env feature (one token per feature)
+        # - split: separated E encoder (one pooled env token)
+        env_encoder_type = str(getattr(config, "env_encoder_type", "flat")).strip().lower()
+        env_feature_names = getattr(config, "env_feature_names", None)
+        self.use_split_env = (env_encoder_type == "split") and (env_feature_names is not None)
+        if self.use_split_env:
+            self.e_split_encoder = E_Encoder(
+                input_dim=config.n_env_fts,
+                output_dim=config.n_embd,
+                hidden_dim=config.n_embd,
+                n_hidden=config.n_mlp_layer,
+                dropout=config.dropout,
+                env_encoder_type=env_encoder_type,
+                env_feature_names=env_feature_names,
+                stage_n_heads=getattr(config, "stage_n_heads", 4),
+                stage_n_layers=getattr(config, "stage_n_layers", 1),
+            )
+            self.e_proj = None
+            self.env_token_count = 1
+        else:
+            # project each scalar env feature to a token embedding
+            self.e_proj = nn.Linear(1, config.n_embd)
+            self.e_split_encoder = None
+            self.env_token_count = config.n_env_fts
 
         # positional encoding for combined marker + env + cls tokens
-        max_len = config.block_size + config.n_env_fts + 1
+        max_len = config.block_size + self.env_token_count + 1
         class _PE(nn.Module):
             def __init__(self, n_embd, max_len, dropout):
                 super().__init__()
@@ -113,7 +136,10 @@ class FullTransformer(nn.Module):
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
-        e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        if self.e_split_encoder is not None:
+            e_tok = self.e_split_encoder(e).unsqueeze(1)  # (B, 1, C)
+        else:
+            e_tok = self.e_proj(e.unsqueeze(-1))          # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
@@ -329,7 +355,11 @@ class GxE_Transformer(nn.Module):
                                    output_dim=config.n_embd,
                                    hidden_dim=config.n_embd,
                                    n_hidden=config.n_mlp_layer,
-                                   dropout=config.dropout) if e_enc else None
+                                   dropout=config.dropout,
+                                   env_encoder_type=getattr(config, "env_encoder_type", "flat"),
+                                   env_feature_names=getattr(config, "env_feature_names", None),
+                                   stage_n_heads=getattr(config, "stage_n_heads", 4),
+                                   stage_n_layers=getattr(config, "stage_n_layers", 1)) if e_enc else None
         self.ld_encoder = LD_Encoder(input_dim=config.vocab_size,
                                      output_dim=config.n_embd,
                                      num_blocks=config.n_ld_layer,

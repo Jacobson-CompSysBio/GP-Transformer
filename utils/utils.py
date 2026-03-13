@@ -56,6 +56,12 @@ def parse_args():
                    help="Env categorical handling: 'drop' (legacy baseline) or 'onehot' (added feature path).")
     p.add_argument("--env_cat_embeddings", type=str2bool, default=None,
                    help="Deprecated alias: True -> env_categorical_mode=onehot, False -> drop.")
+    p.add_argument("--env_encoder_type", type=str, default="split", choices=["flat", "split"],
+                   help="Environment encoder type: flat MLP ('flat') or separated multi-encoder ('split').")
+    p.add_argument("--stage_n_heads", type=int, default=4,
+                   help="Attention heads for stage transformer in split env encoder.")
+    p.add_argument("--stage_n_layers", type=int, default=1,
+                   help="Encoder layers for stage transformer in split env encoder.")
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
@@ -169,13 +175,18 @@ def make_run_name(args) -> str:
     else:
         env_cat_mode = "drop"
     envcat = "env1h+" if env_cat_mode == "onehot" else ""
+    env_encoder_raw = _get_arg_env("env_encoder_type", "ENV_ENCODER_TYPE", "flat", str)
+    env_encoder_type = str(env_encoder_raw).strip().lower()
+    if env_encoder_type not in {"flat", "split"}:
+        env_encoder_type = "flat"
+    envenc = "esplit+" if env_encoder_type == "split" else ""
     
     if (not full_transformer) and (args.gxe_enc in ["tf", "mlp", "cnn"]):
         gxe = f"{args.gxe_enc}+"
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat + envenc).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

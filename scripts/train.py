@@ -120,12 +120,21 @@ def main():
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
+    env_encoder_type = str(_get_arg_or_env("env_encoder_type", "ENV_ENCODER_TYPE", "split", str)).strip().lower()
+    if env_encoder_type not in {"flat", "split"}:
+        raise ValueError(f"env_encoder_type must be 'flat' or 'split' (got {env_encoder_type})")
+    stage_n_heads = int(_get_arg_or_env("stage_n_heads", "STAGE_N_HEADS", 4, int))
+    stage_n_layers = int(_get_arg_or_env("stage_n_layers", "STAGE_N_LAYERS", 1, int))
     
     if is_main(rank) and leo_val:
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
         print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
+        print(
+            f"[INFO] Env encoder: {env_encoder_type} "
+            f"(stage_n_heads={stage_n_heads}, stage_n_layers={stage_n_layers})"
+        )
 
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
@@ -229,7 +238,11 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    env_encoder_type=env_encoder_type,
+                    env_feature_names=tuple(train_ds.e_cols),
+                    stage_n_heads=stage_n_heads,
+                    stage_n_layers=stage_n_layers)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -435,6 +448,9 @@ def main():
                              "g_input_type": g_input_type,
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                             "env_encoder_type": env_encoder_type,
+                             "stage_n_heads": stage_n_heads,
+                             "stage_n_layers": stage_n_layers,
                              "full_transformer": args.full_transformer,
                              "full_tf_mlp_type": full_tf_mlp_type},
                              allow_val_change=True)
@@ -748,6 +764,10 @@ def main():
                         "full_tf_mlp_type": full_tf_mlp_type,
                         "block_size": config.block_size,
                         "n_env_fts": config.n_env_fts,
+                        "env_encoder_type": config.env_encoder_type,
+                        "env_feature_names": list(train_ds.e_cols),
+                        "stage_n_heads": config.stage_n_heads,
+                        "stage_n_layers": config.stage_n_layers,
                         "g_layers": args.g_layers,
                         "ld_layers": args.ld_layers,
                         "mlp_layers": args.mlp_layers,
