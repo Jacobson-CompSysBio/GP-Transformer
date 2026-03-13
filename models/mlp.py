@@ -190,6 +190,7 @@ class E_Encoder(nn.Module):
         self.env_encoder_type = str(env_encoder_type).strip().lower()
         self.use_split = self.env_encoder_type == "split" and env_feature_names is not None
         self.activation = activation
+        self.num_output_tokens = 1
 
         if not self.use_split:
             self._build_flat(
@@ -291,6 +292,7 @@ class E_Encoder(nn.Module):
         n_branches += 1 if self.layered_proj is not None else 0
         n_branches += 1 if self.other_tower is not None else 0
         self.n_branches = n_branches
+        self.num_output_tokens = max(1, self.n_branches)
 
         if self.n_branches > 1:
             self.fuse_gate = nn.Linear(branch_dim * self.n_branches, self.n_branches)
@@ -338,7 +340,7 @@ class E_Encoder(nn.Module):
         x = self.output_ln(x)
         return x
 
-    def _forward_split(self, x):
+    def _forward_split(self, x, return_tokens: bool = False):
         branch_reprs = []
 
         if self.static_tower is not None and self.idx_static.numel() > 0:
@@ -398,7 +400,19 @@ class E_Encoder(nn.Module):
             branch_reprs.append(self.other_tower(x.index_select(1, self.idx_other)))
 
         if not branch_reprs:
-            return self._forward_flat(x)
+            out = self._forward_flat(x)
+            if return_tokens:
+                return out.unsqueeze(1)
+            return out
+
+        # Multi-token path: one env token per active branch.
+        if return_tokens:
+            branch_tokens = []
+            for br in branch_reprs:
+                tok = self.final_activation(self.final_layer(br))
+                tok = self.output_ln(tok)
+                branch_tokens.append(tok)
+            return torch.stack(branch_tokens, dim=1)
 
         if len(branch_reprs) == 1:
             fused = branch_reprs[0]
@@ -412,7 +426,10 @@ class E_Encoder(nn.Module):
         out = self.output_ln(out)
         return out
 
-    def forward(self, x):
+    def forward(self, x, return_tokens: bool = False):
         if self.use_split:
-            return self._forward_split(x)
-        return self._forward_flat(x)
+            return self._forward_split(x, return_tokens=return_tokens)
+        out = self._forward_flat(x)
+        if return_tokens:
+            return out.unsqueeze(1)
+        return out

@@ -55,7 +55,7 @@ class FullTransformer(nn.Module):
             self.g_scalar_proj = nn.Linear(1, config.n_embd)
         # Environmental path:
         # - legacy: scalar projection per env feature (one token per feature)
-        # - split: separated E encoder (one pooled env token)
+        # - split: separated E encoder (one token per active env branch)
         env_encoder_type = str(getattr(config, "env_encoder_type", "flat")).strip().lower()
         env_feature_names = getattr(config, "env_feature_names", None)
         self.use_split_env = (env_encoder_type == "split") and (env_feature_names is not None)
@@ -72,7 +72,7 @@ class FullTransformer(nn.Module):
                 stage_n_layers=getattr(config, "stage_n_layers", 1),
             )
             self.e_proj = None
-            self.env_token_count = 1
+            self.env_token_count = int(getattr(self.e_split_encoder, "num_output_tokens", 1))
         else:
             # project each scalar env feature to a token embedding
             self.e_proj = nn.Linear(1, config.n_embd)
@@ -137,7 +137,7 @@ class FullTransformer(nn.Module):
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
         if self.e_split_encoder is not None:
-            e_tok = self.e_split_encoder(e).unsqueeze(1)  # (B, 1, C)
+            e_tok = self.e_split_encoder(e, return_tokens=True)  # (B, K_env, C)
         else:
             e_tok = self.e_proj(e.unsqueeze(-1))          # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
