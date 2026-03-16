@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J longtest
 #SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -t 12:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -80,7 +80,7 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
-export LEO_VAL_FRACTION=0.10
+export LEO_VAL_FRACTION=0.15
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
