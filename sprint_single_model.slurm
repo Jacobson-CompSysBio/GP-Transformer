@@ -15,7 +15,7 @@
 #SBATCH -A SYB114
 #SBATCH -J sprint1
 #SBATCH -N 4
-#SBATCH -t 04:00:00
+#SBATCH -t 02:00:00
 #SBATCH -p batch
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
