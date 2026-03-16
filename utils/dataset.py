@@ -96,6 +96,18 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
+
+def _extract_hybrid_name_from_id(sample_id: str) -> str:
+    sample_id = str(sample_id)
+    return sample_id.split("-", 1)[1] if "-" in sample_id else sample_id
+
+
+def _split_hybrid_parts(hybrid: pd.Series) -> tuple[pd.Series, pd.Series]:
+    parts = hybrid.astype(str).str.split("/", n=1, expand=True)
+    parent1 = parts[0].fillna("").astype(str).str.strip()
+    parent2 = parts[1].fillna("").astype(str).str.strip() if parts.shape[1] > 1 else pd.Series("", index=hybrid.index)
+    return parent1, parent2
+
 # ----------------------------------------------------------------
 # LEO (Leave-Environment-Out) validation split helper
 def compute_leo_val_envs(
@@ -128,6 +140,100 @@ def compute_leo_val_envs(
     return val_envs
 
 
+def summarize_proxy_same_tester_holdout(
+    x_raw: pd.DataFrame,
+    holdout_parent1s: set[str],
+    proxy_tester: str,
+    test_year: int = 2024,
+) -> Dict[str, object]:
+    x = x_raw.copy()
+    if "Year" not in x.columns:
+        x["Year"] = x["Env"].astype(str).apply(_env_year_from_str)
+    if "Hybrid" not in x.columns:
+        x["Hybrid"] = x["id"].astype(str).apply(_extract_hybrid_name_from_id)
+    if "parent1" not in x.columns or "parent2" not in x.columns:
+        x["parent1"], x["parent2"] = _split_hybrid_parts(x["Hybrid"])
+
+    pre_test = x[x["Year"] < test_year].copy()
+    holdout = pre_test[
+        (pre_test["parent2"] == proxy_tester) &
+        (pre_test["parent1"].isin(holdout_parent1s))
+    ].copy()
+    other_tester_parent1s = set(pre_test.loc[pre_test["parent2"] != proxy_tester, "parent1"].astype(str))
+    holdout_parent1_unique = sorted(set(holdout["parent1"].astype(str)))
+    other_support = sum(p in other_tester_parent1s for p in holdout_parent1_unique)
+
+    year_counts = {
+        str(int(year)): int(count)
+        for year, count in holdout.groupby("Year")["id"].size().items()
+    }
+    hybrid_year_counts = {
+        str(int(year)): int(count)
+        for year, count in holdout.groupby("Year")["Hybrid"].nunique().items()
+    }
+
+    return {
+        "proxy_tester": proxy_tester,
+        "proxy_row_count": int(len(holdout)),
+        "proxy_hybrid_count": int(holdout["Hybrid"].nunique()),
+        "proxy_env_count": int(holdout["Env"].nunique()),
+        "proxy_parent1_count": int(len(holdout_parent1_unique)),
+        "proxy_year_counts": year_counts,
+        "proxy_year_hybrid_counts": hybrid_year_counts,
+        "proxy_parent1_other_tester_support_frac": (
+            float(other_support / len(holdout_parent1_unique)) if holdout_parent1_unique else 0.0
+        ),
+    }
+
+
+def compute_proxy_same_tester_holdout(
+    x_raw: pd.DataFrame,
+    proxy_tester: str = "PHP02",
+    holdout_frac: float = 0.25,
+    seed: int = 1,
+    test_year: int = 2024,
+) -> tuple[set[str], Dict[str, object]]:
+    if not (0.0 < holdout_frac < 1.0):
+        raise ValueError(f"proxy holdout fraction must be in (0, 1), got {holdout_frac}")
+
+    x = x_raw.copy()
+    if "Year" not in x.columns:
+        x["Year"] = x["Env"].astype(str).apply(_env_year_from_str)
+    x = x[x["Year"] < test_year].copy()
+    x["Hybrid"] = x["id"].astype(str).apply(_extract_hybrid_name_from_id)
+    x["parent1"], x["parent2"] = _split_hybrid_parts(x["Hybrid"])
+
+    tester_rows = x[x["parent2"] == proxy_tester].copy()
+    if tester_rows.empty:
+        raise ValueError(f"No pre-{test_year} rows found for proxy tester '{proxy_tester}'")
+
+    group_year = tester_rows.groupby("parent1")["Year"].min().sort_values(kind="stable")
+    if group_year.empty:
+        raise ValueError(f"No proxy parent1 groups found for tester '{proxy_tester}'")
+
+    rng = np.random.default_rng(seed)
+    holdout_parent1s: set[str] = set()
+    for year, group in group_year.groupby(group_year):
+        parent1s = group.index.to_numpy()
+        n_holdout = max(1, int(round(len(parent1s) * holdout_frac)))
+        picked = rng.choice(parent1s, size=min(n_holdout, len(parent1s)), replace=False)
+        holdout_parent1s.update(str(p) for p in picked.tolist())
+
+    diagnostics = summarize_proxy_same_tester_holdout(
+        x_raw=x,
+        holdout_parent1s=holdout_parent1s,
+        proxy_tester=proxy_tester,
+        test_year=test_year,
+    )
+    diagnostics["proxy_holdout_frac"] = float(holdout_frac)
+    diagnostics["proxy_seed"] = int(seed)
+    diagnostics["proxy_group_years"] = {
+        str(int(year)): int(count)
+        for year, count in group_year.groupby(group_year).size().items()
+    }
+    return holdout_parent1s, diagnostics
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
@@ -147,6 +253,11 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 val_scheme: str = "year",
+                 proxy_tester: str = "PHP02",
+                 proxy_holdout_frac: float = 0.25,
+                 proxy_seed: int = 1,
+                 proxy_val_parent1s: Optional[set[str]] = None,
                  ):
         
         """
@@ -166,12 +277,27 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            val_scheme (str): one of ['year', 'leo', 'proxy_same_tester']
+            proxy_tester (str): tester used for proxy_same_tester validation
+            proxy_holdout_frac (float): fraction of proxy tester parent1 groups held out
+            proxy_seed (int): deterministic seed for proxy_same_tester group sampling
+            proxy_val_parent1s (Optional[set[str]]): pre-computed held-out parent1 groups from train split
         """
         super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
         self.leo_val = leo_val
+        self.val_scheme = str(val_scheme).strip().lower()
+        if self.leo_val and self.val_scheme == "year":
+            self.val_scheme = "leo"
+        if self.val_scheme not in {"year", "leo", "proxy_same_tester"}:
+            raise ValueError(f"Unsupported val_scheme='{val_scheme}'")
+        self.proxy_tester = str(proxy_tester).strip()
+        self.proxy_holdout_frac = float(proxy_holdout_frac)
+        self.proxy_seed = int(proxy_seed)
+        self.proxy_val_parent1s = set(proxy_val_parent1s) if proxy_val_parent1s is not None else None
+        self.proxy_info: Optional[Dict[str, object]] = None
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
@@ -217,10 +343,12 @@ class GxE_Dataset(Dataset):
 
         # derive Year from Env
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
+        x_raw['Hybrid'] = x_raw['id'].astype(str).apply(_extract_hybrid_name_from_id)
+        x_raw['parent1'], x_raw['parent2'] = _split_hybrid_parts(x_raw['Hybrid'])
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
         # LEO validation: hold out entire environments (not years)
-        if leo_val and split in ("train", "val"):
+        if self.val_scheme == "leo" and split in ("train", "val"):
             # Compute or use provided LEO val environments
             if leo_val_envs is None:
                 # First call (train split) - compute the held-out environments
@@ -239,6 +367,34 @@ class GxE_Dataset(Dataset):
             else:  # val
                 # Val: only the held-out environments (from any year < 2024)
                 keep_mask = pre_test_mask & env_in_val
+        elif self.val_scheme == "proxy_same_tester" and split in ("train", "val"):
+            self.leo_val_envs = None
+            if self.proxy_val_parent1s is None:
+                holdout_parent1s, self.proxy_info = compute_proxy_same_tester_holdout(
+                    x_raw,
+                    proxy_tester=self.proxy_tester,
+                    holdout_frac=self.proxy_holdout_frac,
+                    seed=self.proxy_seed,
+                    test_year=2024,
+                )
+                self.proxy_val_parent1s = holdout_parent1s
+            else:
+                self.proxy_info = summarize_proxy_same_tester_holdout(
+                    x_raw=x_raw,
+                    holdout_parent1s=self.proxy_val_parent1s,
+                    proxy_tester=self.proxy_tester,
+                    test_year=2024,
+                )
+
+            pre_test_mask = x_raw['Year'] < 2024
+            in_proxy_val = (
+                (x_raw['parent2'] == self.proxy_tester) &
+                (x_raw['parent1'].isin(self.proxy_val_parent1s))
+            )
+            if split == "train":
+                keep_mask = pre_test_mask & ~in_proxy_val
+            else:
+                keep_mask = pre_test_mask & in_proxy_val
         else:
             self.leo_val_envs = None
             if split == "train":
@@ -260,7 +416,7 @@ class GxE_Dataset(Dataset):
                              "Ensue X_* and y_* have identical row order.")
 
         # separate metadata
-        self.meta = x_filt[['id', 'Env', 'Year']].copy()
+        self.meta = x_filt[['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2']].copy()
 
         ### CATEGORICAL ENV MAPPING FOR ENVWISE LOSSES ###
         # use *only* filtered envs so codes match indices
@@ -270,15 +426,16 @@ class GxE_Dataset(Dataset):
         ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
         # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
         # Falls back to full id if no "-" separator is present
-        hybrid_names = self.meta['id'].astype(str).apply(
-            lambda x: x.split('-', 1)[1] if '-' in x else x
-        )
+        hybrid_names = self.meta['Hybrid'].astype(str)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
 
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
-        feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
+        feature_df = x_filt.drop(
+            columns=['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2', 'Yield_Mg_ha'],
+            errors='ignore',
+        )
 
         # sanity
         if feature_df.shape[1] < N_ENV:

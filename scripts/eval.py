@@ -293,6 +293,9 @@ def load_model(device: torch.device,
     )
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
+    residual_mode = config.get("residual_mode", getattr(args, "residual_mode", "additive"))
+    residual_head_type = config.get("residual_head_type", getattr(args, "residual_head_type", "linear"))
+    bilinear_rank = config.get("bilinear_rank", getattr(args, "bilinear_rank", 32))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
     if isinstance(full_tf_mlp_type, str):
@@ -323,6 +326,9 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
+    config.residual_mode = residual_mode
+    config.residual_head_type = residual_head_type
+    config.bilinear_rank = bilinear_rank
     if full_transformer:
         if residual:
             model = FullTransformerResidual(

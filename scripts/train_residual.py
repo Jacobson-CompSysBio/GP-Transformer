@@ -99,6 +99,82 @@ def _move_to_device(obj, device):
         return {k: _move_to_device(v, device) for k, v in obj.items()}
     return obj
 
+
+def _set_module_trainable(module, trainable: bool):
+    if module is None:
+        return
+    for param in module.parameters():
+        param.requires_grad = trainable
+
+
+def _configure_trainable_parameters(model: torch.nn.Module, args):
+    for param in model.parameters():
+        param.requires_grad = True
+
+    head_attrs = ("ymean_head", "scale_head", "g_bilinear_proj", "e_bilinear_proj")
+    rank_head_attrs = ("head", "final_layer", "g_bilinear_proj", "e_bilinear_proj")
+
+    def _unfreeze_heads(include_rank: bool):
+        for attr in head_attrs:
+            _set_module_trainable(getattr(model, attr, None), True)
+        if include_rank:
+            for attr in rank_head_attrs:
+                _set_module_trainable(getattr(model, attr, None), True)
+
+    if getattr(args, "unfreeze_last_block_only", False):
+        for param in model.parameters():
+            param.requires_grad = False
+        _unfreeze_heads(include_rank=not getattr(args, "freeze_rank_head", False))
+        if hasattr(model, "blocks") and len(getattr(model, "blocks", [])) > 0:
+            _set_module_trainable(model.blocks[-1], True)
+        if hasattr(model, "ln_f"):
+            _set_module_trainable(model.ln_f, True)
+        if hasattr(model, "hidden_layers") and len(getattr(model, "hidden_layers", [])) > 0:
+            _set_module_trainable(model.hidden_layers[-1], True)
+    elif getattr(args, "freeze_backbone", False):
+        for param in model.parameters():
+            param.requires_grad = False
+        _unfreeze_heads(include_rank=not getattr(args, "freeze_rank_head", False))
+    elif getattr(args, "freeze_rank_head", False):
+        for attr in rank_head_attrs:
+            _set_module_trainable(getattr(model, attr, None), False)
+
+
+def _build_optimizer(model: DDP, args):
+    head_tokens = ("ymean_head", "scale_head", "head", "final_layer", "g_bilinear_proj", "e_bilinear_proj")
+    head_lr = float(args.head_lr if args.head_lr is not None else args.lr)
+    backbone_lr = float(args.backbone_lr if args.backbone_lr is not None else args.lr)
+
+    head_params = []
+    backbone_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        clean_name = name.replace("module.", "", 1)
+        if any(tok in clean_name for tok in head_tokens):
+            head_params.append(param)
+        else:
+            backbone_params.append(param)
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({
+            "params": backbone_params,
+            "lr": backbone_lr,
+            "lr_scale": backbone_lr / float(args.lr),
+            "weight_decay": args.weight_decay,
+        })
+    if head_params:
+        param_groups.append({
+            "params": head_params,
+            "lr": head_lr,
+            "lr_scale": head_lr / float(args.lr),
+            "weight_decay": args.weight_decay,
+        })
+    if not param_groups:
+        raise RuntimeError("No trainable parameters found after applying freeze configuration.")
+    return torch.optim.AdamW(param_groups)
+
 ### main ###
 def main():
     # setup
@@ -123,14 +199,26 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    val_scheme = str(_get_arg_or_env("val_scheme", "VAL_SCHEME", "year", str)).strip().lower()
+    if leo_val and val_scheme == "year":
+        val_scheme = "leo"
+    proxy_tester = str(_get_arg_or_env("proxy_tester", "PROXY_TESTER", "PHP02", str)).strip()
+    proxy_holdout_frac = _get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", 0.25, float)
+    proxy_seed = _get_arg_or_env("proxy_seed", "PROXY_SEED", 1, int)
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
     
-    if is_main(rank) and leo_val:
-        print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
-        print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank):
+        print(f"[INFO] Validation scheme: {val_scheme}")
+        if val_scheme == "leo":
+            print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+        elif val_scheme == "proxy_same_tester":
+            print(
+                f"[INFO] Proxy validation: tester={proxy_tester}, "
+                f"holdout_frac={proxy_holdout_frac:.2f}, seed={proxy_seed}"
+            )
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -148,15 +236,22 @@ def main():
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
+    proxy_val_parent1s = train_ds.proxy_val_parent1s
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
         print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+    if is_main(rank) and val_scheme == "proxy_same_tester" and train_ds.proxy_info:
+        print(f"[INFO] Proxy diagnostics: {json.dumps(train_ds.proxy_info, sort_keys=True)}")
     
     val_ds = GxE_Dataset(
         split="val",
@@ -170,10 +265,19 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
+        proxy_val_parent1s=proxy_val_parent1s,
     )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
+    if is_main(rank) and val_scheme == "proxy_same_tester" and val_ds.proxy_info:
+        print(f"[INFO] Proxy val rows: {val_ds.proxy_info['proxy_row_count']}, "
+              f"hybrids: {val_ds.proxy_info['proxy_hybrid_count']}, "
+              f"envs: {val_ds.proxy_info['proxy_env_count']}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
@@ -183,9 +287,10 @@ def main():
     min_samples_per_env = _get_arg_or_env("min_samples_per_env", "MIN_SAMPLES_PER_ENV", 32, int)
     use_batch_sampler = False
     
-    if env_stratified and "envpcc" in args.loss.lower():
+    uses_envwise_rank_loss = any(term in args.loss.lower() for term in ("envpcc", "envccc"))
+    if env_stratified and uses_envwise_rank_loss:
         if is_main(rank):
-            print(f"[INFO] Using environment-stratified sampling for envpcc loss")
+            print(f"[INFO] Using environment-stratified sampling for env-wise loss")
             print(f"[INFO] min_samples_per_env = {min_samples_per_env}")
         train_sampler = EnvStratifiedSampler(
             env_ids=train_ds.env_id_tensor.tolist(),
@@ -236,6 +341,9 @@ def main():
                     n_embd=args.emb_size,
                     dropout=args.dropout,
                     n_env_fts=train_ds.n_env_fts)
+    config.residual_mode = str(getattr(args, "residual_mode", "additive")).lower()
+    config.residual_head_type = str(getattr(args, "residual_head_type", "linear")).lower()
+    config.bilinear_rank = int(getattr(args, "bilinear_rank", 32))
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -265,8 +373,8 @@ def main():
                 moe_expert_hidden_dim=moe_expert_hidden_dim,
                 moe_shared_expert=moe_shared_expert,
                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
-                moe_loss_weight=moe_loss_weight,
-                residual=args.residual,
+                                moe_loss_weight=moe_loss_weight,
+                                residual=args.residual,
             ).to(device)
             model.detach_ymean_in_sum = args.detach_ymean
         else:
@@ -310,6 +418,22 @@ def main():
                                 moe_shared_expert_hidden_dim=moe_shared_expert_hidden_dim,
                                 moe_loss_weight=moe_loss_weight,
                                 config=config).to(device)
+    resume_checkpoint = _get_arg_or_env("resume_checkpoint", "RESUME_CHECKPOINT", None, str)
+    if resume_checkpoint:
+        resume_path = Path(resume_checkpoint)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        payload = torch.load(resume_path, map_location="cpu")
+        state = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if is_main(rank):
+            print(f"[INFO] Warm-started model from {resume_path}")
+            if missing:
+                print(f"[INFO] Missing keys on resume: {missing}")
+            if unexpected:
+                print(f"[INFO] Unexpected keys on resume: {unexpected}")
+
+    _configure_trainable_parameters(model, args)
     if is_main(rank):
         model.print_trainable_parameters()
     # Residual models have multiple output heads (ymean_head, head) and auxiliary losses
@@ -327,7 +451,7 @@ def main():
                 output_device=local_rank,
                 find_unused_parameters=find_unused)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = _build_optimizer(model, args)
     loss_function = build_loss(args.loss, args.loss_weights)
 
     # contrastive objectives (ablation mode: none, g, e, g+e)
@@ -446,10 +570,24 @@ def main():
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
                              "selection_metric": "val/env_avg_pearson",
+                             "val_scheme": val_scheme,
+                             "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
+                             "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
+                             "proxy_seed": proxy_seed if val_scheme == "proxy_same_tester" else None,
+                             "proxy_info": train_ds.proxy_info if val_scheme == "proxy_same_tester" else None,
                              "residual": args.residual,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
                              "lambda_resid": args.lambda_resid,
+                             "residual_mode": args.residual_mode,
+                             "residual_head_type": args.residual_head_type,
+                             "bilinear_rank": args.bilinear_rank,
+                             "resume_checkpoint": resume_checkpoint,
+                             "freeze_backbone": args.freeze_backbone,
+                             "freeze_rank_head": args.freeze_rank_head,
+                             "unfreeze_last_block_only": args.unfreeze_last_block_only,
+                             "backbone_lr": args.backbone_lr,
+                             "head_lr": args.head_lr,
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
                              "g_layers": args.g_layers,
@@ -639,7 +777,7 @@ def main():
                         max_lr,
                         min_lr)
             for pg in optimizer.param_groups:
-                pg['lr'] = lr
+                pg['lr'] = lr * float(pg.get("lr_scale", 1.0))
 
             # double check that ddp accumulates gradients 
             loss.backward()
@@ -870,8 +1008,15 @@ def main():
                         "lambda_ymean": args.lambda_ymean,
                         "lambda_resid": args.lambda_resid,
                         "detach_ymean": args.detach_ymean,
+                        "residual_mode": args.residual_mode,
+                        "residual_head_type": args.residual_head_type,
+                        "bilinear_rank": args.bilinear_rank,
                         "full_transformer": args.full_transformer,
                         "scale_targets": args.scale_targets,
+                        "val_scheme": val_scheme,
+                        "proxy_tester": proxy_tester,
+                        "proxy_holdout_frac": proxy_holdout_frac,
+                        "proxy_seed": proxy_seed,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,

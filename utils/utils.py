@@ -60,6 +60,14 @@ def parse_args():
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
     p.add_argument("--lambda_resid", type=float, default=1.0)
+    p.add_argument("--residual_mode", type=str, default="additive",
+                   choices=["additive", "affine"],
+                   help="Residual composition mode for residual models.")
+    p.add_argument("--residual_head_type", type=str, default="linear",
+                   choices=["linear", "bilinear"],
+                   help="Residual prediction head type for residual models.")
+    p.add_argument("--bilinear_rank", type=int, default=32,
+                   help="Rank for bilinear residual heads.")
 
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--gbs", type=int, default=2048)
@@ -107,6 +115,27 @@ def parse_args():
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--val_scheme", type=str, default="year",
+                   choices=["year", "leo", "proxy_same_tester"],
+                   help="Validation split scheme.")
+    p.add_argument("--proxy_tester", type=str, default="PHP02",
+                   help="Tester line used for proxy_same_tester validation.")
+    p.add_argument("--proxy_holdout_frac", type=float, default=0.25,
+                   help="Fraction of proxy tester parent1 groups to hold out for validation.")
+    p.add_argument("--proxy_seed", type=int, default=1,
+                   help="Seed for grouped proxy validation sampling.")
+    p.add_argument("--resume_checkpoint", type=str, default=None,
+                   help="Optional checkpoint path to warm-start model weights from.")
+    p.add_argument("--freeze_backbone", type=str2bool, default=False,
+                   help="Freeze backbone parameters and train only heads.")
+    p.add_argument("--freeze_rank_head", type=str2bool, default=False,
+                   help="Freeze residual/ranking head parameters; useful for calibration-only stages.")
+    p.add_argument("--unfreeze_last_block_only", type=str2bool, default=False,
+                   help="Freeze backbone except the last transformer block and normalization.")
+    p.add_argument("--backbone_lr", type=float, default=None,
+                   help="Learning rate for unfrozen backbone parameters; defaults to --lr.")
+    p.add_argument("--head_lr", type=float, default=None,
+                   help="Learning rate for head parameters; defaults to --lr.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
@@ -140,7 +169,15 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
-    leo = "leo+" if getattr(args, "leo_val", False) else ""
+    leo = "leo+" if getattr(args, "leo_val", False) and str(getattr(args, "val_scheme", "year")).lower() == "year" else ""
+    val_scheme = str(getattr(args, "val_scheme", "year")).lower()
+    if val_scheme == "proxy_same_tester":
+        proxy_tester = str(getattr(args, "proxy_tester", "PHP02")).strip().lower()
+        valtag = f"proxy{proxy_tester}+"
+    elif val_scheme == "leo":
+        valtag = "leo+"
+    else:
+        valtag = ""
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -175,7 +212,17 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    resmode = ""
+    if getattr(args, "residual", False):
+        residual_mode = str(getattr(args, "residual_mode", "additive")).lower()
+        residual_head_type = str(getattr(args, "residual_head_type", "linear")).lower()
+        bilinear_rank = int(getattr(args, "bilinear_rank", 32))
+        if residual_mode == "affine":
+            resmode += "affine+"
+        if residual_head_type == "bilinear":
+            resmode += f"bil{bilinear_rank}+"
+
+    model_type = (full + g + e + ld + gxe + wg + res + resmode + strat + valtag + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

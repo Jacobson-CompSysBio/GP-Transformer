@@ -221,6 +221,59 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     return 1.0 - r_bar
 
 
+def envwise_ccc(pred, target, env_id, eps: float = 1e-8, min_samples: int = 4):
+    """
+    Macro-averaged Lin's concordance correlation coefficient across environments.
+    This combines correlation, location bias, and scale mismatch in a single term.
+    """
+    pred = pred.squeeze(-1).float()
+    target = target.squeeze(-1).float()
+    device = pred.device
+    env_id = env_id.to(device)
+
+    max_env = int(env_id.max().item()) + 1
+
+    def _accumulate(vec: torch.Tensor) -> torch.Tensor:
+        buf = vec.new_zeros(max_env)
+        return buf.scatter_add(0, env_id, vec)
+
+    ones = torch.ones_like(pred)
+    count = _accumulate(ones)
+    sx = _accumulate(pred)
+    sy = _accumulate(target)
+    sxx = _accumulate(pred ** 2)
+    syy = _accumulate(target ** 2)
+    sxy = _accumulate(pred * target)
+
+    n = count.clamp_min(1.0)
+    mean_x = sx / n
+    mean_y = sy / n
+    ex2 = sxx / n
+    ey2 = syy / n
+    exy = sxy / n
+    var_x = (ex2 - mean_x ** 2).clamp_min(0.0)
+    var_y = (ey2 - mean_y ** 2).clamp_min(0.0)
+    cov = exy - mean_x * mean_y
+
+    ccc = (2.0 * cov) / (var_x + var_y + (mean_x - mean_y) ** 2 + eps)
+    ccc = ccc.clamp(-1.0, 1.0)
+
+    valid = (count >= min_samples) & torch.isfinite(ccc)
+    if not valid.any():
+        # fallback to global CCC
+        mean_pred = pred.mean()
+        mean_target = target.mean()
+        var_pred = ((pred - mean_pred) ** 2).mean()
+        var_target = ((target - mean_target) ** 2).mean()
+        cov_global = ((pred - mean_pred) * (target - mean_target)).mean()
+        ccc_global = (2.0 * cov_global) / (var_pred + var_target + (mean_pred - mean_target) ** 2 + eps)
+        if not torch.isfinite(ccc_global):
+            return (pred.sum() * 0.0) + 1.0
+        return 1.0 - ccc_global.clamp(-1.0, 1.0)
+
+    return 1.0 - ccc[valid].mean()
+
+
 ### other losses ### 
 def torch_spearmanr(pred: torch.Tensor,
                     target: torch.Tensor,
@@ -907,6 +960,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
         if term == "envpcc":
             return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
+        if term == "envccc":
+            return term, _CallableLoss(envwise_ccc, expects_env=True, name=term)
         if term == "envspearman":
             return term, _CallableLoss(envwise_spearman, expects_env=True, name=term)
         if term == "ktau":

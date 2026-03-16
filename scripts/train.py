@@ -116,14 +116,26 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    val_scheme = str(_get_arg_or_env("val_scheme", "VAL_SCHEME", "year", str)).strip().lower()
+    if leo_val and val_scheme == "year":
+        val_scheme = "leo"
+    proxy_tester = str(_get_arg_or_env("proxy_tester", "PROXY_TESTER", "PHP02", str)).strip()
+    proxy_holdout_frac = _get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", 0.25, float)
+    proxy_seed = _get_arg_or_env("proxy_seed", "PROXY_SEED", 1, int)
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
     
-    if is_main(rank) and leo_val:
-        print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
-        print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank):
+        print(f"[INFO] Validation scheme: {val_scheme}")
+        if val_scheme == "leo":
+            print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+        elif val_scheme == "proxy_same_tester":
+            print(
+                f"[INFO] Proxy validation: tester={proxy_tester}, "
+                f"holdout_frac={proxy_holdout_frac:.2f}, seed={proxy_seed}"
+            )
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
@@ -140,15 +152,22 @@ def main():
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
+    proxy_val_parent1s = train_ds.proxy_val_parent1s
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
         print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+    if is_main(rank) and val_scheme == "proxy_same_tester" and train_ds.proxy_info:
+        print(f"[INFO] Proxy diagnostics: {json.dumps(train_ds.proxy_info, sort_keys=True)}")
     
     val_ds = GxE_Dataset(
         split="val",
@@ -161,10 +180,19 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
+        proxy_val_parent1s=proxy_val_parent1s,
     )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
+    if is_main(rank) and val_scheme == "proxy_same_tester" and val_ds.proxy_info:
+        print(f"[INFO] Proxy val rows: {val_ds.proxy_info['proxy_row_count']}, "
+              f"hybrids: {val_ds.proxy_info['proxy_hybrid_count']}, "
+              f"envs: {val_ds.proxy_info['proxy_env_count']}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
     val_sampler = DistributedSampler(val_ds, shuffle=False)
@@ -174,9 +202,10 @@ def main():
     min_samples_per_env = _get_arg_or_env("min_samples_per_env", "MIN_SAMPLES_PER_ENV", 32, int)
     use_batch_sampler = False
     
-    if env_stratified and "envpcc" in args.loss.lower():
+    uses_envwise_rank_loss = any(term in args.loss.lower() for term in ("envpcc", "envccc"))
+    if env_stratified and uses_envwise_rank_loss:
         if is_main(rank):
-            print(f"[INFO] Using environment-stratified sampling for envpcc loss")
+            print(f"[INFO] Using environment-stratified sampling for env-wise loss")
             print(f"[INFO] min_samples_per_env = {min_samples_per_env}")
         train_sampler = EnvStratifiedSampler(
             env_ids=train_ds.env_id_tensor.tolist(),
@@ -404,6 +433,11 @@ def main():
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
                              "selection_metric": "val_loss/env_avg_pearson",
+                             "val_scheme": val_scheme,
+                             "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
+                             "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
+                             "proxy_seed": proxy_seed if val_scheme == "proxy_same_tester" else None,
+                             "proxy_info": train_ds.proxy_info if val_scheme == "proxy_same_tester" else None,
                              "n_embd": args.emb_size,
                              "gxe_layers": args.gxe_layers,
                              "g_layers": args.g_layers,
@@ -766,6 +800,10 @@ def main():
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "val_scheme": val_scheme,
+                        "proxy_tester": proxy_tester,
+                        "proxy_holdout_frac": proxy_holdout_frac,
+                        "proxy_seed": proxy_seed,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,

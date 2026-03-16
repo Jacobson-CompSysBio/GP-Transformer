@@ -207,7 +207,23 @@ class FullTransformerResidual(FullTransformer):
         )
         self.residual = residual
         self.detach_ymean_in_sum = False
+        self.residual_mode = str(getattr(config, "residual_mode", "additive")).lower()
+        self.residual_head_type = str(getattr(config, "residual_head_type", "linear")).lower()
+        self.bilinear_rank = int(getattr(config, "bilinear_rank", 32))
         self.ymean_head = nn.Linear(config.n_embd, 1)
+        self.scale_head = nn.Linear(config.n_embd, 1)
+        nn.init.zeros_(self.scale_head.weight)
+        nn.init.constant_(self.scale_head.bias, float(math.log(math.expm1(1.0))))
+        if self.residual_head_type == "bilinear":
+            self.g_bilinear_proj = nn.Linear(config.n_embd, self.bilinear_rank)
+            self.e_bilinear_proj = nn.Linear(config.n_embd, self.bilinear_rank)
+            nn.init.normal_(self.g_bilinear_proj.weight, std=0.02)
+            nn.init.zeros_(self.g_bilinear_proj.bias)
+            nn.init.normal_(self.e_bilinear_proj.weight, std=0.02)
+            nn.init.zeros_(self.e_bilinear_proj.bias)
+        else:
+            self.g_bilinear_proj = None
+            self.e_bilinear_proj = None
         
         # Projection head for contrastive learning (like SimCLR)
         self.g_contrast_proj = nn.Sequential(
@@ -226,19 +242,29 @@ class FullTransformerResidual(FullTransformer):
 
         # IMPORTANT: Encode FIRST, then extract features from encoded tokens
         tokens = self._encode_tokens(tokens)
-        resid_pred = self.head(tokens[:, 0])
+        cls_repr = tokens[:, 0]
+        resid_pred = self.head(cls_repr)
 
         # Compute ymean from ENCODED env tokens (not raw projections!)
         ymean_pred = None
         env_repr = None
+        scale_raw = None
         if env_start < tokens.size(1):
             env_tokens = tokens[:, env_start:, :]  # Now these are encoded
             env_repr = env_tokens.mean(dim=1)
             ymean_pred = self.ymean_head(env_repr)
+            scale_raw = self.scale_head(env_repr)
 
         if ymean_pred is None:
             ymean_pred = torch.zeros_like(resid_pred)
-        
+        if scale_raw is None:
+            scale_raw = torch.full_like(resid_pred, float(math.log(math.expm1(1.0))))
+
+        if self.residual_head_type == "bilinear" and env_repr is not None:
+            bilinear_term = (self.g_bilinear_proj(cls_repr) * self.e_bilinear_proj(env_repr)).sum(dim=-1, keepdim=True)
+            resid_pred = resid_pred + bilinear_term
+        scale_pred = F.softplus(scale_raw)
+
         # Extract G embeddings for contrastive loss
         g_embed = None
         if return_g_embeddings:
@@ -257,13 +283,20 @@ class FullTransformerResidual(FullTransformer):
                 return resid_pred, e_embed
             return resid_pred
 
-        if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
-            total_pred = ymean_pred.detach() + resid_pred
+        if self.residual_mode == "affine":
+            if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+                total_pred = ymean_pred.detach() + (scale_pred * resid_pred)
+            else:
+                total_pred = ymean_pred + (scale_pred * resid_pred)
         else:
-            total_pred = ymean_pred + resid_pred
+            if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+                total_pred = ymean_pred.detach() + resid_pred
+            else:
+                total_pred = ymean_pred + resid_pred
         result = {'total': total_pred,
                 'ymean': ymean_pred,
                 'resid': resid_pred,
+                'scale': scale_pred,
         }
         if return_g_embeddings and return_e_embeddings:
             return result, g_embed, e_embed
@@ -560,7 +593,25 @@ class GxE_ResidualTransformer(GxE_Transformer):
         )
         self.residual = residual
         # env head to predict per-year mean yield (if residual)
+        self.residual_mode = str(getattr(config, "residual_mode", "additive")).lower()
+        self.residual_head_type = str(getattr(config, "residual_head_type", "linear")).lower()
+        self.bilinear_rank = int(getattr(config, "bilinear_rank", 32))
         self.ymean_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
+        self.scale_head = nn.Linear(config.n_embd, 1) if self.e_encoder is not None else None
+        if self.scale_head is not None:
+            nn.init.zeros_(self.scale_head.weight)
+            nn.init.constant_(self.scale_head.bias, float(math.log(math.expm1(1.0))))
+        if self.residual_head_type == "bilinear":
+            self.g_bilinear_proj = nn.Linear(config.n_embd, self.bilinear_rank)
+            self.e_bilinear_proj = nn.Linear(config.n_embd, self.bilinear_rank) if self.e_encoder is not None else None
+            nn.init.normal_(self.g_bilinear_proj.weight, std=0.02)
+            nn.init.zeros_(self.g_bilinear_proj.bias)
+            if self.e_bilinear_proj is not None:
+                nn.init.normal_(self.e_bilinear_proj.weight, std=0.02)
+                nn.init.zeros_(self.e_bilinear_proj.bias)
+        else:
+            self.g_bilinear_proj = None
+            self.e_bilinear_proj = None
         
         # Projection head for contrastive learning (like SimCLR)
         self.g_contrast_proj = nn.Sequential(
@@ -602,15 +653,34 @@ class GxE_ResidualTransformer(GxE_Transformer):
         # residual mode:
         ymean_pred = self.ymean_head(e_enc) if self.ymean_head is not None else 0
         resid_pred = self.final_layer(self.final_dropout(rep))
+        if (
+            self.residual_head_type == "bilinear"
+            and self.g_bilinear_proj is not None
+            and self.e_bilinear_proj is not None
+            and isinstance(e_enc, torch.Tensor)
+        ):
+            bilinear_term = (self.g_bilinear_proj(rep) * self.e_bilinear_proj(e_enc)).sum(dim=-1, keepdim=True)
+            resid_pred = resid_pred + bilinear_term
+        if self.scale_head is not None and isinstance(e_enc, torch.Tensor):
+            scale_pred = F.softplus(self.scale_head(e_enc))
+        else:
+            scale_pred = torch.ones_like(resid_pred)
 
         # option: detach ymean_pred to prevent env head from learning residual signal
-        if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
-            total_pred = ymean_pred.detach() + resid_pred
+        if self.residual_mode == "affine":
+            if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+                total_pred = ymean_pred.detach() + (scale_pred * resid_pred)
+            else:
+                total_pred = ymean_pred + (scale_pred * resid_pred)
         else:
-            total_pred = ymean_pred + resid_pred
+            if self.detach_ymean_in_sum and isinstance(ymean_pred, torch.Tensor):
+                total_pred = ymean_pred.detach() + resid_pred
+            else:
+                total_pred = ymean_pred + resid_pred
         result = {'total': total_pred,
                 'ymean': ymean_pred,
                 'resid': resid_pred,
+                'scale': scale_pred,
         }
         if return_g_embeddings and return_e_embeddings:
             return result, g_embed, e_embed
