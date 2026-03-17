@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
@@ -96,6 +96,27 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
+
+def extract_hybrid_name(sample_id: str) -> str:
+    """
+    Recover the hybrid identifier from a row id like 'ENV_2020-PARENT1/PARENT2'.
+    """
+    sample_id = str(sample_id)
+    return sample_id.split('-', 1)[1] if '-' in sample_id else sample_id
+
+
+def add_hybrid_parent_columns(x_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add Hybrid / parent1 / parent2 columns parsed from the row id.
+    """
+    out = x_raw.copy()
+    hybrid = out['id'].astype(str).apply(extract_hybrid_name)
+    parents = hybrid.str.split('/', n=1, expand=True)
+    out['Hybrid'] = hybrid
+    out['parent1'] = parents[0].fillna("UNK").astype(str).str.strip()
+    out['parent2'] = parents[1].fillna("UNK").astype(str).str.strip()
+    return out
+
 # ----------------------------------------------------------------
 # LEO (Leave-Environment-Out) validation split helper
 def compute_leo_val_envs(
@@ -128,6 +149,105 @@ def compute_leo_val_envs(
     return val_envs
 
 
+def compute_proxy_parent_holdout(
+    x_raw: pd.DataFrame,
+    test_year: int = 2024,
+    proxy_tester: str = "PHP02",
+    holdout_frac: float = 0.10,
+    seed: int = 1,
+) -> Dict[str, Any]:
+    """
+    Build a deterministic same-tester proxy split.
+
+    Steps:
+    - keep only pre-test rows for the requested tester (parent2)
+    - assign each parent1 group to its dominant year in that proxy pool
+    - sample held-out parent1 groups stratified by those dominant years
+    """
+    rng = np.random.default_rng(seed)
+
+    if 'Year' not in x_raw.columns:
+        raise ValueError("x_raw must contain a 'Year' column before computing proxy split.")
+    if 'parent1' not in x_raw.columns or 'parent2' not in x_raw.columns:
+        x_raw = add_hybrid_parent_columns(x_raw)
+
+    proxy_mask = (x_raw['Year'] < test_year) & (x_raw['parent2'].astype(str) == str(proxy_tester))
+    proxy_pool = x_raw.loc[proxy_mask].copy()
+    if proxy_pool.empty:
+        raise ValueError(f"No proxy rows found for tester='{proxy_tester}' before {test_year}.")
+
+    parent_year_counts = (
+        proxy_pool.groupby(['parent1', 'Year'])
+        .size()
+        .rename("count")
+        .reset_index()
+        .sort_values(['parent1', 'count', 'Year'], ascending=[True, False, False])
+    )
+    dominant_year = parent_year_counts.drop_duplicates('parent1')[['parent1', 'Year']]
+    year_to_parent1 = {
+        int(year): sorted(groups['parent1'].astype(str).tolist())
+        for year, groups in dominant_year.groupby('Year', sort=True)
+    }
+
+    total_groups = int(dominant_year['parent1'].nunique())
+    n_holdout = max(1, int(round(total_groups * float(holdout_frac))))
+    year_counts = {year: len(parent1s) for year, parent1s in year_to_parent1.items()}
+    total_year_groups = max(1, sum(year_counts.values()))
+
+    raw_alloc = {
+        year: (count / total_year_groups) * n_holdout
+        for year, count in year_counts.items()
+    }
+    alloc = {year: min(year_counts[year], int(np.floor(val))) for year, val in raw_alloc.items()}
+    remainder = n_holdout - sum(alloc.values())
+    if remainder > 0:
+        remainders = sorted(
+            ((raw_alloc[year] - alloc[year], year) for year in year_counts.keys()),
+            reverse=True,
+        )
+        for _, year in remainders:
+            if remainder <= 0:
+                break
+            if alloc[year] < year_counts[year]:
+                alloc[year] += 1
+                remainder -= 1
+    if remainder > 0:
+        for year in sorted(year_counts.keys()):
+            if remainder <= 0:
+                break
+            spare = year_counts[year] - alloc[year]
+            take = min(spare, remainder)
+            alloc[year] += take
+            remainder -= take
+
+    heldout_parent1: list[str] = []
+    for year, parent1s in year_to_parent1.items():
+        n_year = alloc.get(year, 0)
+        if n_year <= 0:
+            continue
+        chosen = rng.choice(np.array(parent1s, dtype=object), size=n_year, replace=False)
+        heldout_parent1.extend([str(x) for x in chosen.tolist()])
+    heldout_parent1 = sorted(set(heldout_parent1))
+
+    heldout_mask = proxy_mask & x_raw['parent1'].astype(str).isin(heldout_parent1)
+    proxy_val = x_raw.loc[heldout_mask].copy()
+
+    return {
+        "tester": str(proxy_tester),
+        "holdout_frac": float(holdout_frac),
+        "seed": int(seed),
+        "heldout_parent1": heldout_parent1,
+        "heldout_mask": heldout_mask.to_numpy(dtype=bool),
+        "row_count": int(len(proxy_val)),
+        "hybrid_count": int(proxy_val['Hybrid'].astype(str).nunique()) if 'Hybrid' in proxy_val.columns else 0,
+        "env_count": int(proxy_val['Env'].astype(str).nunique()),
+        "year_distribution": {
+            str(k): int(v)
+            for k, v in proxy_val['Year'].astype(int).value_counts().sort_index().to_dict().items()
+        },
+    }
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
@@ -143,10 +263,15 @@ class GxE_Dataset(Dataset):
                  g_input_type: str = "tokens",
                  env_categorical_mode: str = "drop",
                  marker_stats: Optional[Dict[str, object]] = None,
+                 val_scheme: str = "year",
                  leo_val: bool = False,
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 proxy_tester: str = "PHP02",
+                 proxy_holdout_frac: float = 0.10,
+                 proxy_seed: int = 1,
+                 proxy_split_info: Optional[Dict[str, Any]] = None,
                  ):
         
         """
@@ -162,10 +287,15 @@ class GxE_Dataset(Dataset):
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
             env_categorical_mode (str): "drop" (legacy baseline) or "onehot" categorical env handling
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
+            val_scheme (str): year, leo, proxy_same_tester, or hybrid_combo
             leo_val (bool): if True, use Leave-Environment-Out validation
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            proxy_tester (str): tester parent2 targeted by proxy validation
+            proxy_holdout_frac (float): held-out fraction of unique parent1 groups in proxy validation
+            proxy_seed (int): random seed for proxy held-out parent1 selection
+            proxy_split_info (Optional[Dict[str, Any]]): precomputed proxy split spec from train split
         """
         super().__init__()
         self.split = split
@@ -175,6 +305,11 @@ class GxE_Dataset(Dataset):
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
+        self.val_scheme = normalize_val_scheme(val_scheme, leo_val=leo_val)
+        self.proxy_tester = str(proxy_tester)
+        self.proxy_holdout_frac = float(proxy_holdout_frac)
+        self.proxy_seed = int(proxy_seed)
+        self.proxy_split_info = None
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
@@ -188,6 +323,9 @@ class GxE_Dataset(Dataset):
             x_path = data_path + 'X_train.csv'
             y_path = data_path + 'y_train.csv'
         elif split == 'val':
+            x_path = data_path + 'X_train.csv'
+            y_path = data_path + 'y_train.csv'
+        elif split == 'proxy_val':
             x_path = data_path + 'X_train.csv'
             y_path = data_path + 'y_train.csv'
         elif split == 'test':
@@ -215,30 +353,81 @@ class GxE_Dataset(Dataset):
             else:
                 raise ValueError("X_* file must contain an 'id' column.")
 
+        x_raw = add_hybrid_parent_columns(x_raw)
+
         # derive Year from Env
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
-        # LEO validation: hold out entire environments (not years)
-        if leo_val and split in ("train", "val"):
+        # Hybrid combo validation: LEO env holdout + same-tester proxy holdout.
+        if self.val_scheme == "hybrid_combo" and split in ("train", "val", "proxy_val"):
             # Compute or use provided LEO val environments
             if leo_val_envs is None:
-                # First call (train split) - compute the held-out environments
                 leo_val_envs = compute_leo_val_envs(
                     x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
                 )
             self.leo_val_envs = leo_val_envs
-            
-            # Filter to years before test (2014-2023)
+
+            if proxy_split_info is None:
+                proxy_split_info = compute_proxy_parent_holdout(
+                    x_raw,
+                    test_year=2024,
+                    proxy_tester=self.proxy_tester,
+                    holdout_frac=self.proxy_holdout_frac,
+                    seed=self.proxy_seed,
+                )
+            self.proxy_split_info = proxy_split_info
+
             pre_test_mask = x_raw['Year'] < 2024
             env_in_val = x_raw['Env'].isin(leo_val_envs)
-            
+            proxy_holdout_mask = pd.Series(
+                proxy_split_info["heldout_mask"],
+                index=x_raw.index,
+                dtype=bool,
+            )
+
             if split == "train":
-                # Train: all pre-2024 data EXCEPT held-out environments
-                keep_mask = pre_test_mask & ~env_in_val
-            else:  # val
-                # Val: only the held-out environments (from any year < 2024)
+                keep_mask = pre_test_mask & ~env_in_val & ~proxy_holdout_mask
+            elif split == "val":
                 keep_mask = pre_test_mask & env_in_val
+            else:
+                keep_mask = pre_test_mask & proxy_holdout_mask
+        # LEO validation: hold out entire environments (not years)
+        elif self.val_scheme == "leo" and split in ("train", "val"):
+            if leo_val_envs is None:
+                leo_val_envs = compute_leo_val_envs(
+                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                )
+            self.leo_val_envs = leo_val_envs
+
+            pre_test_mask = x_raw['Year'] < 2024
+            env_in_val = x_raw['Env'].isin(leo_val_envs)
+
+            if split == "train":
+                keep_mask = pre_test_mask & ~env_in_val
+            else:
+                keep_mask = pre_test_mask & env_in_val
+        elif self.val_scheme == "proxy_same_tester" and split in ("train", "val", "proxy_val"):
+            self.leo_val_envs = None
+            if proxy_split_info is None:
+                proxy_split_info = compute_proxy_parent_holdout(
+                    x_raw,
+                    test_year=2024,
+                    proxy_tester=self.proxy_tester,
+                    holdout_frac=self.proxy_holdout_frac,
+                    seed=self.proxy_seed,
+                )
+            self.proxy_split_info = proxy_split_info
+            pre_test_mask = x_raw['Year'] < 2024
+            proxy_holdout_mask = pd.Series(
+                proxy_split_info["heldout_mask"],
+                index=x_raw.index,
+                dtype=bool,
+            )
+            if split == "train":
+                keep_mask = pre_test_mask & ~proxy_holdout_mask
+            else:
+                keep_mask = pre_test_mask & proxy_holdout_mask
         else:
             self.leo_val_envs = None
             if split == "train":
@@ -260,7 +449,7 @@ class GxE_Dataset(Dataset):
                              "Ensue X_* and y_* have identical row order.")
 
         # separate metadata
-        self.meta = x_filt[['id', 'Env', 'Year']].copy()
+        self.meta = x_filt[['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2']].copy()
 
         ### CATEGORICAL ENV MAPPING FOR ENVWISE LOSSES ###
         # use *only* filtered envs so codes match indices
@@ -270,9 +459,7 @@ class GxE_Dataset(Dataset):
         ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
         # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
         # Falls back to full id if no "-" separator is present
-        hybrid_names = self.meta['id'].astype(str).apply(
-            lambda x: x.split('-', 1)[1] if '-' in x else x
-        )
+        hybrid_names = self.meta['Hybrid'].astype(str)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
 

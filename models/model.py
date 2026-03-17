@@ -40,8 +40,13 @@ class FullTransformer(nn.Module):
         self.moe_loss_weight = moe_loss_weight
         self.moe_aux_loss = None
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
+        self.calibration_mode = str(getattr(config, "calibration_mode", "none")).lower()
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
+        if self.calibration_mode not in {"none", "env_affine"}:
+            raise ValueError(
+                f"config.calibration_mode must be 'none' or 'env_affine' (got {self.calibration_mode})"
+            )
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -95,6 +100,16 @@ class FullTransformer(nn.Module):
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+        self.scale_head = None
+        self.shift_head = None
+        self.calibration_eps = 1e-4
+        if self.calibration_mode == "env_affine":
+            self.scale_head = nn.Linear(config.n_embd, 1)
+            self.shift_head = nn.Linear(config.n_embd, 1)
+            nn.init.zeros_(self.scale_head.weight)
+            nn.init.constant_(self.scale_head.bias, math.log(math.expm1(1.0)))
+            nn.init.zeros_(self.shift_head.weight)
+            nn.init.zeros_(self.shift_head.bias)
         
         # Projection head for contrastive learning (like SimCLR)
         # Projects G embeddings to a space good for contrastive learning
@@ -103,6 +118,22 @@ class FullTransformer(nn.Module):
             nn.ReLU(),
             nn.Linear(config.n_embd, config.n_embd // 2),
         )
+
+    def _pool_env_repr(self, tokens, env_start):
+        if env_start < tokens.size(1):
+            env_tokens = tokens[:, env_start:, :]
+            return env_tokens.mean(dim=1)
+        return torch.zeros_like(tokens[:, 0])
+
+    @staticmethod
+    def _scale_rank_grad(rank_pred, detach_rank_in_calibration: bool = False, rank_grad_scale: float = 1.0):
+        if detach_rank_in_calibration:
+            return rank_pred.detach()
+        grad_scale = float(rank_grad_scale)
+        if grad_scale >= 0.999999:
+            return rank_pred
+        base = rank_pred.detach()
+        return base + grad_scale * (rank_pred - base)
 
     def _build_tokens(self, x):
         g = x["g_data"]            # (B, Tm)
@@ -146,6 +177,8 @@ class FullTransformer(nn.Module):
         x,
         return_g_embeddings: bool = False,
         return_e_embeddings: bool = False,
+        detach_rank_in_calibration: bool = False,
+        calibration_rank_grad_scale: float = 1.0,
     ):
         tokens, env_start = self._build_tokens(x)
         tokens = self._encode_tokens(tokens)
@@ -161,19 +194,36 @@ class FullTransformer(nn.Module):
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
         e_embed = None
-        if return_e_embeddings and env_start < tokens.size(1):
-            e_tokens = tokens[:, env_start:, :]  # (B, Feats, C)
-            e_embed = e_tokens.mean(dim=1)       # (B, C)
+        env_repr = self._pool_env_repr(tokens, env_start)
+        if return_e_embeddings:
+            e_embed = env_repr
 
-        pred = self.head(tokens[:, 0])
+        rank_pred = self.head(tokens[:, 0])
+        output = rank_pred
+        if self.calibration_mode == "env_affine":
+            scale_raw = self.scale_head(env_repr)
+            scale = F.softplus(scale_raw) + self.calibration_eps
+            shift = self.shift_head(env_repr)
+            rank_for_cal = self._scale_rank_grad(
+                rank_pred,
+                detach_rank_in_calibration=detach_rank_in_calibration,
+                rank_grad_scale=calibration_rank_grad_scale,
+            )
+            total_pred = scale * rank_for_cal + shift
+            output = {
+                "total": total_pred,
+                "rank": rank_pred,
+                "scale": scale,
+                "shift": shift,
+            }
 
         if return_g_embeddings and return_e_embeddings:
-            return pred, g_embed, e_embed
+            return output, g_embed, e_embed
         if return_g_embeddings:
-            return pred, g_embed
+            return output, g_embed
         if return_e_embeddings:
-            return pred, e_embed
-        return pred
+            return output, e_embed
+        return output
 
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)

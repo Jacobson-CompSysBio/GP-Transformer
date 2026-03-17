@@ -100,21 +100,83 @@ def parse_args():
                    help="Weight for environment contrastive loss")
     p.add_argument("--env_contrastive_temperature", type=float, default=0.5,
                    help="Temperature for environment contrastive loss")
+    p.add_argument("--contrastive_warmup_epochs", type=int, default=25,
+                   help="Epoch to start ramping contrastive loss.")
+    p.add_argument("--contrastive_ramp_epochs", type=int, default=75,
+                   help="Number of epochs to ramp contrastive loss to full weight.")
+    p.add_argument("--calibration_mode", type=str, default="none",
+                   choices=["none", "env_affine"],
+                   help="Optional calibrated prediction head on top of the rank trunk.")
+    p.add_argument("--rank_aux_loss", type=str, default="none",
+                   choices=["none", "envspearman", "triplet"],
+                   help="Optional delayed rank auxiliary loss on the rank head.")
+    p.add_argument("--rank_aux_weight", type=float, default=0.05,
+                   help="Weight for the delayed rank auxiliary loss.")
+    p.add_argument("--rank_aux_start_epoch", type=int, default=100,
+                   help="Epoch to start the delayed rank auxiliary.")
+    p.add_argument("--calibration_start_epoch", type=int, default=175,
+                   help="Epoch to start the calibration losses.")
+    p.add_argument("--calibration_ramp_epochs", type=int, default=100,
+                   help="Number of epochs to ramp calibration losses to full weight.")
+    p.add_argument("--calibration_detach_rank_until_epoch", type=int, default=275,
+                   help="Keep calibration losses detached from the rank head until this epoch.")
+    p.add_argument("--envccc_weight", type=float, default=0.10,
+                   help="Weight for the macro environment CCC calibration loss.")
+    p.add_argument("--huber_weight", type=float, default=0.02,
+                   help="Weight for the calibration Huber loss.")
+    p.add_argument("--huber_delta", type=float, default=1.0,
+                   help="Delta parameter for Huber loss.")
+    p.add_argument("--calibration_joint_grad_fraction", type=float, default=0.10,
+                   help="Fraction of calibration gradient allowed into the rank head after detach period.")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
+    p.add_argument("--val_scheme", type=str, default="year",
+                   choices=["year", "leo", "proxy_same_tester", "hybrid_combo"],
+                   help="Validation scheme to use for training/checkpoint selection.")
     p.add_argument("--leo_val", type=str2bool, default=False,
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--proxy_tester", type=str, default="PHP02",
+                   help="Tester parent2 to target in proxy_same_tester / hybrid_combo validation.")
+    p.add_argument("--proxy_holdout_frac", type=float, default=0.10,
+                   help="Fraction of unique parent1 groups to hold out for proxy validation.")
+    p.add_argument("--proxy_seed", type=int, default=1,
+                   help="Seed for selecting held-out parent1 groups in proxy validation.")
+    p.add_argument("--proxy_score_weight", type=float, default=0.55,
+                   help="Weight on proxy env-PCC in hybrid validation checkpoint selection.")
+    p.add_argument("--leo_score_weight", type=float, default=0.25,
+                   help="Weight on LEO env-PCC in hybrid validation checkpoint selection.")
+    p.add_argument("--scale_score_weight", type=float, default=0.20,
+                   help="Weight on proxy env-CCC in hybrid validation checkpoint selection.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
     # Backward compatibility for older scripts/configs that used env_cat_embeddings.
     if getattr(args, "env_cat_embeddings", None) is not None and "--env_categorical_mode" not in sys.argv:
         args.env_categorical_mode = "onehot" if bool(args.env_cat_embeddings) else "drop"
+    if "--val_scheme" not in sys.argv and getattr(args, "leo_val", False):
+        args.val_scheme = "leo"
     return args
+
+
+def normalize_val_scheme(value, leo_val: bool = False) -> str:
+    """
+    Backward-compatible validation scheme normalizer.
+    """
+    v = str(value).strip().lower()
+    if v in {"", "none"}:
+        return "leo" if leo_val else "year"
+    if v in {"true", "1", "yes", "on"}:
+        return "leo"
+    if v in {"false", "0", "no", "off"}:
+        return "year"
+    allowed = {"year", "leo", "proxy_same_tester", "hybrid_combo"}
+    if v not in allowed:
+        raise ValueError(f"Unsupported val_scheme='{value}'. Allowed: {sorted(allowed)}")
+    return v
 
 def make_run_name(args) -> str:
     # helper to shorten float
@@ -141,7 +203,19 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
-    leo = "leo+" if getattr(args, "leo_val", False) else ""
+    val_scheme = normalize_val_scheme(
+        getattr(args, "val_scheme", "year"),
+        leo_val=bool(getattr(args, "leo_val", False)),
+    )
+    leo = "leo+" if val_scheme in {"leo", "hybrid_combo"} else ""
+    hybval = "hybval+" if val_scheme == "hybrid_combo" else ""
+    proxval = "proxy+" if val_scheme == "proxy_same_tester" else ""
+    cal = "calaff+" if getattr(args, "calibration_mode", "none") == "env_affine" else ""
+    rank_aux = ""
+    if getattr(args, "rank_aux_loss", "none") == "envspearman":
+        rank_aux = "ranksp+"
+    elif getattr(args, "rank_aux_loss", "none") == "triplet":
+        rank_aux = "ranktri+"
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -176,7 +250,9 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    model_type = (
+        full + g + e + ld + gxe + wg + res + strat + leo + hybval + proxval + cal + rank_aux + contr + ginput + envcat
+    ).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

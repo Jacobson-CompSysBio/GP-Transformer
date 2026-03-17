@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J msetest
+#SBATCH -J hybrid-cal-ft
 #SBATCH -N 4
 #SBATCH -t 8:00:00
 #SBATCH -p extended
@@ -47,7 +47,7 @@ export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=8e-5
+export LR=1e-4
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -64,23 +64,48 @@ export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
-export LOSS="mse" # + separated list of losses
+export LOSS="envpcc" # rank-first trunk objective
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
 export CONTRASTIVE_MODE=e  # ablation: none, g, e, g+e
-export CONTRASTIVE_WEIGHT=0.01
+export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
 export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
 export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
+export CONTRASTIVE_WARMUP_EPOCHS=25
+export CONTRASTIVE_RAMP_EPOCHS=75
+
+# Hybrid-combo validation
+export VAL_SCHEME=hybrid_combo
+export PROXY_TESTER=PHP02
+export PROXY_HOLDOUT_FRAC=0.10
+export PROXY_SEED=1
+export PROXY_SCORE_WEIGHT=0.55
+export LEO_SCORE_WEIGHT=0.25
+export SCALE_SCORE_WEIGHT=0.20
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+
+# Optional delayed rank/calibration heads.
+# Baseline reproduction keeps both disabled; switch these for later steps.
+export CALIBRATION_MODE=none   # none | env_affine
+export RANK_AUX_LOSS=none      # none | envspearman | triplet
+export RANK_AUX_WEIGHT=0.05
+export RANK_AUX_START_EPOCH=100
+export CALIBRATION_START_EPOCH=175
+export CALIBRATION_RAMP_EPOCHS=100
+export CALIBRATION_DETACH_RANK_UNTIL_EPOCH=275
+export CALIBRATION_JOINT_GRAD_FRACTION=0.10
+export ENVCCC_WEIGHT=0.10
+export HUBER_WEIGHT=0.02
+export HUBER_DELTA=1.0
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -154,8 +179,28 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --contrastive_warmup_epochs $CONTRASTIVE_WARMUP_EPOCHS \
+        --contrastive_ramp_epochs $CONTRASTIVE_RAMP_EPOCHS \
+        --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --proxy_tester $PROXY_TESTER \
+        --proxy_holdout_frac $PROXY_HOLDOUT_FRAC \
+        --proxy_seed $PROXY_SEED \
+        --proxy_score_weight $PROXY_SCORE_WEIGHT \
+        --leo_score_weight $LEO_SCORE_WEIGHT \
+        --scale_score_weight $SCALE_SCORE_WEIGHT \
+        --calibration_mode $CALIBRATION_MODE \
+        --rank_aux_loss $RANK_AUX_LOSS \
+        --rank_aux_weight $RANK_AUX_WEIGHT \
+        --rank_aux_start_epoch $RANK_AUX_START_EPOCH \
+        --calibration_start_epoch $CALIBRATION_START_EPOCH \
+        --calibration_ramp_epochs $CALIBRATION_RAMP_EPOCHS \
+        --calibration_detach_rank_until_epoch $CALIBRATION_DETACH_RANK_UNTIL_EPOCH \
+        --calibration_joint_grad_fraction $CALIBRATION_JOINT_GRAD_FRACTION \
+        --envccc_weight $ENVCCC_WEIGHT \
+        --huber_weight $HUBER_WEIGHT \
+        --huber_delta $HUBER_DELTA
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -198,6 +243,7 @@ python -u scripts/eval.py \
     --g_input_type $G_INPUT_TYPE \
     --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
+    --calibration_mode $CALIBRATION_MODE \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS

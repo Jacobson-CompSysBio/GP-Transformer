@@ -221,6 +221,82 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     return 1.0 - r_bar
 
 
+def torch_ccc(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Concordance correlation coefficient for two 1D tensors.
+    """
+    pred = pred.float().reshape(-1)
+    target = target.float().reshape(-1)
+    if pred.numel() < 2 or target.numel() < 2:
+        return torch.tensor(float("nan"), device=pred.device)
+
+    mean_x = pred.mean()
+    mean_y = target.mean()
+    vx = pred - mean_x
+    vy = target - mean_y
+    var_x = (vx * vx).mean()
+    var_y = (vy * vy).mean()
+    cov = (vx * vy).mean()
+    denom = var_x + var_y + (mean_x - mean_y).pow(2)
+    if denom <= eps:
+        return torch.tensor(float("nan"), device=pred.device)
+    return (2.0 * cov / denom.clamp_min(eps)).clamp(-1.0, 1.0)
+
+
+def macro_env_ccc(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    env_id: torch.Tensor,
+    eps: float = 1e-8,
+    min_samples: int = 2,
+) -> torch.Tensor:
+    """
+    Compute macro-averaged concordance correlation across environments.
+    """
+    if pred.ndim > 1:
+        pred = pred.squeeze(-1)
+    if target.ndim > 1:
+        target = target.squeeze(-1)
+
+    pred = pred.float()
+    target = target.float()
+    env_id = env_id.to(pred.device)
+
+    cccs = []
+    for env in torch.unique(env_id):
+        mask = env_id == env
+        if int(mask.sum().item()) < min_samples:
+            continue
+        p = pred[mask]
+        t = target[mask]
+        p_center = p - p.mean()
+        t_center = t - t.mean()
+        if (p_center * p_center).sum() <= eps or (t_center * t_center).sum() <= eps:
+            continue
+        ccc = torch_ccc(p, t, eps=eps)
+        if torch.isfinite(ccc):
+            cccs.append(ccc)
+
+    if len(cccs) == 0:
+        return torch.tensor(float("nan"), device=pred.device)
+    return torch.stack(cccs).mean()
+
+
+def envwise_ccc(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
+    """
+    Loss = 1 - macro environment CCC.
+    """
+    ccc = macro_env_ccc(pred, target, env_id, eps=eps, min_samples=min_samples)
+    if not torch.isfinite(ccc):
+        pred = pred.squeeze(-1).float()
+        target = target.squeeze(-1).float()
+        fallback = torch_ccc(pred, target, eps=eps)
+        if not torch.isfinite(fallback):
+            return (pred.sum() * 0.0) + 1.0
+        return 1.0 - fallback
+    return 1.0 - ccc
+
+
 ### other losses ### 
 def torch_spearmanr(pred: torch.Tensor,
                     target: torch.Tensor,
@@ -899,6 +975,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
     def make_one(term: str) -> Tuple[str, _CallableLoss, float]:
         if term == "mse":
             return term, _CallableLoss(nn.MSELoss(), expects_env=False, name=term)
+        if term == "huber":
+            return term, _CallableLoss(nn.HuberLoss(), expects_env=False, name=term)
         if term == "pcc":
             return term, _CallableLoss(LocalPearsonCorrLoss(dim=0), expects_env=False, name=term)
         if term == "spearman":
@@ -907,6 +985,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
         if term == "envpcc":
             return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
+        if term == "envccc":
+            return term, _CallableLoss(envwise_ccc, expects_env=True, name=term)
         if term == "envspearman":
             return term, _CallableLoss(envwise_spearman, expects_env=True, name=term)
         if term == "ktau":

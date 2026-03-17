@@ -279,6 +279,7 @@ def load_model(device: torch.device,
     loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)
     full_transformer = config.get("full_transformer", getattr(args, "full_transformer", False))
+    calibration_mode = config.get("calibration_mode", getattr(args, "calibration_mode", "none"))
     g_encoder_type = config.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
     moe_num_experts = config.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
     moe_top_k = config.get("moe_top_k", getattr(args, "moe_top_k", 2))
@@ -323,6 +324,7 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
+    config.calibration_mode = calibration_mode
     if full_transformer:
         if residual:
             model = FullTransformerResidual(
