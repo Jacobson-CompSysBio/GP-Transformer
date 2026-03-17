@@ -6,6 +6,7 @@ import random
 import numpy as np
 from dataclasses import dataclass
 from collections import defaultdict
+from pathlib import Path
 from typing import Iterator, List, Optional
 from torch.utils.data import Sampler
 import torch.distributed as dist
@@ -258,6 +259,50 @@ def make_run_name(args) -> str:
         f"{layer_tag}"
         f"{args.heads}heads_{args.emb_size}emb_{args.dropout}do{scale_targets}"
     )
+
+
+def add_runtime_suffix(run_name: str, seed: Optional[int] = None) -> str:
+    """
+    Make same-config reruns unique for W&B names and checkpoint directories.
+    """
+    parts: list[str] = []
+    if seed is not None:
+        parts.append(f"s{seed}")
+
+    job_id = os.getenv("SLURM_JOB_ID")
+    if job_id:
+        parts.append(f"j{job_id}")
+
+    array_task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+    if array_task_id:
+        parts.append(f"a{array_task_id}")
+
+    name_suffix = os.getenv("RUN_NAME_SUFFIX") or os.getenv("WANDB_NAME_SUFFIX")
+    if name_suffix:
+        parts.append(str(name_suffix).strip())
+
+    if not parts:
+        return run_name
+    return f"{run_name}__{'_'.join(parts)}"
+
+
+def split_runtime_suffix(run_name: str) -> tuple[str, Optional[str]]:
+    """
+    Split a runtime-unique run name into its stable config name and suffix.
+    """
+    base, sep, suffix = run_name.partition("__")
+    return base, suffix if sep else None
+
+
+def resolve_model_type(args) -> str:
+    """
+    Prefer the checkpoint directory basename during eval so logged model_type
+    exactly matches the trained run name, including contrastive tags.
+    """
+    checkpoint_dir = getattr(args, "checkpoint_dir", None)
+    if checkpoint_dir:
+        return Path(checkpoint_dir).resolve().name
+    return make_run_name(args)
 
 def set_seed(seed: int = 42):
     random.seed(seed)

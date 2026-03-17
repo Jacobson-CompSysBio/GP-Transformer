@@ -468,7 +468,8 @@ def main():
     wandb_extra_suffix = os.getenv("ROLLING_WANDB_NAME_SUFFIX", "").strip().strip("+")
     if wandb_extra_suffix:
         run_suffix_parts.append(wandb_extra_suffix)
-    wandb_run_name = make_run_name(args) + "+" + "+".join(run_suffix_parts)
+    base_run_name = make_run_name(args) + "+" + "+".join(run_suffix_parts)
+    wandb_run_name = add_runtime_suffix(base_run_name, getattr(args, "seed", None))
 
     device, local_rank, rank, world_size = setup_ddp()
 
@@ -576,7 +577,7 @@ def main():
     if is_main(rank):
         wandb_tags_env = os.getenv("WANDB_TAGS", "").strip()
         wandb_tags = [t.strip() for t in wandb_tags_env.split(",") if t.strip()] or None
-        wandb_group = os.getenv("SWEEP_GROUP", "").strip() or None
+        wandb_group = os.getenv("SWEEP_GROUP", "").strip() or base_run_name
         run = wandb.init(
             project="gxe-transformer-rolling",
             entity=os.getenv("WANDB_ENTITY"),
@@ -584,6 +585,13 @@ def main():
             group=wandb_group,
             tags=wandb_tags,
         )
+        run.config.update({
+            "base_model_type": base_run_name,
+            "run_name": wandb_run_name,
+        }, allow_val_change=True)
+        run.summary["model_type"] = base_run_name
+        run.summary["run_name"] = wandb_run_name
+        run.summary["checkpoint_dir"] = str(run_ckpt_dir.resolve())
 
         # Store sweep metadata in wandb config for analysis filtering
         sweep_meta = {}

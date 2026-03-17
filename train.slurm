@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J longtest
+#SBATCH -J msetest
 #SBATCH -N 4
-#SBATCH -t 2:00:00
-#SBATCH -p batch
+#SBATCH -t 8:00:00
+#SBATCH -p extended
 ##SBATCH -q debug
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
@@ -47,7 +47,7 @@ export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=1e-4
+export LR=8e-5
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -70,8 +70,8 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_MODE=none  # ablation: none, g, e, g+e
-export CONTRASTIVE_WEIGHT=0.05
+export CONTRASTIVE_MODE=e  # ablation: none, g, e, g+e
+export CONTRASTIVE_WEIGHT=0.01
 export CONTRASTIVE_TEMPERATURE=0.1
 export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
 export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl

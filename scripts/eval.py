@@ -386,7 +386,8 @@ def load_model(device: torch.device,
 def main():
     args = parse_args()
 
-    model_type = make_run_name(args)
+    model_type = resolve_model_type(args)
+    model_base_type, _ = split_runtime_suffix(model_type)
 
     # set up wand tracking
     load_dotenv()
@@ -448,6 +449,7 @@ def main():
     run.summary["test/env_avg_mse"] = float(results['env_mse'])
     run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
     run.summary["test/model_type"] = model_type
+    run.summary["test/model_base_type"] = model_base_type
     
     # table for pcc by env
     pcc_series = results['pcc_by_env']

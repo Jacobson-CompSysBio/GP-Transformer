@@ -103,7 +103,8 @@ def _move_to_device(obj, device):
 def main():
     # setup
     args = parse_args()
-    wandb_run_name = make_run_name(args)
+    base_run_name = make_run_name(args)
+    wandb_run_name = add_runtime_suffix(base_run_name, getattr(args, "seed", None))
 
     device, local_rank, rank, world_size = setup_ddp()
 
@@ -409,14 +410,22 @@ def main():
         run = wandb.init(
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
-            name=wandb_run_name
+            name=wandb_run_name,
+            group=base_run_name,
         )
+        run.config.update({
+            "base_model_type": base_run_name,
+            "run_name": wandb_run_name,
+        }, allow_val_change=True)
+        run.summary["model_type"] = base_run_name
+        run.summary["run_name"] = wandb_run_name
 
         # make checkpoint dir that matches run name
         run_ckpt_dir = Path("checkpoints") / wandb_run_name
         if run_ckpt_dir.exists():
             shutil.rmtree(run_ckpt_dir)
         run_ckpt_dir.mkdir(parents=True, exist_ok=True)
+        run.summary["checkpoint_dir"] = str(run_ckpt_dir.resolve())
 
         # write run id to logs
         run_id_file = os.environ.get("WANDB_RUN_ID_FILE")
