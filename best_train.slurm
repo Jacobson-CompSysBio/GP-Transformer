@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J best-fulltf-moe8
+#SBATCH -J best-fulltf-econtr
 #SBATCH -N 4
 #SBATCH -t 02:00:00
 #SBATCH -p batch
@@ -59,7 +59,10 @@ export GXE_LAYERS=1
 
 export HEADS=4
 export EMB_SIZE=256
+export SEED=1
 export SCALE_TARGETS=False
+export G_INPUT_TYPE=tokens
+export ENV_CATEGORICAL_MODE=drop
 
 export LOSS="envpcc" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
@@ -67,9 +70,11 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_MODE=none  # ablation: none, g, e, g+e
+export CONTRASTIVE_MODE=e  # new best: environment contrastive only
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
+export ENV_CONTRASTIVE_WEIGHT=0.1
+export ENV_CONTRASTIVE_TEMPERATURE=0.5
 
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
@@ -132,6 +137,9 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --seed $SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
@@ -140,6 +148,8 @@ srun -N ${SLURM_NNODES} \
         --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
+        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
@@ -181,6 +191,8 @@ python -u scripts/eval.py \
     --gxe_layers $GXE_LAYERS \
     --heads $HEADS \
     --emb_size $EMB_SIZE \
+    --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
