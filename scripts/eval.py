@@ -1,4 +1,5 @@
 # import packages 
+import json
 import os, sys
 import wandb
 import argparse
@@ -19,7 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.config import *
 from models.model import *
-from utils.loss import macro_env_pearson
+from utils.loss import macro_env_pearson, macro_env_ccc
 from utils.utils import *
 
 RESULTS_DIR = Path("data/results")
@@ -64,6 +65,62 @@ def _rebuild_marker_stats(payload: dict) -> dict | None:
         "columns": list(payload["columns"]),
     }
 
+
+def _inverse_transform_prediction(pred: torch.Tensor, y_scalers: dict | None) -> np.ndarray:
+    if y_scalers and 'total' in y_scalers:
+        return np.asarray(y_scalers['total'].inverse_transform(pred), dtype=float).ravel()
+    return pred.detach().cpu().numpy().ravel()
+
+
+def _resolve_checkpoint_path(args) -> Path:
+    checkpoint_path = getattr(args, "checkpoint_path", None)
+    if checkpoint_path:
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint path {ckpt_path} does not exist.")
+        return ckpt_path
+
+    checkpoint_dir = getattr(args, "checkpoint_dir", None)
+    if checkpoint_dir is None:
+        raise ValueError("Either --checkpoint_path or --checkpoint_dir must be provided.")
+
+    ckpt_root = Path(checkpoint_dir).expanduser().resolve()
+    if not ckpt_root.exists():
+        raise FileNotFoundError(f"Checkpoint directory {ckpt_root} does not exist.")
+
+    checkpoint_tag = getattr(args, "checkpoint_tag", None)
+    if checkpoint_tag:
+        manifest_path = ckpt_root / "checkpoint_manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            alias_info = manifest.get("aliases", {}).get(checkpoint_tag)
+            if alias_info:
+                candidate = Path(alias_info["path"])
+                if not candidate.is_absolute():
+                    candidate = ckpt_root / candidate
+                if candidate.exists():
+                    return candidate.resolve()
+        fallback = ckpt_root / f"{checkpoint_tag}.pt"
+        if fallback.exists():
+            return fallback.resolve()
+        raise FileNotFoundError(
+            f"Could not resolve checkpoint_tag={checkpoint_tag!r} in {ckpt_root}."
+        )
+
+    ckpts = sorted([p for p in ckpt_root.glob("checkpoint_*.pt") if p.is_file()])
+    if not ckpts:
+        raise FileNotFoundError(f"No checkpoint files found in {ckpt_root}.")
+    return ckpts[-1].resolve()
+
+
+def _resolve_metric_prefix(args) -> str:
+    if getattr(args, "metric_prefix", None):
+        return str(args.metric_prefix)
+    checkpoint_tag = getattr(args, "checkpoint_tag", None)
+    if checkpoint_tag and checkpoint_tag != "best_leo":
+        return f"test_{checkpoint_tag}"
+    return "test"
+
 def load_data(args,
               split: str = "test",
               batch_size: int = 32,
@@ -103,30 +160,47 @@ def evaluate(model,
             # forward pass
             out = model(xb)
             if isinstance(out, dict):
-                out = out['total'] 
-
-            # inverse transform if we have scalers
-            if y_scalers and 'total' in y_scalers:
-                out = y_scalers['total'].inverse_transform(out)
-                pred = np.array(out, dtype=float).ravel()
+                total_out = out.get('total')
+                rank_out = out.get('rank', total_out)
+                scale_out = out.get('scale')
+                shift_out = out.get('shift')
             else:
-                pred = out.detach().cpu().numpy().ravel()
-            actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
-            
-            # track env for location-avg 
-            env = np.asarray(yb['Env']).astype(str)
+                total_out = out
+                rank_out = out
+                scale_out = None
+                shift_out = None
+
+            total_pred = _inverse_transform_prediction(total_out, y_scalers)
+            rank_pred = _inverse_transform_prediction(rank_out, y_scalers)
+            scale_pred = (
+                scale_out.detach().cpu().numpy().ravel()
+                if scale_out is not None else np.full_like(total_pred, np.nan, dtype=float)
+            )
+            shift_pred = (
+                shift_out.detach().cpu().numpy().ravel()
+                if shift_out is not None else np.full_like(total_pred, np.nan, dtype=float)
+            )
 
             has_y = ('Yield_Mg_ha' in yb)
             if has_y:
                 actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
             else:
-                actual = np.full_like(pred, fill_value=np.nan, dtype=float)
+                actual = np.full_like(total_pred, fill_value=np.nan, dtype=float)
 
-            env = np.asarray(yb['Env']).astype(str) if 'Env' in yb else np.array(['UNK'] * len(pred))
-            rows.extend(zip(env.tolist(), actual.tolist(), pred.tolist()))
+            env = np.asarray(yb['Env']).astype(str) if 'Env' in yb else np.array(['UNK'] * len(total_pred))
+            rows.extend(
+                zip(
+                    env.tolist(),
+                    actual.tolist(),
+                    total_pred.tolist(),
+                    rank_pred.tolist(),
+                    scale_pred.tolist(),
+                    shift_pred.tolist(),
+                )
+            )
     
     # convert our multi-dimensional list to a dataframe
-    df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred'])
+    df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred', 'RankPred', 'Scale', 'Shift'])
 
     # filter to finite pairs for metric computation
     y_true = df['Actual'].to_numpy(dtype=float)
@@ -138,20 +212,43 @@ def evaluate(model,
         # global results
         y_true_valid = df_valid['Actual'].to_numpy(dtype=float)
         y_pred_valid = df_valid['Pred'].to_numpy(dtype=float)
+        y_rank_valid = df_valid['RankPred'].to_numpy(dtype=float)
         global_pcc = _safe_pcc(y_true_valid, y_pred_valid)
         global_mse = float(mean_squared_error(y_true_valid, y_pred_valid))
 
         # env-avg Pearson via shared helper (same as training selection metric)
         env_ids = pd.Categorical(df_valid['Env'].astype(str)).codes
+        rank_env_pcc_t = macro_env_pearson(
+            pred=torch.tensor(y_rank_valid, dtype=torch.float32, device=device),
+            target=torch.tensor(y_true_valid, dtype=torch.float32, device=device),
+            env_id=torch.tensor(env_ids, dtype=torch.long, device=device),
+            min_samples=2,
+        )
         macro_env_pcc_t = macro_env_pearson(
             pred=torch.tensor(y_pred_valid, dtype=torch.float32, device=device),
             target=torch.tensor(y_true_valid, dtype=torch.float32, device=device),
             env_id=torch.tensor(env_ids, dtype=torch.long, device=device),
             min_samples=2,
         )
+        rank_env_pcc = (
+            float(rank_env_pcc_t.item())
+            if bool(torch.isfinite(rank_env_pcc_t).item())
+            else np.nan
+        )
         macro_env_pcc = (
             float(macro_env_pcc_t.item())
             if bool(torch.isfinite(macro_env_pcc_t).item())
+            else np.nan
+        )
+        macro_env_ccc_t = macro_env_ccc(
+            pred=torch.tensor(y_pred_valid, dtype=torch.float32, device=device),
+            target=torch.tensor(y_true_valid, dtype=torch.float32, device=device),
+            env_id=torch.tensor(env_ids, dtype=torch.long, device=device),
+            min_samples=2,
+        )
+        macro_env_ccc_v = (
+            float(macro_env_ccc_t.item())
+            if bool(torch.isfinite(macro_env_ccc_t).item())
             else np.nan
         )
 
@@ -173,21 +270,51 @@ def evaluate(model,
             include_groups=False
         ).dropna()
         macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
+
+        scale_std_by_env = (df_valid.groupby('Env', sort=False)['Scale']
+                            .std(ddof=0)
+                            .dropna())
+        shift_std_by_env = (df_valid.groupby('Env', sort=False)['Shift']
+                            .std(ddof=0)
+                            .dropna())
+        max_env_scale_std = float(scale_std_by_env.max()) if len(scale_std_by_env) else 0.0
+        max_env_shift_std = float(shift_std_by_env.max()) if len(shift_std_by_env) else 0.0
     else:
         global_pcc = np.nan
         global_mse = np.nan
+        rank_env_pcc = np.nan
         macro_env_pcc = np.nan
+        macro_env_ccc_v = np.nan
         weighted_env_pcc = np.nan
         macro_env_mse = np.nan
         pcc_by_env = pd.Series(dtype=float)
+        max_env_scale_std = 0.0
+        max_env_shift_std = 0.0
+
+    if 'Scale' in df and df['Scale'].notna().any() and np.isfinite(rank_env_pcc) and np.isfinite(macro_env_pcc):
+        if abs(rank_env_pcc - macro_env_pcc) > 1e-5:
+            raise RuntimeError(
+                "rank_env_pcc and total_env_pcc diverged under env_affine calibration: "
+                f"{rank_env_pcc:.8f} vs {macro_env_pcc:.8f}"
+            )
+        if max(max_env_scale_std, max_env_shift_std) > 1e-5:
+            raise RuntimeError(
+                "env_affine calibration produced per-environment-varying scale/shift: "
+                f"max_scale_std={max_env_scale_std:.8e}, max_shift_std={max_env_shift_std:.8e}"
+            )
 
     results = {
         'global_pcc': float(global_pcc) if not np.isnan(global_pcc) else None,
         'global_mse': global_mse,
         'env_pcc': macro_env_pcc,
+        'rank_env_pcc': rank_env_pcc,
+        'total_env_pcc': macro_env_pcc,
+        'env_ccc': macro_env_ccc_v,
         'env_mse': macro_env_mse,
         'env_pcc_weighted': weighted_env_pcc,
-        'pcc_by_env': pcc_by_env
+        'pcc_by_env': pcc_by_env,
+        'max_env_scale_std': max_env_scale_std,
+        'max_env_shift_std': max_env_shift_std,
     }
 
     return results, df
@@ -246,16 +373,7 @@ def save_results(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_DIR)
 
 def load_model(device: torch.device,
                args):
-
-    ckpt_root = Path(args.checkpoint_dir)
-    if not ckpt_root.exists():
-        raise FileNotFoundError(f"Checkpoint directory {ckpt_root} does not exist.")
-
-    ckpts = sorted([p for p in ckpt_root.glob("checkpoint_*.pt") if p.is_file()])
-    if not ckpts:
-        raise FileNotFoundError(f"No checkpoint files found in {ckpt_root}.")
-    
-    best_path = ckpts[-1]
+    best_path = _resolve_checkpoint_path(args)
     print(f"Loading model from {best_path}")
     payload = torch.load(best_path, map_location="cpu")
     state = payload["model"]
@@ -279,7 +397,6 @@ def load_model(device: torch.device,
     loss_weights = config.get("loss_weights", args.loss_weights)
     residual = config.get("residual", args.residual)
     full_transformer = config.get("full_transformer", getattr(args, "full_transformer", False))
-    calibration_mode = config.get("calibration_mode", getattr(args, "calibration_mode", "none"))
     g_encoder_type = config.get("g_encoder_type", getattr(args, "g_encoder_type", "dense"))
     moe_num_experts = config.get("moe_num_experts", getattr(args, "moe_num_experts", 4))
     moe_top_k = config.get("moe_top_k", getattr(args, "moe_top_k", 2))
@@ -294,6 +411,7 @@ def load_model(device: torch.device,
     )
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
+    calibration_mode = config.get("calibration_mode", getattr(args, "calibration_mode", "none"))
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
     if isinstance(full_tf_mlp_type, str):
@@ -315,6 +433,7 @@ def load_model(device: torch.device,
                     n_head=n_head,
                     n_embd=n_embd,
                     n_env_fts=n_env_fts)
+    config.calibration_mode = calibration_mode
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts
@@ -324,7 +443,6 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
-    config.calibration_mode = calibration_mode
     if full_transformer:
         if residual:
             model = FullTransformerResidual(
@@ -390,6 +508,7 @@ def main():
 
     model_type = resolve_model_type(args)
     model_base_type, _ = split_runtime_suffix(model_type)
+    metric_prefix = _resolve_metric_prefix(args)
 
     # set up wand tracking
     load_dotenv()
@@ -413,7 +532,8 @@ def main():
 
     # load model
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
-    torch.cuda.set_device(0)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
     model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)    
@@ -438,20 +558,28 @@ def main():
     # print results
     print("Pearson Correlation:", results['global_pcc'])
     print("Mean Squared Error:", results['global_mse'])
-    print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
+    print("Rank Environment-Averaged Pearson Correlation:", results['rank_env_pcc'])
+    print("Total Environment-Averaged Pearson Correlation:", results['total_env_pcc'])
+    print("Environment-Averaged CCC:", results['env_ccc'])
     print("Environment-Averaged MSE:", results['env_mse'])
     print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
     for pcc in results['pcc_by_env'].items():
         print(f"Env PCC: {pcc}")
 
     # log metrics
-    run.summary["test/pearson"] = float(results['global_pcc'])
-    run.summary["test/mse"] = float(results['global_mse'])
-    run.summary["test/env_avg_pearson"] = float(results['env_pcc'])
-    run.summary["test/env_avg_mse"] = float(results['env_mse'])
-    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
-    run.summary["test/model_type"] = model_type
-    run.summary["test/model_base_type"] = model_base_type
+    run.summary[f"{metric_prefix}/pearson"] = float(results['global_pcc'])
+    run.summary[f"{metric_prefix}/mse"] = float(results['global_mse'])
+    run.summary[f"{metric_prefix}/env_avg_pearson"] = float(results['total_env_pcc'])
+    run.summary[f"{metric_prefix}/rank_env_pcc"] = float(results['rank_env_pcc'])
+    run.summary[f"{metric_prefix}/total_env_pcc"] = float(results['total_env_pcc'])
+    run.summary[f"{metric_prefix}/env_avg_ccc"] = float(results['env_ccc'])
+    run.summary[f"{metric_prefix}/env_avg_mse"] = float(results['env_mse'])
+    run.summary[f"{metric_prefix}/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])
+    run.summary[f"{metric_prefix}/max_env_scale_std"] = float(results['max_env_scale_std'])
+    run.summary[f"{metric_prefix}/max_env_shift_std"] = float(results['max_env_shift_std'])
+    run.summary[f"{metric_prefix}/checkpoint_tag"] = getattr(args, "checkpoint_tag", None) or "latest_numeric"
+    run.summary[f"{metric_prefix}/model_type"] = model_type
+    run.summary[f"{metric_prefix}/model_base_type"] = model_base_type
     
     # table for pcc by env
     pcc_series = results['pcc_by_env']
@@ -460,18 +588,23 @@ def main():
     pcc_df = pcc_df.replace({np.nan: None})
 
     pcc_table = wandb.Table(dataframe=pcc_df)
-    run.log({"test/pcc_by_env": pcc_table})
+    run.log({f"{metric_prefix}/pcc_by_env": pcc_table})
 
     run.log({
-        "test/pearson": float(results['global_pcc']),
-        "test/env_avg_pearson": float(results['env_pcc']),
-        "test/env_avg_pearson_weighted": float(results['env_pcc_weighted']),
-        "test/mse": float(results['global_mse']),
-        "test/env_avg_mse": float(results['env_mse']),
+        f"{metric_prefix}/pearson": float(results['global_pcc']),
+        f"{metric_prefix}/env_avg_pearson": float(results['total_env_pcc']),
+        f"{metric_prefix}/rank_env_pcc": float(results['rank_env_pcc']),
+        f"{metric_prefix}/total_env_pcc": float(results['total_env_pcc']),
+        f"{metric_prefix}/env_avg_ccc": float(results['env_ccc']),
+        f"{metric_prefix}/env_avg_pearson_weighted": float(results['env_pcc_weighted']),
+        f"{metric_prefix}/mse": float(results['global_mse']),
+        f"{metric_prefix}/env_avg_mse": float(results['env_mse']),
+        f"{metric_prefix}/max_env_scale_std": float(results['max_env_scale_std']),
+        f"{metric_prefix}/max_env_shift_std": float(results['max_env_shift_std']),
     })
 
     # plot image
-    run.log({"test/pred_vs_actual": wandb.Image(str(plot_path))})
+    run.log({f"{metric_prefix}/pred_vs_actual": wandb.Image(str(plot_path))})
     run.finish()
 
 if __name__ == "__main__":

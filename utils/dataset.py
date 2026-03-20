@@ -7,15 +7,15 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
 from transformers import (
-    AutoModel, 
-    AutoModelForSequenceClassification, 
-    AutoModelForMaskedLM, 
+    AutoModel,
+    AutoModelForSequenceClassification,
+    AutoModelForMaskedLM,
     AutoTokenizer
     )
 
@@ -127,25 +127,25 @@ def compute_leo_val_envs(
 ) -> set:
     """
     Compute which environments should be held out for LEO validation.
-    
+
     Returns a set of environment names that will be used for validation.
     These environments are entirely held out from training to better
     simulate generalization to unseen environments (like the test set).
     """
     rng = np.random.default_rng(seed)
-    
+
     # Get environments from years before test_year
     x_raw = x_raw.copy()
     x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
     train_val_mask = x_raw['Year'] < test_year
-    
+
     # Get unique environments from train/val pool
     all_envs = x_raw.loc[train_val_mask, 'Env'].unique()
     n_val_envs = max(1, int(len(all_envs) * val_fraction))
-    
+
     # Randomly select environments for validation
     val_envs = set(rng.choice(all_envs, size=n_val_envs, replace=False))
-    
+
     return val_envs
 
 
@@ -158,11 +158,6 @@ def compute_proxy_parent_holdout(
 ) -> Dict[str, Any]:
     """
     Build a deterministic same-tester proxy split.
-
-    Steps:
-    - keep only pre-test rows for the requested tester (parent2)
-    - assign each parent1 group to its dominant year in that proxy pool
-    - sample held-out parent1 groups stratified by those dominant years
     """
     rng = np.random.default_rng(seed)
 
@@ -194,10 +189,7 @@ def compute_proxy_parent_holdout(
     year_counts = {year: len(parent1s) for year, parent1s in year_to_parent1.items()}
     total_year_groups = max(1, sum(year_counts.values()))
 
-    raw_alloc = {
-        year: (count / total_year_groups) * n_holdout
-        for year, count in year_counts.items()
-    }
+    raw_alloc = {year: (count / total_year_groups) * n_holdout for year, count in year_counts.items()}
     alloc = {year: min(year_counts[year], int(np.floor(val))) for year, val in raw_alloc.items()}
     remainder = n_holdout - sum(alloc.values())
     if remainder > 0:
@@ -272,8 +264,9 @@ class GxE_Dataset(Dataset):
                  proxy_holdout_frac: float = 0.10,
                  proxy_seed: int = 1,
                  proxy_split_info: Optional[Dict[str, Any]] = None,
+                 proxy_disjoint_from_leo: bool = True,
                  ):
-        
+
         """
         Parameters:
             split (str): 'train' (2014-2022), 'val' (2023), 'test' (2024), or 'sub'
@@ -296,6 +289,7 @@ class GxE_Dataset(Dataset):
             proxy_holdout_frac (float): held-out fraction of unique parent1 groups in proxy validation
             proxy_seed (int): random seed for proxy held-out parent1 selection
             proxy_split_info (Optional[Dict[str, Any]]): precomputed proxy split spec from train split
+            proxy_disjoint_from_leo (bool): if True, exclude LEO validation environments from proxy_val
         """
         super().__init__()
         self.split = split
@@ -309,13 +303,14 @@ class GxE_Dataset(Dataset):
         self.proxy_tester = str(proxy_tester)
         self.proxy_holdout_frac = float(proxy_holdout_frac)
         self.proxy_seed = int(proxy_seed)
+        self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_split_info = None
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
         ############################################
         ### N_ENV FEATURES IN ORIGINAL DATA HERE ###
-        ############################################ 
+        ############################################
         N_ENV = 705
 
         ### LOAD DATA ###
@@ -333,7 +328,7 @@ class GxE_Dataset(Dataset):
             y_path = data_path + 'y_test.csv'
         else:
             raise ValueError(f"Invalid split='{split}'")
-        
+
         ### READ X/Y ###
         # keep cols 'id', 'Env', stored in X_* files
         x_raw = pd.read_csv(x_path)
@@ -359,9 +354,7 @@ class GxE_Dataset(Dataset):
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
-        # Hybrid combo validation: LEO env holdout + same-tester proxy holdout.
         if self.val_scheme == "hybrid_combo" and split in ("train", "val", "proxy_val"):
-            # Compute or use provided LEO val environments
             if leo_val_envs is None:
                 leo_val_envs = compute_leo_val_envs(
                     x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
@@ -392,21 +385,8 @@ class GxE_Dataset(Dataset):
                 keep_mask = pre_test_mask & env_in_val
             else:
                 keep_mask = pre_test_mask & proxy_holdout_mask
-        # LEO validation: hold out entire environments (not years)
-        elif self.val_scheme == "leo" and split in ("train", "val"):
-            if leo_val_envs is None:
-                leo_val_envs = compute_leo_val_envs(
-                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
-                )
-            self.leo_val_envs = leo_val_envs
-
-            pre_test_mask = x_raw['Year'] < 2024
-            env_in_val = x_raw['Env'].isin(leo_val_envs)
-
-            if split == "train":
-                keep_mask = pre_test_mask & ~env_in_val
-            else:
-                keep_mask = pre_test_mask & env_in_val
+                if self.proxy_disjoint_from_leo:
+                    keep_mask = keep_mask & ~env_in_val
         elif self.val_scheme == "proxy_same_tester" and split in ("train", "val", "proxy_val"):
             self.leo_val_envs = None
             if proxy_split_info is None:
@@ -418,6 +398,7 @@ class GxE_Dataset(Dataset):
                     seed=self.proxy_seed,
                 )
             self.proxy_split_info = proxy_split_info
+
             pre_test_mask = x_raw['Year'] < 2024
             proxy_holdout_mask = pd.Series(
                 proxy_split_info["heldout_mask"],
@@ -428,6 +409,25 @@ class GxE_Dataset(Dataset):
                 keep_mask = pre_test_mask & ~proxy_holdout_mask
             else:
                 keep_mask = pre_test_mask & proxy_holdout_mask
+        # LEO validation: hold out entire environments (not years)
+        elif self.val_scheme == "leo" and split in ("train", "val"):
+            # Compute or use provided LEO val environments
+            if leo_val_envs is None:
+                leo_val_envs = compute_leo_val_envs(
+                    x_raw, test_year=2024, val_fraction=leo_val_fraction, seed=leo_seed
+                )
+            self.leo_val_envs = leo_val_envs
+
+            # Filter to years before test (2014-2023)
+            pre_test_mask = x_raw['Year'] < 2024
+            env_in_val = x_raw['Env'].isin(leo_val_envs)
+
+            if split == "train":
+                # Train: all pre-2024 data EXCEPT held-out environments
+                keep_mask = pre_test_mask & ~env_in_val
+            else:  # val
+                # Val: only the held-out environments (from any year < 2024)
+                keep_mask = pre_test_mask & env_in_val
         else:
             self.leo_val_envs = None
             if split == "train":
@@ -438,7 +438,7 @@ class GxE_Dataset(Dataset):
                 keep_mask = x_raw['Year'] == which
             else: # 'test', 'sub'
                 keep_mask = x_raw['Year'] >= 2024
-        
+
         ### FILTER/ALIGN X/Y BY MASK BUILT ON X ###
         x_filt = x_raw.loc[keep_mask.values].reset_index(drop=True)
         y_filt = y_raw.loc[keep_mask.values].reset_index(drop=True)
@@ -449,7 +449,8 @@ class GxE_Dataset(Dataset):
                              "Ensue X_* and y_* have identical row order.")
 
         # separate metadata
-        self.meta = x_filt[['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2']].copy()
+        meta_cols = [c for c in ['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2'] if c in x_filt.columns]
+        self.meta = x_filt[meta_cols].copy()
 
         ### CATEGORICAL ENV MAPPING FOR ENVWISE LOSSES ###
         # use *only* filtered envs so codes match indices
@@ -459,19 +460,22 @@ class GxE_Dataset(Dataset):
         ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
         # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
         # Falls back to full id if no "-" separator is present
-        hybrid_names = self.meta['Hybrid'].astype(str)
+        hybrid_names = self.meta['id'].astype(str).apply(extract_hybrid_name)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
 
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
-        feature_df = x_filt.drop(columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha'], errors='ignore')
+        feature_df = x_filt.drop(
+            columns=['id', 'Env', 'Year', 'Hybrid', 'Yield_Mg_ha', 'parent1', 'parent2'],
+            errors='ignore',
+        )
 
         # sanity
         if feature_df.shape[1] < N_ENV:
             raise ValueError(f"Feature matrix has fewer columns ({feature_df.shape[1]}) than N_ENV ({N_ENV})."
                              "Check your X_* file layout.")
-        
+
         # genotype features (all but last N_ENV)
         g_block = feature_df.iloc[:, :-N_ENV].astype(np.float32)
         e_block = feature_df.iloc[:, -N_ENV:]
@@ -499,6 +503,15 @@ class GxE_Dataset(Dataset):
         self.marker_stats = None
         if self.g_input_type == "tokens":
             self.g_data = g_dosage.round().astype('int64')
+            g_token_min = int(self.g_data.min().min())
+            g_token_max = int(self.g_data.max().max())
+            if g_token_min < 0 or g_token_max >= 3:
+                raise ValueError(
+                    "Tokenized genotype inputs must be in {0,1,2}. "
+                    f"Observed min={g_token_min}, max={g_token_max}. "
+                    "This usually means non-genotype columns leaked into g_block or the source X_* file "
+                    "does not contain raw dosages in [0, 0.5, 1]."
+                )
         else:
             if split == "train":
                 p = np.clip(g_dosage.mean(axis=0).to_numpy(dtype=np.float32) / 2.0, 0.0, 1.0)
@@ -548,12 +561,12 @@ class GxE_Dataset(Dataset):
         # submission convenience
         if split == "sub":
             self.y_data = self.y_data[['Env', 'Hybrid', 'Yield_Mg_ha']]
-        
+
         ### TARGETS: TOTAL, ENV MEAN, RESIDUAL ###
         # sanity
         if 'Yield_Mg_ha' not in self.y_data.columns:
             raise ValueError("y_* file must contain 'Yield_Mg_ha'.")
-        
+
         total = self.y_data['Yield_Mg_ha'].astype(float)
         env_key = self.meta['Env'].astype(str).values # length = rows
         ymean = total.groupby(env_key).transform('mean')
@@ -572,7 +585,7 @@ class GxE_Dataset(Dataset):
                 if y_scalers is None:
                     raise ValueError("For val/test/sub you must pass y_scalers.")
                 self.label_scalers = y_scalers
-            
+
             total = pd.Series(self.label_scalers['total'].transform(total.values))
             ymean = pd.Series(self.label_scalers['ymean'].transform(ymean.values))
             resid = pd.Series(self.label_scalers['resid'].transform(resid.values))
@@ -585,14 +598,14 @@ class GxE_Dataset(Dataset):
         self.block_size = self.g_data.shape[1]
         self.n_env_fts = len(self.e_cols)
 
-        # final sanity check 
+        # final sanity check
         assert len(self.env_id_tensor) == len(self.g_data) == len(self.e_data) == len(self.y_data), \
             "Misalignment after filtering and feature/target construction"
-        
+
     def __len__(self):
         # return length (number of rows) in dataset
         return len(self.g_data)
-    
+
     def __getitem__(self, index: int):
 
         """
@@ -610,7 +623,7 @@ class GxE_Dataset(Dataset):
         x = {'g_data': g_tensor, 'e_data': env_data}
         if self.g_input_type == "grm":
             x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
-        
+
         if self.split in ('sub', 'test'):
             row = self.y_data.iloc[index]
             # return only the columns that exist (Env and Yield_Mg_ha are typical)
@@ -618,7 +631,7 @@ class GxE_Dataset(Dataset):
             y = {c: row[c] for c in keep_cols}
             return x, y
 
-        # scaled targets if scale_targets=True or raw otherwise 
+        # scaled targets if scale_targets=True or raw otherwise
         y_total = torch.tensor([self.total_series.iloc[index]], dtype=torch.float32)
         env_id = self.env_id_tensor[index]
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J hybrid-cal-ft
+#SBATCH -J joint-leo-fulltf
 #SBATCH -N 4
 #SBATCH -t 8:00:00
 #SBATCH -p extended
@@ -77,31 +77,22 @@ export CONTRASTIVE_SIM_TYPE=grm      # options: grm, ibs
 export CONTRASTIVE_LOSS_TYPE=mse     # options: mse, cosine, kl
 export ENV_CONTRASTIVE_WEIGHT=0.1
 export ENV_CONTRASTIVE_TEMPERATURE=0.5
-export CONTRASTIVE_WARMUP_EPOCHS=25
-export CONTRASTIVE_RAMP_EPOCHS=75
-
-# Hybrid-combo validation
-export VAL_SCHEME=hybrid_combo
-export PROXY_TESTER=PHP02
-export PROXY_HOLDOUT_FRAC=0.10
-export PROXY_SEED=1
-export PROXY_SCORE_WEIGHT=0.55
-export LEO_SCORE_WEIGHT=0.25
-export SCALE_SCORE_WEIGHT=0.20
+export CONTRASTIVE_WARMUP_EPOCHS=50
+export CONTRASTIVE_RAMP_EPOCHS=50
 
 # LEO (Leave-Environment-Out) validation
+export VAL_SCHEME=leo
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+export CHECKPOINT_METRIC=leo
 
-# Optional delayed rank/calibration heads.
-# Baseline reproduction keeps both disabled; switch these for later steps.
-export CALIBRATION_MODE=none   # none | env_affine
-export RANK_AUX_LOSS=none      # none | envspearman | triplet
+export CALIBRATION_MODE=env_affine
+export RANK_AUX_LOSS=none
 export RANK_AUX_WEIGHT=0.05
 export RANK_AUX_START_EPOCH=100
-export CALIBRATION_START_EPOCH=175
+export CALIBRATION_START_EPOCH=150
 export CALIBRATION_RAMP_EPOCHS=100
-export CALIBRATION_DETACH_RANK_UNTIL_EPOCH=275
+export CALIBRATION_DETACH_RANK_UNTIL_EPOCH=250
 export CALIBRATION_JOINT_GRAD_FRACTION=0.10
 export ENVCCC_WEIGHT=0.10
 export HUBER_WEIGHT=0.02
@@ -184,12 +175,7 @@ srun -N ${SLURM_NNODES} \
         --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION \
-        --proxy_tester $PROXY_TESTER \
-        --proxy_holdout_frac $PROXY_HOLDOUT_FRAC \
-        --proxy_seed $PROXY_SEED \
-        --proxy_score_weight $PROXY_SCORE_WEIGHT \
-        --leo_score_weight $LEO_SCORE_WEIGHT \
-        --scale_score_weight $SCALE_SCORE_WEIGHT \
+        --checkpoint_metric $CHECKPOINT_METRIC \
         --calibration_mode $CALIBRATION_MODE \
         --rank_aux_loss $RANK_AUX_LOSS \
         --rank_aux_weight $RANK_AUX_WEIGHT \
@@ -243,7 +229,9 @@ python -u scripts/eval.py \
     --g_input_type $G_INPUT_TYPE \
     --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
-    --calibration_mode $CALIBRATION_MODE \
+    --checkpoint_tag best_leo \
+    --metric_prefix test \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS
+    --scale_targets $SCALE_TARGETS \
+    --calibration_mode $CALIBRATION_MODE

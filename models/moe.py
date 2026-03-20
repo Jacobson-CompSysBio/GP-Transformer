@@ -1,7 +1,26 @@
 # code modified from: https://apxml.com/posts/how-to-implement-moe-pytorch
+import os
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+
+def _debug_stage(module, label, tensor=None):
+    if not bool(getattr(module, "debug_probe", False)):
+        return
+    if os.environ.get("SLURM_PROCID", "0") != "0":
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    msg = f"[MODEL_DEBUG] {label}"
+    if tensor is not None and isinstance(tensor, torch.Tensor):
+        with torch.no_grad():
+            msg += (
+                f" shape={tuple(tensor.shape)}"
+                f" dtype={tensor.dtype}"
+                f" finite={bool(torch.isfinite(tensor).all().item())}"
+            )
+    print(msg, flush=True)
 
 """
 Implementation of Mixture of Experts (MoE) layer for Genomic Prediction Transformer model.
@@ -100,6 +119,7 @@ class MoELayer(nn.Module):
         # get gating weights and expert indices
         # gate_weights: [N, num_experts], top_k_indices: [N, k]
         gate_weights, top_k_indices = self.gate(x)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'moe')}.gate_weights", gate_weights)
 
         # initialize final output tensor
         final_output = torch.zeros(x.shape[0], self.output_dim,
@@ -125,6 +145,7 @@ class MoELayer(nn.Module):
                 # process tokens assigned to this expert
                 expert_input = flat_x[idx]
                 expert_output = self.experts[i](expert_input)
+                _debug_stage(self, f"{getattr(self, 'debug_name', 'moe')}.expert{i}.out", expert_output)
 
                 # store output and original indices
                 expert_outputs.append((idx, expert_output))
@@ -150,8 +171,10 @@ class MoELayer(nn.Module):
         # add shared expert output (always active)
         if self.shared_expert is not None:
             final_output = final_output + self.shared_expert(x)
+            _debug_stage(self, f"{getattr(self, 'debug_name', 'moe')}.shared_out", final_output)
 
         # reshape_back to original shape: [batch_size, seq_len, output_dim]
         final_output = final_output.view(original_shape[0], original_shape[1], self.output_dim)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'moe')}.final_output", final_output)
 
         return final_output, gate_weights # return output, weights for aux loss

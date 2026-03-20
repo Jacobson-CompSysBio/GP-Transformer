@@ -8,6 +8,21 @@ from typing import Optional
 
 from models.moe import MoELayer
 
+
+def _debug_stage(module, label, tensor=None):
+    if not bool(getattr(module, "debug_probe", False)) or os.environ.get("SLURM_PROCID", "0") != "0":
+        return
+    torch.cuda.synchronize()
+    msg = f"[MODEL_DEBUG] {label}"
+    if tensor is not None and isinstance(tensor, torch.Tensor):
+        with torch.no_grad():
+            msg += (
+                f" shape={tuple(tensor.shape)}"
+                f" dtype={tensor.dtype}"
+                f" finite={bool(torch.isfinite(tensor).all().item())}"
+            )
+    print(msg, flush=True)
+
 # ----------------------------------------------------------------
 # positional encoding (sine/cosine)
 class PositionalEncoding(nn.Module):
@@ -72,6 +87,7 @@ class SelfAttention(nn.Module):
 
         # get q, k, v
         qkv = self.c_attn(x) # (B, T, C * 3)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'attn')}.qkv", qkv)
 
         # split and transpose for faster computation
         # pytorch process B and num_heads dim as batches, processes in parallel
@@ -84,10 +100,13 @@ class SelfAttention(nn.Module):
         # flash attention with dropout
         dropout_p = self.dropout if self.training else 0.0
         y = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=dropout_p)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'attn')}.sdpa", y)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # reassemble head outputs side-by-side
 
         # output projection
-        return self.c_proj(y)
+        y = self.c_proj(y)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'attn')}.proj", y)
+        return y
 
 class TransformerMLP(nn.Sequential):
     """
@@ -119,7 +138,9 @@ class TransformerBlock(nn.Module):
         
         # resid connections (Pre-LN: normalize before attention/mlp)
         x = x + self.dropout(self.attn(self.ln_1(x)))
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'block')}.after_attn", x)
         x = x + self.dropout(self.mlp(self.ln_2(x)))
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'block')}.after_mlp", x)
         return x
 
 class TransformerMoEBlock(nn.Module):
@@ -155,8 +176,11 @@ class TransformerMoEBlock(nn.Module):
                 return x, None  # skip entire block
 
         x = x + self.dropout(self.attn(self.ln_1(x)))
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'block')}.after_attn", x)
         moe_out, gate_weights = self.moe(self.ln_2(x))
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'block')}.moe_out", moe_out)
         x = x + self.dropout(moe_out)
+        _debug_stage(self, f"{getattr(self, 'debug_name', 'block')}.after_moe", x)
         return x, gate_weights
 
 # create transformer encoder for genotype data

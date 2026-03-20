@@ -12,6 +12,27 @@ from models.cnn import *
 from models.mlp import *
 from models.transformer import * 
 
+
+def _debug_stage(enabled, label, tensor=None):
+    if not enabled or os.environ.get("SLURM_PROCID", "0") != "0":
+        return
+    torch.cuda.synchronize()
+    msg = f"[MODEL_DEBUG] {label}"
+    if tensor is not None and isinstance(tensor, torch.Tensor):
+        with torch.no_grad():
+            msg += (
+                f" shape={tuple(tensor.shape)}"
+                f" dtype={tensor.dtype}"
+                f" finite={bool(torch.isfinite(tensor).all().item())}"
+            )
+    print(msg, flush=True)
+
+
+def _debug_note(enabled, label):
+    if not enabled or os.environ.get("SLURM_PROCID", "0") != "0":
+        return
+    print(f"[MODEL_DEBUG] {label}", flush=True)
+
 # ----------------------------------------------------------------
 # Full transformer that treats markers + env covariates as tokens
 class FullTransformer(nn.Module):
@@ -41,6 +62,7 @@ class FullTransformer(nn.Module):
         self.moe_aux_loss = None
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         self.calibration_mode = str(getattr(config, "calibration_mode", "none")).lower()
+        self.debug_probe = bool(getattr(config, "debug_probe", False))
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
         if self.calibration_mode not in {"none", "env_affine"}:
@@ -83,7 +105,7 @@ class FullTransformer(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, config.dropout * 0.5, config.n_gxe_layer)]
         if self.mlp_type == "moe":
             def build_block(i):
-                return TransformerMoEBlock(
+                blk = TransformerMoEBlock(
                     config,
                     num_experts=self.moe_num_experts,
                     k=self.moe_top_k,
@@ -92,9 +114,24 @@ class FullTransformer(nn.Module):
                     shared_expert_hidden_dim=self.moe_shared_expert_hidden_dim,
                     drop_path=dpr[i],
                 )
+                blk.debug_probe = self.debug_probe
+                blk.debug_name = f"fulltf.block{i}"
+                if hasattr(blk, "attn"):
+                    blk.attn.debug_probe = self.debug_probe
+                    blk.attn.debug_name = f"{blk.debug_name}.attn"
+                if hasattr(blk, "moe"):
+                    blk.moe.debug_probe = self.debug_probe
+                    blk.moe.debug_name = f"{blk.debug_name}.moe"
+                return blk
         else:
             def build_block(i):
-                return TransformerBlock(config, drop_path=dpr[i])
+                blk = TransformerBlock(config, drop_path=dpr[i])
+                blk.debug_probe = self.debug_probe
+                blk.debug_name = f"fulltf.block{i}"
+                if hasattr(blk, "attn"):
+                    blk.attn.debug_probe = self.debug_probe
+                    blk.attn.debug_name = f"{blk.debug_name}.attn"
+                return blk
         self.blocks = nn.ModuleList([build_block(i) for i in range(config.n_gxe_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, 1)
@@ -125,6 +162,11 @@ class FullTransformer(nn.Module):
             return env_tokens.mean(dim=1)
         return torch.zeros_like(tokens[:, 0])
 
+    def _pool_env_input_repr(self, e_tok, cls_like):
+        if e_tok.size(1) > 0:
+            return e_tok.mean(dim=1)
+        return torch.zeros_like(cls_like)
+
     @staticmethod
     def _scale_rank_grad(rank_pred, detach_rank_in_calibration: bool = False, rank_grad_scale: float = 1.0):
         if detach_rank_in_calibration:
@@ -136,20 +178,28 @@ class FullTransformer(nn.Module):
         return base + grad_scale * (rank_pred - base)
 
     def _build_tokens(self, x):
+        _debug_note(self.debug_probe, "fulltf.build_tokens.enter")
         g = x["g_data"]            # (B, Tm)
         e = x["e_data"]            # (B, Feats)
         B, Tm = g.shape
         # embeddings
         if self.g_input_type == "tokens":
+            _debug_note(self.debug_probe, "fulltf.build_tokens.before_g_embed")
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
+            _debug_note(self.debug_probe, "fulltf.build_tokens.before_g_scalar_proj")
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
+        _debug_stage(self.debug_probe, "fulltf.g_tok", g_tok)
+        _debug_note(self.debug_probe, "fulltf.build_tokens.before_e_proj")
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
+        _debug_stage(self.debug_probe, "fulltf.e_tok", e_tok)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
+        env_input_repr = self._pool_env_input_repr(e_tok, cls[:, 0, :])
         tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
         tokens = self.wpe(tokens)
+        _debug_stage(self.debug_probe, "fulltf.tokens_wpe", tokens)
         env_start = 1 + Tm
-        return tokens, env_start
+        return tokens, env_start, env_input_repr
 
     def _encode_tokens(self, tokens):
         self.moe_aux_loss = None
@@ -160,6 +210,7 @@ class FullTransformer(nn.Module):
                 from utils.loss import moe_load_balance_loss
             for blk in self.blocks:
                 tokens, gate_weights = blk(tokens)
+                _debug_stage(self.debug_probe, f"{getattr(blk, 'debug_name', 'fulltf.block')}.out", tokens)
                 if gate_weights is not None and self.moe_loss_weight and self.moe_loss_weight != 0:
                     loss = moe_load_balance_loss(gate_weights, self.moe_num_experts)
                     moe_loss_sum = loss if moe_loss_sum is None else (moe_loss_sum + loss)
@@ -169,7 +220,9 @@ class FullTransformer(nn.Module):
         else:
             for blk in self.blocks:
                 tokens = blk(tokens)
+                _debug_stage(self.debug_probe, f"{getattr(blk, 'debug_name', 'fulltf.block')}.out", tokens)
         tokens = self.ln_f(tokens)
+        _debug_stage(self.debug_probe, "fulltf.ln_f", tokens)
         return tokens
 
     def forward(
@@ -180,7 +233,7 @@ class FullTransformer(nn.Module):
         detach_rank_in_calibration: bool = False,
         calibration_rank_grad_scale: float = 1.0,
     ):
-        tokens, env_start = self._build_tokens(x)
+        tokens, env_start, env_input_repr = self._build_tokens(x)
         tokens = self._encode_tokens(tokens)
 
         # Extract G embeddings AFTER transformer (for contrastive loss)
@@ -193,37 +246,37 @@ class FullTransformer(nn.Module):
             # Project through contrastive head (like SimCLR)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 
-        e_embed = None
-        env_repr = self._pool_env_repr(tokens, env_start)
-        if return_e_embeddings:
-            e_embed = env_repr
+        env_repr = self._pool_env_repr(tokens, env_start) if return_e_embeddings else None
 
+        e_embed = env_repr if return_e_embeddings else None
         rank_pred = self.head(tokens[:, 0])
-        output = rank_pred
+        _debug_stage(self.debug_probe, "fulltf.rank_pred", rank_pred)
+
         if self.calibration_mode == "env_affine":
-            scale_raw = self.scale_head(env_repr)
+            scale_raw = self.scale_head(env_input_repr)
             scale = F.softplus(scale_raw) + self.calibration_eps
-            shift = self.shift_head(env_repr)
+            shift = self.shift_head(env_input_repr)
             rank_for_cal = self._scale_rank_grad(
                 rank_pred,
                 detach_rank_in_calibration=detach_rank_in_calibration,
                 rank_grad_scale=calibration_rank_grad_scale,
             )
-            total_pred = scale * rank_for_cal + shift
-            output = {
-                "total": total_pred,
+            pred = {
+                "total": scale * rank_for_cal + shift,
                 "rank": rank_pred,
                 "scale": scale,
                 "shift": shift,
             }
+        else:
+            pred = rank_pred
 
         if return_g_embeddings and return_e_embeddings:
-            return output, g_embed, e_embed
+            return pred, g_embed, e_embed
         if return_g_embeddings:
-            return output, g_embed
+            return pred, g_embed
         if return_e_embeddings:
-            return output, e_embed
-        return output
+            return pred, e_embed
+        return pred
 
     def print_trainable_parameters(self):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -272,7 +325,7 @@ class FullTransformerResidual(FullTransformer):
         return_g_embeddings: bool = False,
         return_e_embeddings: bool = False,
     ):
-        tokens, env_start = self._build_tokens(x)
+        tokens, env_start, _ = self._build_tokens(x)
 
         # IMPORTANT: Encode FIRST, then extract features from encoded tokens
         tokens = self._encode_tokens(tokens)

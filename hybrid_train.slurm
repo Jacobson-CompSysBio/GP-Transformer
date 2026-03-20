@@ -1,18 +1,17 @@
 #!/bin/bash
 #SBATCH -A SYB114
-#SBATCH -J control-leo-fulltf
+#SBATCH -J hybrid-joint-fulltf
 #SBATCH -N 4
 #SBATCH -t 02:00:00
 #SBATCH -p batch
 ##SBATCH -q debug
-#SBATCH -o logs/%x-%j.out # Out Path
-#SBATCH -e logs/%x-%j.err # Err Path
-#SBATCH --open-mode=truncate # Overwrite .out/.err
+#SBATCH -o logs/%x-%j.out
+#SBATCH -e logs/%x-%j.err
+#SBATCH --open-mode=truncate
 
-### env, modules, and settings ###
 set -eo pipefail
 
-ulimit -S -c 0 # disaple core dumps
+ulimit -S -c 0
 
 module purge
 module load PrgEnv-gnu/8.6.0
@@ -22,16 +21,14 @@ module load craype-accel-amd-gfx90a
 source /lustre/orion/syb111/proj-shared/Environments/source_miniconda_frontier.sh
 source activate /lustre/orion/syb111/world-shared/environments/pytorch-rocm/
 
-### train hyperparameters ###
 export G_ENC=True
 export E_ENC=True
 export LD_ENC=True
-export GXE_ENC=tf  # options: "tf", "mlp", "cnn"
-export WG=True  # weighted gate for 3-prong architecture
-export FULL_TRANSFORMER=True  # use FullTransformer architecture
+export GXE_ENC=tf
+export WG=True
+export FULL_TRANSFORMER=True
 
-# MoE settings (used when G_ENCODER_TYPE=moe or FULL_TF_MLP_TYPE=moe)
-export G_ENCODER_TYPE=moe  # options: "dense", "moe"
+export G_ENCODER_TYPE=moe
 export MOE_NUM_EXPERTS=8
 export MOE_TOP_K=2
 export MOE_SHARED_EXPERT=True
@@ -39,7 +36,6 @@ export MOE_EXPERT_HIDDEN_DIM=256
 export MOE_SHARED_EXPERT_HIDDEN_DIM=256
 export MOE_LOSS_WEIGHT=0.01
 
-# calculate microbatch size: GBS=8192 on 4 nodes * 8 gpus/node = 32 gpus
 export GBS=8192
 NGPUS=$(($SLURM_NNODES * 8))
 MBS=$(($GBS / $NGPUS))
@@ -64,13 +60,12 @@ export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 
-export LOSS="envpcc" # + separated list of losses
-export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
-export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
-export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
+export LOSS="envpcc"
+export LOSS_WEIGHTS="1.0"
+export ENV_STRATIFIED=True
+export MIN_SAMPLES_PER_ENV=32
 
-# Contrastive loss
-export CONTRASTIVE_MODE=e  # new best: environment contrastive only
+export CONTRASTIVE_MODE=e
 export CONTRASTIVE_WEIGHT=0.1
 export CONTRASTIVE_TEMPERATURE=0.1
 export CONTRASTIVE_SIM_TYPE=grm
@@ -80,13 +75,19 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 export CONTRASTIVE_WARMUP_EPOCHS=50
 export CONTRASTIVE_RAMP_EPOCHS=50
 
-# LEO (Leave-Environment-Out) validation
-export VAL_SCHEME=leo
+export VAL_SCHEME=hybrid_combo
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+export PROXY_TESTER=PHP02
+export PROXY_HOLDOUT_FRAC=0.10
+export PROXY_SEED=1
+export PROXY_DISJOINT_FROM_LEO=True
+export PROXY_SCORE_WEIGHT=0.55
+export LEO_SCORE_WEIGHT=0.25
+export SCALE_SCORE_WEIGHT=0.20
 export CHECKPOINT_METRIC=leo
 
-export CALIBRATION_MODE=none
+export CALIBRATION_MODE=env_affine
 export RANK_AUX_LOSS=none
 export RANK_AUX_WEIGHT=0.05
 export RANK_AUX_START_EPOCH=100
@@ -98,30 +99,24 @@ export ENVCCC_WEIGHT=0.10
 export HUBER_WEIGHT=0.02
 export HUBER_DELTA=1.0
 
-### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
 export http_proxy=$https_proxy
 export WANDB_HTTP_TIMEOUT=90
 
-# make wandb logging dir
 mkdir -p logs/ckpt_ids logs/run_ids checkpoints data/results
 export WANDB_RUN_ID_FILE="logs/run_ids/wandb_run_id_${SLURM_JOB_ID}.txt"
 export CHECKPOINT_DIR_FILE="logs/ckpt_ids/checkpoint_dir_${SLURM_JOB_ID}.txt"
 rm -f "$WANDB_RUN_ID_FILE" "$CHECKPOINT_DIR_FILE"
 
-### network / rccl settings ###
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n1)
 export MASTER_PORT=6000
 export NCCL_SOCKET_IFNAME=hsn0
 
-### miopen settings ###
 export MIOPEN_USER_DB_PATH=/tmp/miopen-$SLURM_JOB_ID
 export MIOPEN_CUSTOM_CACHE_DIR=$MIOPEN_USER_DB_PATH
 rm -rf "$MIOPEN_USER_DB_PATH" && mkdir -p "$MIOPEN_USER_DB_PATH"
 export MIOPEN_FIND_MODE=NORMAL
 
-### srun (model train) ###
-NGPUS=$(($SLURM_NNODES * 8))
 srun -N ${SLURM_NNODES} \
     -n ${NGPUS} \
     --gpus-per-task=1 \
@@ -166,15 +161,22 @@ srun -N ${SLURM_NNODES} \
         --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
-        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
-        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
+        --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
+        --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
         --contrastive_warmup_epochs $CONTRASTIVE_WARMUP_EPOCHS \
         --contrastive_ramp_epochs $CONTRASTIVE_RAMP_EPOCHS \
         --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION \
+        --proxy_tester $PROXY_TESTER \
+        --proxy_holdout_frac $PROXY_HOLDOUT_FRAC \
+        --proxy_seed $PROXY_SEED \
+        --proxy_disjoint_from_leo $PROXY_DISJOINT_FROM_LEO \
+        --proxy_score_weight $PROXY_SCORE_WEIGHT \
+        --leo_score_weight $LEO_SCORE_WEIGHT \
+        --scale_score_weight $SCALE_SCORE_WEIGHT \
         --checkpoint_metric $CHECKPOINT_METRIC \
         --calibration_mode $CALIBRATION_MODE \
         --rank_aux_loss $RANK_AUX_LOSS \
@@ -188,7 +190,6 @@ srun -N ${SLURM_NNODES} \
         --huber_weight $HUBER_WEIGHT \
         --huber_delta $HUBER_DELTA
 
-### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
     export WANDB_RESUME=allow
     export WANDB_RUN_ID=$(cat "$WANDB_RUN_ID_FILE")
@@ -231,6 +232,36 @@ python -u scripts/eval.py \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --checkpoint_tag best_leo \
     --metric_prefix test \
+    --loss $LOSS \
+    --loss_weights $LOSS_WEIGHTS \
+    --scale_targets $SCALE_TARGETS \
+    --calibration_mode $CALIBRATION_MODE
+
+python -u scripts/eval.py \
+    --batch_size $BATCH_SIZE \
+    --gbs $GBS \
+    --g_enc $G_ENC \
+    --e_enc $E_ENC \
+    --ld_enc $LD_ENC \
+    --gxe_enc $GXE_ENC \
+    --wg $WG \
+    --full_transformer $FULL_TRANSFORMER \
+    --num_epochs $NUM_EPOCHS \
+    --lr $LR \
+    --weight_decay $WEIGHT_DECAY \
+    --dropout $DROPOUT \
+    --early_stop $EARLY_STOP \
+    --g_layers $G_LAYERS \
+    --ld_layers $LD_LAYERS \
+    --mlp_layers $MLP_LAYERS \
+    --gxe_layers $GXE_LAYERS \
+    --heads $HEADS \
+    --emb_size $EMB_SIZE \
+    --g_input_type $G_INPUT_TYPE \
+    --env_categorical_mode $ENV_CATEGORICAL_MODE \
+    --checkpoint_dir "$CHECKPOINT_DIR" \
+    --checkpoint_tag best_select \
+    --metric_prefix test_select \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS \
