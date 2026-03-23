@@ -59,7 +59,9 @@ export GXE_LAYERS=1 # applies to FullTF if used
 
 export HEADS=4
 export EMB_SIZE=256
-export SEED=1
+export SEED=${SEED:-1}
+export MODEL_SEED=${MODEL_SEED:-$SEED}
+export SPLIT_SEED=${SPLIT_SEED:-$SEED}
 export SCALE_TARGETS=False
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
@@ -94,8 +96,8 @@ export CALIBRATION_START_EPOCH=150
 export CALIBRATION_RAMP_EPOCHS=100
 export CALIBRATION_DETACH_RANK_UNTIL_EPOCH=250
 export CALIBRATION_JOINT_GRAD_FRACTION=0.10
-export ENVCCC_WEIGHT=0.10
-export HUBER_WEIGHT=0.02
+export ENVCCC_WEIGHT=${ENVCCC_WEIGHT:-0.10}
+export HUBER_WEIGHT=${HUBER_WEIGHT:-0.02}
 export HUBER_DELTA=1.0
 
 ### wandb settings ###
@@ -156,6 +158,8 @@ srun -N ${SLURM_NNODES} \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
         --seed $SEED \
+        --model_seed $MODEL_SEED \
+        --split_seed $SPLIT_SEED \
         --g_input_type $G_INPUT_TYPE \
         --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
@@ -206,32 +210,42 @@ else
     exit 2
 fi
 
-python -u scripts/eval.py \
-    --batch_size $BATCH_SIZE \
-    --gbs $GBS \
-    --g_enc $G_ENC \
-    --e_enc $E_ENC \
-    --ld_enc $LD_ENC \
-    --gxe_enc $GXE_ENC \
-    --wg $WG \
-    --full_transformer $FULL_TRANSFORMER \
-    --num_epochs $NUM_EPOCHS \
-    --lr $LR \
-    --weight_decay $WEIGHT_DECAY \
-    --dropout $DROPOUT \
-    --early_stop $EARLY_STOP \
-    --g_layers $G_LAYERS \
-    --ld_layers $LD_LAYERS \
-    --mlp_layers $MLP_LAYERS \
-    --gxe_layers $GXE_LAYERS \
-    --heads $HEADS \
-    --emb_size $EMB_SIZE \
-    --g_input_type $G_INPUT_TYPE \
-    --env_categorical_mode $ENV_CATEGORICAL_MODE \
-    --checkpoint_dir "$CHECKPOINT_DIR" \
-    --checkpoint_tag best_leo \
-    --metric_prefix test \
-    --loss $LOSS \
-    --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS \
-    --calibration_mode $CALIBRATION_MODE
+run_eval() {
+    local checkpoint_tag="$1"
+    local metric_prefix="$2"
+    python -u scripts/eval.py \
+        --batch_size $BATCH_SIZE \
+        --gbs $GBS \
+        --g_enc $G_ENC \
+        --e_enc $E_ENC \
+        --ld_enc $LD_ENC \
+        --gxe_enc $GXE_ENC \
+        --wg $WG \
+        --full_transformer $FULL_TRANSFORMER \
+        --num_epochs $NUM_EPOCHS \
+        --lr $LR \
+        --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
+        --early_stop $EARLY_STOP \
+        --g_layers $G_LAYERS \
+        --ld_layers $LD_LAYERS \
+        --mlp_layers $MLP_LAYERS \
+        --gxe_layers $GXE_LAYERS \
+        --heads $HEADS \
+        --emb_size $EMB_SIZE \
+        --seed $SEED \
+        --model_seed $MODEL_SEED \
+        --split_seed $SPLIT_SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
+        --checkpoint_dir "$CHECKPOINT_DIR" \
+        --checkpoint_tag "$checkpoint_tag" \
+        --metric_prefix "$metric_prefix" \
+        --loss $LOSS \
+        --loss_weights $LOSS_WEIGHTS \
+        --scale_targets $SCALE_TARGETS \
+        --calibration_mode $CALIBRATION_MODE
+}
+
+run_eval best_leo test
+run_eval latest test_latest

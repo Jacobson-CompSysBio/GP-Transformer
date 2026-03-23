@@ -121,6 +121,68 @@ def _resolve_metric_prefix(args) -> str:
         return f"test_{checkpoint_tag}"
     return "test"
 
+
+def _resolve_eval_alias(args, ckpt_path: Path) -> str:
+    checkpoint_tag = getattr(args, "checkpoint_tag", None)
+    if checkpoint_tag:
+        return str(checkpoint_tag)
+    return ckpt_path.stem
+
+
+def _update_selector_audit(checkpoint_root: Path,
+                           alias: str,
+                           metric_prefix: str,
+                           checkpoint_path: Path,
+                           payload: dict,
+                           results: dict):
+    audit_row = {
+        "alias": str(alias),
+        "metric_prefix": str(metric_prefix),
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "epoch": int(payload.get("epoch", -1)) if payload.get("epoch") is not None else None,
+        "val_rank_env_pcc": payload.get("checkpoint_metrics", {}).get("val_rank_env_pcc"),
+        "val_total_env_pcc": payload.get("checkpoint_metrics", {}).get("val_total_env_pcc"),
+        "proxy_env_pcc": payload.get("checkpoint_metrics", {}).get("proxy_env_pcc"),
+        "proxy_env_ccc": payload.get("checkpoint_metrics", {}).get("proxy_env_ccc"),
+        "proxy_env_huber": payload.get("checkpoint_metrics", {}).get("proxy_env_huber"),
+        "select_score": payload.get("checkpoint_metrics", {}).get("select_score"),
+        "test_env_avg_pearson": results.get("total_env_pcc"),
+        "test_rank_env_pcc": results.get("rank_env_pcc"),
+        "test_env_avg_mse": results.get("env_mse"),
+        "test_env_avg_ccc": results.get("env_ccc"),
+        "test_env_avg_pearson_weighted": results.get("env_pcc_weighted"),
+        "model_seed": payload.get("config", {}).get("model_seed"),
+        "split_seed": payload.get("config", {}).get("split_seed"),
+        "proxy_seed": payload.get("config", {}).get("proxy_seed"),
+        "leo_val_env_hash": payload.get("split_fingerprints", {}).get("leo_val_env_hash"),
+        "proxy_heldout_parent1_hash": payload.get("split_fingerprints", {}).get("proxy_heldout_parent1_hash"),
+        "proxy_row_count": payload.get("split_fingerprints", {}).get("proxy_row_count"),
+        "proxy_env_count": payload.get("split_fingerprints", {}).get("proxy_env_count"),
+        "proxy_hybrid_count": payload.get("split_fingerprints", {}).get("proxy_hybrid_count"),
+        "run_id": payload.get("run", {}).get("id"),
+        "run_name": payload.get("run", {}).get("name"),
+    }
+
+    audit_json_path = checkpoint_root / "selector_audit.json"
+    audit_csv_path = checkpoint_root / "selector_audit.csv"
+    audit_payload = {"rows": []}
+    if audit_json_path.exists():
+        audit_payload = json.loads(audit_json_path.read_text())
+
+    rows = [
+        row for row in audit_payload.get("rows", [])
+        if str(row.get("alias")) != str(alias)
+    ]
+    rows.append(audit_row)
+    rows = sorted(rows, key=lambda row: str(row.get("alias", "")))
+    audit_payload["rows"] = rows
+    audit_payload["checkpoint_dir"] = str(checkpoint_root.resolve())
+    audit_payload["run_name"] = payload.get("run", {}).get("name")
+    audit_payload["run_id"] = payload.get("run", {}).get("id")
+    audit_payload["split_fingerprints"] = payload.get("split_fingerprints", {})
+    audit_json_path.write_text(json.dumps(audit_payload, indent=2, sort_keys=True))
+    pd.DataFrame(rows).to_csv(audit_csv_path, index=False)
+
 def load_data(args,
               split: str = "test",
               batch_size: int = 32,
@@ -501,7 +563,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, payload, best_path
 
 def main():
     args = parse_args()
@@ -534,9 +596,9 @@ def main():
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.cuda.set_device(0)
-    set_seed(args.seed)
+    set_seed(args.model_seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, checkpoint_payload, checkpoint_path = load_model(device, args)
     
     # load data
     print("Loading data...")
@@ -578,8 +640,14 @@ def main():
     run.summary[f"{metric_prefix}/max_env_scale_std"] = float(results['max_env_scale_std'])
     run.summary[f"{metric_prefix}/max_env_shift_std"] = float(results['max_env_shift_std'])
     run.summary[f"{metric_prefix}/checkpoint_tag"] = getattr(args, "checkpoint_tag", None) or "latest_numeric"
+    run.summary[f"{metric_prefix}/checkpoint_path"] = str(checkpoint_path)
     run.summary[f"{metric_prefix}/model_type"] = model_type
     run.summary[f"{metric_prefix}/model_base_type"] = model_base_type
+    run.summary[f"{metric_prefix}/model_seed"] = checkpoint_payload.get("config", {}).get("model_seed")
+    run.summary[f"{metric_prefix}/split_seed"] = checkpoint_payload.get("config", {}).get("split_seed")
+    run.summary[f"{metric_prefix}/proxy_seed"] = checkpoint_payload.get("config", {}).get("proxy_seed")
+    run.summary[f"{metric_prefix}/leo_val_env_hash"] = checkpoint_payload.get("split_fingerprints", {}).get("leo_val_env_hash")
+    run.summary[f"{metric_prefix}/proxy_heldout_parent1_hash"] = checkpoint_payload.get("split_fingerprints", {}).get("proxy_heldout_parent1_hash")
     
     # table for pcc by env
     pcc_series = results['pcc_by_env']
@@ -602,6 +670,15 @@ def main():
         f"{metric_prefix}/max_env_scale_std": float(results['max_env_scale_std']),
         f"{metric_prefix}/max_env_shift_std": float(results['max_env_shift_std']),
     })
+
+    _update_selector_audit(
+        checkpoint_root=checkpoint_path.parent,
+        alias=_resolve_eval_alias(args, checkpoint_path),
+        metric_prefix=metric_prefix,
+        checkpoint_path=checkpoint_path,
+        payload=checkpoint_payload,
+        results=results,
+    )
 
     # plot image
     run.log({f"{metric_prefix}/pred_vs_actual": wandb.Image(str(plot_path))})

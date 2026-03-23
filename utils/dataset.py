@@ -305,6 +305,11 @@ class GxE_Dataset(Dataset):
         self.proxy_seed = int(proxy_seed)
         self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_split_info = None
+        self.leo_val_env_list: list[str] = []
+        self.leo_val_env_hash: Optional[str] = None
+        self.proxy_heldout_parent1_list: list[str] = []
+        self.proxy_heldout_parent1_hash: Optional[str] = None
+        self.split_fingerprints: Dict[str, Any] = {}
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"g_input_type must be one of ['tokens', 'grm'] (got {g_input_type})")
 
@@ -438,6 +443,37 @@ class GxE_Dataset(Dataset):
                 keep_mask = x_raw['Year'] == which
             else: # 'test', 'sub'
                 keep_mask = x_raw['Year'] >= 2024
+
+        self.leo_val_env_list = (
+            sorted(str(env) for env in self.leo_val_envs)
+            if self.leo_val_envs else []
+        )
+        self.leo_val_env_hash = stable_hash_json(self.leo_val_env_list) if self.leo_val_env_list else None
+        if self.proxy_split_info is not None:
+            self.proxy_heldout_parent1_list = sorted(
+                str(parent) for parent in self.proxy_split_info.get("heldout_parent1", [])
+            )
+            self.proxy_heldout_parent1_hash = (
+                stable_hash_json(self.proxy_heldout_parent1_list)
+                if self.proxy_heldout_parent1_list else None
+            )
+        self.split_fingerprints = {
+            "val_scheme": self.val_scheme,
+            "leo_val_envs": self.leo_val_env_list,
+            "leo_val_env_hash": self.leo_val_env_hash,
+            "proxy_tester": self.proxy_tester if self.proxy_split_info is not None else None,
+            "proxy_holdout_frac": self.proxy_holdout_frac if self.proxy_split_info is not None else None,
+            "proxy_seed": self.proxy_seed if self.proxy_split_info is not None else None,
+            "proxy_heldout_parent1": self.proxy_heldout_parent1_list if self.proxy_split_info is not None else [],
+            "proxy_heldout_parent1_hash": self.proxy_heldout_parent1_hash,
+            "proxy_row_count": int(self.proxy_split_info["row_count"]) if self.proxy_split_info is not None else None,
+            "proxy_env_count": int(self.proxy_split_info["env_count"]) if self.proxy_split_info is not None else None,
+            "proxy_hybrid_count": int(self.proxy_split_info["hybrid_count"]) if self.proxy_split_info is not None else None,
+            "proxy_year_distribution": (
+                dict(self.proxy_split_info.get("year_distribution", {}))
+                if self.proxy_split_info is not None else None
+            ),
+        }
 
         ### FILTER/ALIGN X/Y BY MASK BUILT ON X ###
         x_filt = x_raw.loc[keep_mask.values].reset_index(drop=True)

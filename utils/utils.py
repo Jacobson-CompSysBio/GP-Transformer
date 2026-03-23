@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import json
 import os
 import sys
 import torch
@@ -107,7 +108,12 @@ def parse_args():
 
     p.add_argument("--heads", type=int, default=16)
     p.add_argument("--emb_size", type=int, default=768)
-    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--seed", type=int, default=1,
+                   help="Legacy seed alias. If model_seed/split_seed are omitted, this sets both.")
+    p.add_argument("--model_seed", type=int, default=None,
+                   help="Seed for model initialization, samplers, and dataloader worker RNG.")
+    p.add_argument("--split_seed", type=int, default=None,
+                   help="Seed for deterministic validation split construction (for example LEO env holdout).")
     p.add_argument("--dropout", type=float, default=0.25)
     p.add_argument("--scale_targets", type=str2bool, default=False)
 
@@ -206,6 +212,10 @@ def parse_args():
     p.add_argument("--metric_prefix", type=str, default=None,
                    help="Metric namespace prefix for eval logging (default: derived from checkpoint tag).")
     args = p.parse_args()
+    if getattr(args, "model_seed", None) is None:
+        args.model_seed = int(args.seed)
+    if getattr(args, "split_seed", None) is None:
+        args.split_seed = int(args.seed)
     # Backward compatibility for older scripts/configs that used env_cat_embeddings.
     if getattr(args, "env_cat_embeddings", None) is not None and "--env_categorical_mode" not in sys.argv:
         args.env_categorical_mode = "onehot" if bool(args.env_cat_embeddings) else "drop"
@@ -364,13 +374,17 @@ def make_run_name(args) -> str:
     )
 
 
-def add_runtime_suffix(run_name: str, seed: Optional[int] = None) -> str:
+def add_runtime_suffix(run_name: str,
+                       seed: Optional[int] = None,
+                       split_seed: Optional[int] = None) -> str:
     """
     Make same-config reruns unique for W&B names and checkpoint directories.
     """
     parts: list[str] = []
     if seed is not None:
         parts.append(f"s{seed}")
+    if split_seed is not None and split_seed != seed:
+        parts.append(f"split{split_seed}")
 
     job_id = os.getenv("SLURM_JOB_ID")
     if job_id:
@@ -422,6 +436,14 @@ def set_seed(seed: int = 42):
 
     # optional, but slower
     # torch.use_deterministic_algorithms(True)
+
+
+def stable_hash_json(payload) -> str:
+    """
+    Stable short hash for split fingerprints and selector-audit metadata.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
 
 # need a seed function for dataloader workers
 def seed_worker(worker_id):
