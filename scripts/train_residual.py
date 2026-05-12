@@ -91,6 +91,53 @@ def _normalize_choice(name: str, value, allowed: set[str], default: str) -> str:
         raise ValueError(f"Unsupported {name}='{value}'. Allowed: {sorted(allowed)}")
     return v
 
+
+def _metric_improved(current_score: float,
+                     best_score: float,
+                     tie_breakers: list[tuple[float, float]] | None = None,
+                     eps: float = 1e-8) -> bool:
+    if not math.isfinite(current_score):
+        return False
+    if not math.isfinite(best_score):
+        return True
+    if current_score > best_score + eps:
+        return True
+    if abs(current_score - best_score) > eps:
+        return False
+    for current_tie, best_tie in tie_breakers or []:
+        if current_tie < best_tie - eps:
+            return True
+        if abs(current_tie - best_tie) > eps:
+            return False
+    return False
+
+
+def _safe_metric_snapshot(**metrics):
+    snapshot = {}
+    for key, value in metrics.items():
+        if value is None:
+            snapshot[key] = None
+        elif isinstance(value, (int, float)):
+            snapshot[key] = float(value) if math.isfinite(float(value)) else None
+        else:
+            snapshot[key] = value
+    return snapshot
+
+
+def _update_checkpoint_manifest(manifest_path: Path,
+                                alias_state: dict,
+                                alias: str,
+                                ckpt_path: Path,
+                                epoch: int,
+                                metrics: dict):
+    alias_state[alias] = {
+        "path": ckpt_path.name,
+        "epoch": int(epoch),
+        "metrics": metrics,
+    }
+    payload = {"aliases": alias_state}
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
 # residual: small helper to move nested dicts to device
 def _move_to_device(obj, device):
     if isinstance(obj, torch.Tensor):
@@ -104,7 +151,11 @@ def main():
     # setup
     args = parse_args()
     base_run_name = make_run_name(args)
-    wandb_run_name = add_runtime_suffix(base_run_name, getattr(args, "seed", None))
+    wandb_run_name = add_runtime_suffix(
+        base_run_name,
+        getattr(args, "model_seed", None),
+        getattr(args, "split_seed", None),
+    )
 
     device, local_rank, rank, world_size = setup_ddp()
 
@@ -117,22 +168,29 @@ def main():
             return cast(env_val) if cast is not None else env_val
         return val
 
-    # reproducibility 
-    torch.manual_seed(args.seed + rank)
-    random.seed(args.seed + rank)
+    # reproducibility
+    set_seed(args.model_seed + rank)
+    g = torch.Generator()
+    g.manual_seed(args.model_seed + rank)
 
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    val_scheme = normalize_val_scheme(
+        _get_arg_or_env("val_scheme", "VAL_SCHEME", getattr(args, "val_scheme", None), str),
+        leo_val=leo_val,
+    )
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
     
-    if is_main(rank) and leo_val:
-        print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
-        print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
     if is_main(rank):
+        print(f"[INFO] Validation scheme: {val_scheme}")
+        print(f"[INFO] model_seed={args.model_seed}, split_seed={args.split_seed}")
+        if val_scheme == "leo":
+            print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
+            print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
 
     # data (samplers are needed for DDP)
@@ -146,16 +204,17 @@ def main():
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=None,
+        val_scheme=val_scheme,
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
-        leo_seed=args.seed,
+        leo_seed=args.split_seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
         print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
     
@@ -169,15 +228,25 @@ def main():
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
+        val_scheme=val_scheme,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        leo_val_fraction=leo_val_fraction,
+        leo_seed=args.split_seed,
     )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
 
-    train_sampler = DistributedSampler(train_ds, shuffle=True)
-    val_sampler = DistributedSampler(val_ds, shuffle=False)
+    split_fingerprints = {
+        "val_scheme": val_scheme,
+        "split_seed": int(args.split_seed),
+        "leo_val_envs": list(train_ds.leo_val_env_list),
+        "leo_val_env_hash": train_ds.leo_val_env_hash,
+    }
+
+    train_sampler = DistributedSampler(train_ds, shuffle=True, seed=args.model_seed)
+    val_sampler = DistributedSampler(val_ds, shuffle=False, seed=args.model_seed)
     
     # Check if using env-stratified sampling (recommended for envpcc loss)
     env_stratified = _get_arg_or_env("env_stratified", "ENV_STRATIFIED", False, str2bool)
@@ -192,7 +261,7 @@ def main():
             env_ids=train_ds.env_id_tensor.tolist(),
             batch_size=args.batch_size,
             shuffle=True,
-            seed=args.seed,
+            seed=args.model_seed,
             rank=rank,
             world_size=world_size,
             min_samples_per_env=min_samples_per_env,
@@ -209,6 +278,7 @@ def main():
             batch_sampler=train_sampler,
             pin_memory=True,
             num_workers=0,  # Disabled: causes slowdown on Lustre
+            worker_init_fn=seed_worker,
         )
     else:
         train_loader = DataLoader(
@@ -217,6 +287,7 @@ def main():
             sampler=train_sampler,
             pin_memory=True,
             num_workers=0,
+            worker_init_fn=seed_worker,
         )
     val_loader = DataLoader(
         val_ds, 
@@ -224,6 +295,7 @@ def main():
         sampler=val_sampler,
         pin_memory=True,
         num_workers=0,
+        worker_init_fn=seed_worker,
     )
 
     # set up config
@@ -455,7 +527,11 @@ def main():
         wandb.config.update({"loss": args.loss,
                              "loss_weights": args.loss_weights,
                              "selection_metric": "val/env_avg_pearson",
+                             "val_scheme": val_scheme,
                              "residual": args.residual,
+                             "seed": args.seed,
+                             "model_seed": args.model_seed,
+                             "split_seed": args.split_seed,
                              "detach_ymean": args.detach_ymean,
                              "lambda_ymean": args.lambda_ymean,
                              "lambda_resid": args.lambda_resid,
@@ -493,6 +569,12 @@ def main():
                              "e_contrastive_weight": env_contrastive_weight if use_e_contrastive else None,
                              "e_contrastive_temperature": env_contrastive_temperature if use_e_contrastive else None,},
                              allow_val_change=True)
+        run.summary["seed"] = int(args.seed)
+        run.summary["model_seed"] = int(args.model_seed)
+        run.summary["split_seed"] = int(args.split_seed)
+        run.summary["val_scheme"] = val_scheme
+        run.summary["leo/val_env_hash"] = split_fingerprints["leo_val_env_hash"]
+        run.summary["leo/val_envs"] = json.dumps(split_fingerprints["leo_val_envs"])
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
             run.define_metric(f"train_loss_epoch/{name}", step_metric="epoch")
@@ -528,8 +610,13 @@ def main():
     last_improved = 0
     iter_num = 0
     t0 = time.time()
+    checkpoint_alias_state = {}
+    manifest_path = None
+    selection_metric_name = "val_rank_env_pcc"
     if is_main(rank):
-        print("[INFO] Checkpoint/early-stop selection metric: val/env_avg_pearson (maximize)")
+        manifest_path = run_ckpt_dir / "checkpoint_manifest.json"
+    if is_main(rank):
+        print(f"[INFO] Checkpoint/early-stop selection metric: {selection_metric_name}")
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -804,99 +891,146 @@ def main():
             wandb.log(log_epoch_payload)
 
             val_loss_value = float(val_total.item())
-            improved = False
-            if math.isfinite(val_env_pcc):
-                if (val_env_pcc > best_val_env_pcc + 1e-8) or (
-                    abs(val_env_pcc - best_val_env_pcc) <= 1e-8
-                    and val_loss_value < best_val_loss
-                ):
-                    improved = True
-            elif not math.isfinite(best_val_env_pcc) and (val_loss_value < best_val_loss):
-                improved = True
+            improved = _metric_improved(
+                val_env_pcc,
+                best_val_env_pcc,
+                tie_breakers=[(val_loss_value, best_val_loss)],
+            )
+            if not math.isfinite(val_env_pcc) and not math.isfinite(best_val_env_pcc):
+                improved = val_loss_value < best_val_loss
 
             if improved:
-                best_val_loss = val_loss_value
-                best_val_env_pcc = val_env_pcc
                 last_improved = 0
-                
-                # collect env scaler and y scalers
-                env_scaler_payload = {
-                    "mean": env_scaler.mean_.tolist(),
-                    "scale": env_scaler.scale_.tolist(),
-                    "var": env_scaler.var_.tolist(),
-                    "n_features_in": int(train_ds.scaler.n_features_in_),
-                    "feature_names_in": list(train_ds.e_cols),
-                }
-
-                label_scalers_payload = None
-                if hasattr(train_ds, 'label_scalers') and train_ds.label_scalers:
-                    label_scalers_payload = {
-                        k: {"mean": float(v.mean), "std": float(v.std)}
-                        for k, v in train_ds.label_scalers.items()
-                    }
-                marker_stats_payload = None
-                if getattr(train_ds, "marker_stats", None):
-                    marker_stats_payload = {
-                        "p": train_ds.marker_stats["p"].tolist(),
-                        "scale": train_ds.marker_stats["scale"].tolist(),
-                        "valid": train_ds.marker_stats["valid"].tolist(),
-                        "columns": list(train_ds.marker_stats["columns"]),
-                    }
-
-                ckpt = {
-                    "model": model.module.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch_num,
-                    "val_loss": val_loss_value,
-                    "val_env_avg_pearson": val_env_pcc,
-                    "config": {
-                        "g_enc": args.g_enc,
-                        "e_enc": args.e_enc,
-                        "ld_enc": args.ld_enc,
-                        "gxe_enc": args.gxe_enc,
-                        "block_size": config.block_size,
-                        "n_env_fts": config.n_env_fts,
-                        "g_layers": args.g_layers,
-                        "ld_layers": args.ld_layers,
-                        "mlp_layers": args.mlp_layers,
-                        "gxe_layers": args.gxe_layers,
-                        "n_head": args.heads,
-                        "n_embd": args.emb_size,
-                        "g_encoder_type": g_encoder_type,
-                        "moe_num_experts": moe_num_experts,
-                        "moe_top_k": moe_top_k,
-                        "moe_expert_hidden_dim": moe_expert_hidden_dim,
-                        "moe_shared_expert": moe_shared_expert,
-                        "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
-                        "moe_loss_weight": moe_loss_weight,
-                        "g_input_type": g_input_type,
-                        "env_categorical_mode": env_categorical_mode,
-                        "env_cat_embeddings": (env_categorical_mode == "onehot"),
-                        "full_tf_mlp_type": full_tf_mlp_type,
-                        "loss": args.loss,
-                        "loss_weights": args.loss_weights,
-                        "residual": args.residual,
-                        "lambda_ymean": args.lambda_ymean,
-                        "lambda_resid": args.lambda_resid,
-                        "detach_ymean": args.detach_ymean,
-                        "full_transformer": args.full_transformer,
-                        "scale_targets": args.scale_targets,
-                    },
-                    "env_scaler": env_scaler_payload,
-                    "y_scalers": label_scalers_payload,
-                    "marker_stats": marker_stats_payload,
-                    "run": {"id": run.id if 'run' in locals() else None,
-                            "name": wandb_run_name}
-                }
-                ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
-                torch.save(ckpt, ckpt_path)
-                print(
-                    "*** validation env_avg_pearson improved: "
-                    f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
-                )
             else:
                 last_improved += 1
                 print(f"Validation has not improved in {last_improved} steps")
+
+            best_val_loss = val_loss_value if improved else best_val_loss
+            best_val_env_pcc = val_env_pcc if improved else best_val_env_pcc
+
+            # collect env scaler and y scalers
+            env_scaler_payload = {
+                "mean": env_scaler.mean_.tolist(),
+                "scale": env_scaler.scale_.tolist(),
+                "var": env_scaler.var_.tolist(),
+                "n_features_in": int(train_ds.scaler.n_features_in_),
+                "feature_names_in": list(train_ds.e_cols),
+            }
+
+            label_scalers_payload = None
+            if hasattr(train_ds, 'label_scalers') and train_ds.label_scalers:
+                label_scalers_payload = {
+                    k: {"mean": float(v.mean), "std": float(v.std)}
+                    for k, v in train_ds.label_scalers.items()
+                }
+            marker_stats_payload = None
+            if getattr(train_ds, "marker_stats", None):
+                marker_stats_payload = {
+                    "p": train_ds.marker_stats["p"].tolist(),
+                    "scale": train_ds.marker_stats["scale"].tolist(),
+                    "valid": train_ds.marker_stats["valid"].tolist(),
+                    "columns": list(train_ds.marker_stats["columns"]),
+                }
+
+            metric_snapshot = _safe_metric_snapshot(
+                selection_metric_name=selection_metric_name,
+                val_loss=val_loss_value,
+                val_rank_env_pcc=val_env_pcc,
+                val_total_env_pcc=val_env_pcc,
+            )
+
+            ckpt = {
+                "model": model.module.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch_num,
+                "val_loss": val_loss_value,
+                "val_env_avg_pearson": val_env_pcc,
+                "checkpoint_metric": "val",
+                "checkpoint_metrics": metric_snapshot,
+                "config": {
+                    "g_enc": args.g_enc,
+                    "e_enc": args.e_enc,
+                    "ld_enc": args.ld_enc,
+                    "gxe_enc": args.gxe_enc,
+                    "block_size": config.block_size,
+                    "n_env_fts": config.n_env_fts,
+                    "g_layers": args.g_layers,
+                    "ld_layers": args.ld_layers,
+                    "mlp_layers": args.mlp_layers,
+                    "gxe_layers": args.gxe_layers,
+                    "n_head": args.heads,
+                    "n_embd": args.emb_size,
+                    "seed": args.seed,
+                    "model_seed": args.model_seed,
+                    "split_seed": args.split_seed,
+                    "g_encoder_type": g_encoder_type,
+                    "moe_num_experts": moe_num_experts,
+                    "moe_top_k": moe_top_k,
+                    "moe_expert_hidden_dim": moe_expert_hidden_dim,
+                    "moe_shared_expert": moe_shared_expert,
+                    "moe_shared_expert_hidden_dim": moe_shared_expert_hidden_dim,
+                    "moe_loss_weight": moe_loss_weight,
+                    "g_input_type": g_input_type,
+                    "env_categorical_mode": env_categorical_mode,
+                    "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                    "full_tf_mlp_type": full_tf_mlp_type,
+                    "loss": args.loss,
+                    "loss_weights": args.loss_weights,
+                    "residual": args.residual,
+                    "lambda_ymean": args.lambda_ymean,
+                    "lambda_resid": args.lambda_resid,
+                    "detach_ymean": args.detach_ymean,
+                    "full_transformer": args.full_transformer,
+                    "scale_targets": args.scale_targets,
+                    "val_scheme": val_scheme,
+                },
+                "split_fingerprints": split_fingerprints,
+                "env_scaler": env_scaler_payload,
+                "y_scalers": label_scalers_payload,
+                "marker_stats": marker_stats_payload,
+                "run": {"id": run.id if 'run' in locals() else None,
+                        "name": wandb_run_name}
+            }
+            latest_path = run_ckpt_dir / "latest.pt"
+            torch.save(ckpt, latest_path)
+            _update_checkpoint_manifest(
+                manifest_path,
+                checkpoint_alias_state,
+                "latest",
+                latest_path,
+                epoch_num,
+                metric_snapshot,
+            )
+
+            if improved:
+                ckpt_path = run_ckpt_dir / f"checkpoint_{epoch_num:04d}.pt"
+                shutil.copy2(latest_path, ckpt_path)
+                best_alias_path = run_ckpt_dir / "best_val.pt"
+                shutil.copy2(latest_path, best_alias_path)
+                _update_checkpoint_manifest(
+                    manifest_path,
+                    checkpoint_alias_state,
+                    "best_val",
+                    best_alias_path,
+                    epoch_num,
+                    metric_snapshot,
+                )
+                if val_scheme == "leo":
+                    leo_alias_path = run_ckpt_dir / "best_leo.pt"
+                    shutil.copy2(latest_path, leo_alias_path)
+                    _update_checkpoint_manifest(
+                        manifest_path,
+                        checkpoint_alias_state,
+                        "best_leo",
+                        leo_alias_path,
+                        epoch_num,
+                        metric_snapshot,
+                    )
+                print(
+                    "*** best_val updated: "
+                    f"val_env_pcc={best_val_env_pcc:.5f} "
+                    f"(val_loss={best_val_loss:.4e}) ***"
+                )
         
         # create a stop flag so all ranks stop training
         stop_flag = torch.tensor([0], device=device)

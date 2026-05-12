@@ -2,8 +2,8 @@
 #SBATCH -A SYB114
 #SBATCH -J 3p,strat,moe,res
 #SBATCH -N 4
-#SBATCH -t 02:00:00
-#SBATCH -p batch 
+#SBATCH -t 04:00:00
+#SBATCH -p extended
 #SBATCH -o logs/%x-%j.out # Out Path
 #SBATCH -e logs/%x-%j.err # Err Path
 #SBATCH --open-mode=truncate # Overwrite .out/.err
@@ -59,31 +59,35 @@ export MOE_EXPERT_HIDDEN_DIM=$EMB_SIZE    # override default (4x) to match emb d
 export MOE_SHARED_EXPERT_HIDDEN_DIM=$EMB_SIZE
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
-export LOSS="envpcc+envmse+pcc+mse"
-export LOSS_WEIGHTS="1.0,0.1,0.1,0.1"
-export SCALE_TARGETS=False
+export SEED=${SEED:-1}
+export MODEL_SEED=${MODEL_SEED:-$SEED}
+export SPLIT_SEED=${SPLIT_SEED:-$SEED}
+export LOSS=${LOSS:-envpcc+envmse+pcc+mse}
+export LOSS_WEIGHTS=${LOSS_WEIGHTS:-1.0,0.1,0.1,0.1}
+export SCALE_TARGETS=${SCALE_TARGETS:-False}
 
 # Residual loss weights
-export LAMBDA_YMEAN=0.05
-export LAMBDA_RESID=1.0
-export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
-export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
+export LAMBDA_YMEAN=${LAMBDA_YMEAN:-0.05}
+export LAMBDA_RESID=${LAMBDA_RESID:-1.0}
+export ENV_STRATIFIED=${ENV_STRATIFIED:-True}  # use environment-stratified batching for envpcc loss
+export MIN_SAMPLES_PER_ENV=${MIN_SAMPLES_PER_ENV:-32}  # samples per environment per batch for stable correlation
 
 # Contrastive loss: encourages G embeddings to reflect genetic similarity
 # This can improve generalization by learning meaningful genomic representations
 # NOTE: Now uses warmup - doesn't activate until epoch 50
-export CONTRASTIVE_MODE=g           # ablation: none, g, e, g+e
-export CONTRASTIVE_WEIGHT=0.05      # Lower weight (was 0.1) - ramps up after warmup
-export CONTRASTIVE_TEMPERATURE=0.5  # temperature for softmax (higher = softer)
-export CONTRASTIVE_SIM_TYPE=grm     # 'grm' (recommended) or 'ibs'
-export CONTRASTIVE_LOSS_TYPE=mse    # 'mse' (recommended), 'cosine', or 'kl'
-export ENV_CONTRASTIVE_WEIGHT=0.05
-export ENV_CONTRASTIVE_TEMPERATURE=0.5
+export CONTRASTIVE_MODE=${CONTRASTIVE_MODE:-g}           # ablation: none, g, e, g+e
+export CONTRASTIVE_WEIGHT=${CONTRASTIVE_WEIGHT:-0.05}
+export CONTRASTIVE_TEMPERATURE=${CONTRASTIVE_TEMPERATURE:-0.5}
+export CONTRASTIVE_SIM_TYPE=${CONTRASTIVE_SIM_TYPE:-grm}
+export CONTRASTIVE_LOSS_TYPE=${CONTRASTIVE_LOSS_TYPE:-mse}
+export ENV_CONTRASTIVE_WEIGHT=${ENV_CONTRASTIVE_WEIGHT:-0.05}
+export ENV_CONTRASTIVE_TEMPERATURE=${ENV_CONTRASTIVE_TEMPERATURE:-0.5}
 
 # LEO (Leave-Environment-Out) validation: hold out entire environments for val
 # This better simulates test performance on unseen environments
-export LEO_VAL=True
-export LEO_VAL_FRACTION=0.15  # fraction of environments to hold out (default 15%)
+export VAL_SCHEME=${VAL_SCHEME:-leo}
+export LEO_VAL=${LEO_VAL:-True}
+export LEO_VAL_FRACTION=${LEO_VAL_FRACTION:-0.15}
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -138,6 +142,9 @@ srun -N ${SLURM_NNODES} \
         --gxe_layers $GXE_LAYERS \
         --heads $HEADS \
         --emb_size $EMB_SIZE \
+        --seed $SEED \
+        --model_seed $MODEL_SEED \
+        --split_seed $SPLIT_SEED \
         --g_input_type $G_INPUT_TYPE \
         --env_categorical_mode $ENV_CATEGORICAL_MODE \
         --loss $LOSS \
@@ -152,6 +159,7 @@ srun -N ${SLURM_NNODES} \
         --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION
 
@@ -173,30 +181,49 @@ else
     exit 2
 fi
 
-python -u scripts/eval.py \
-    --batch_size $BATCH_SIZE \
-    --gbs $GBS \
-    --g_enc $G_ENC \
-    --e_enc $E_ENC \
-    --ld_enc $LD_ENC \
-    --gxe_enc $GXE_ENC \
-    --wg $WG \
-    --full_transformer $FULL_TRANSFORMER \
-    --residual $RES \
-    --num_epochs $NUM_EPOCHS \
-    --lr $LR \
-    --weight_decay $WEIGHT_DECAY \
-    --dropout $DROPOUT \
-    --early_stop $EARLY_STOP \
-    --g_layers $G_LAYERS \
-    --ld_layers $LD_LAYERS \
-    --mlp_layers $MLP_LAYERS \
-    --gxe_layers $GXE_LAYERS \
-    --heads $HEADS \
-    --emb_size $EMB_SIZE \
-    --g_input_type $G_INPUT_TYPE \
-    --env_categorical_mode $ENV_CATEGORICAL_MODE \
-    --checkpoint_dir "$CHECKPOINT_DIR" \
-    --loss $LOSS \
-    --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS
+run_eval() {
+    local checkpoint_tag="$1"
+    local metric_prefix="$2"
+    python -u scripts/eval.py \
+        --batch_size $BATCH_SIZE \
+        --gbs $GBS \
+        --g_enc $G_ENC \
+        --e_enc $E_ENC \
+        --ld_enc $LD_ENC \
+        --gxe_enc $GXE_ENC \
+        --wg $WG \
+        --full_transformer $FULL_TRANSFORMER \
+        --residual $RES \
+        --num_epochs $NUM_EPOCHS \
+        --lr $LR \
+        --weight_decay $WEIGHT_DECAY \
+        --dropout $DROPOUT \
+        --early_stop $EARLY_STOP \
+        --g_layers $G_LAYERS \
+        --ld_layers $LD_LAYERS \
+        --mlp_layers $MLP_LAYERS \
+        --gxe_layers $GXE_LAYERS \
+        --heads $HEADS \
+        --emb_size $EMB_SIZE \
+        --seed $SEED \
+        --model_seed $MODEL_SEED \
+        --split_seed $SPLIT_SEED \
+        --g_input_type $G_INPUT_TYPE \
+        --env_categorical_mode $ENV_CATEGORICAL_MODE \
+        --checkpoint_dir "$CHECKPOINT_DIR" \
+        --checkpoint_tag "$checkpoint_tag" \
+        --metric_prefix "$metric_prefix" \
+        --loss $LOSS \
+        --loss_weights $LOSS_WEIGHTS \
+        --scale_targets $SCALE_TARGETS
+}
+
+if [[ -f "$CHECKPOINT_DIR/best_val.pt" ]]; then
+    run_eval best_val test
+elif [[ -f "$CHECKPOINT_DIR/best_leo.pt" ]]; then
+    run_eval best_leo test
+else
+    echo "[ERROR] No best_val.pt or best_leo.pt found in $CHECKPOINT_DIR"
+    exit 3
+fi
+run_eval latest test_latest

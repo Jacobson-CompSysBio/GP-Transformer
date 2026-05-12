@@ -151,6 +151,10 @@ def parse_args():
                    help="Tester parent2 used for proxy validation.")
     p.add_argument("--proxy_holdout_frac", type=float, default=0.10,
                    help="Held-out fraction of unique parent1 groups for proxy validation.")
+    p.add_argument("--proxy_year_min", type=int, default=None,
+                   help="Optional minimum year included in the proxy validation pool.")
+    p.add_argument("--proxy_year_max", type=int, default=None,
+                   help="Optional maximum year included in the proxy validation pool.")
     p.add_argument("--proxy_seed", type=int, default=1,
                    help="Random seed for proxy validation holdout.")
     p.add_argument("--proxy_score_weight", type=float, default=0.55,
@@ -205,7 +209,7 @@ def parse_args():
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     p.add_argument("--checkpoint_tag", type=str, default=None,
-                   choices=["best_leo", "best_select", "best_scale", "latest"],
+                   choices=["best_leo", "best_select", "best_scale", "best_val", "latest"],
                    help="Checkpoint alias to load during eval.")
     p.add_argument("--checkpoint_path", type=str, default=None,
                    help="Explicit checkpoint path to load during eval.")

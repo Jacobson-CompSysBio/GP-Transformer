@@ -155,6 +155,8 @@ def compute_proxy_parent_holdout(
     proxy_tester: str = "PHP02",
     holdout_frac: float = 0.10,
     seed: int = 1,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Build a deterministic same-tester proxy split.
@@ -166,10 +168,25 @@ def compute_proxy_parent_holdout(
     if 'parent1' not in x_raw.columns or 'parent2' not in x_raw.columns:
         x_raw = add_hybrid_parent_columns(x_raw)
 
+    if year_min is not None and year_max is not None and int(year_min) > int(year_max):
+        raise ValueError(f"proxy_year_min={year_min} cannot exceed proxy_year_max={year_max}.")
+
     proxy_mask = (x_raw['Year'] < test_year) & (x_raw['parent2'].astype(str) == str(proxy_tester))
+    if year_min is not None:
+        proxy_mask = proxy_mask & (x_raw['Year'] >= int(year_min))
+    if year_max is not None:
+        proxy_mask = proxy_mask & (x_raw['Year'] <= int(year_max))
     proxy_pool = x_raw.loc[proxy_mask].copy()
     if proxy_pool.empty:
-        raise ValueError(f"No proxy rows found for tester='{proxy_tester}' before {test_year}.")
+        year_window = []
+        if year_min is not None:
+            year_window.append(f"year_min={int(year_min)}")
+        if year_max is not None:
+            year_window.append(f"year_max={int(year_max)}")
+        year_window_msg = f" ({', '.join(year_window)})" if year_window else ""
+        raise ValueError(
+            f"No proxy rows found for tester='{proxy_tester}' before {test_year}{year_window_msg}."
+        )
 
     parent_year_counts = (
         proxy_pool.groupby(['parent1', 'Year'])
@@ -228,6 +245,8 @@ def compute_proxy_parent_holdout(
         "tester": str(proxy_tester),
         "holdout_frac": float(holdout_frac),
         "seed": int(seed),
+        "year_min": int(year_min) if year_min is not None else None,
+        "year_max": int(year_max) if year_max is not None else None,
         "heldout_parent1": heldout_parent1,
         "heldout_mask": heldout_mask.to_numpy(dtype=bool),
         "row_count": int(len(proxy_val)),
@@ -262,6 +281,8 @@ class GxE_Dataset(Dataset):
                  leo_seed: int = 42,
                  proxy_tester: str = "PHP02",
                  proxy_holdout_frac: float = 0.10,
+                 proxy_year_min: Optional[int] = None,
+                 proxy_year_max: Optional[int] = None,
                  proxy_seed: int = 1,
                  proxy_split_info: Optional[Dict[str, Any]] = None,
                  proxy_disjoint_from_leo: bool = True,
@@ -287,6 +308,8 @@ class GxE_Dataset(Dataset):
             leo_seed (int): random seed for LEO environment selection
             proxy_tester (str): tester parent2 targeted by proxy validation
             proxy_holdout_frac (float): held-out fraction of unique parent1 groups in proxy validation
+            proxy_year_min (Optional[int]): minimum proxy-pool year, inclusive
+            proxy_year_max (Optional[int]): maximum proxy-pool year, inclusive
             proxy_seed (int): random seed for proxy held-out parent1 selection
             proxy_split_info (Optional[Dict[str, Any]]): precomputed proxy split spec from train split
             proxy_disjoint_from_leo (bool): if True, exclude LEO validation environments from proxy_val
@@ -302,6 +325,8 @@ class GxE_Dataset(Dataset):
         self.val_scheme = normalize_val_scheme(val_scheme, leo_val=leo_val)
         self.proxy_tester = str(proxy_tester)
         self.proxy_holdout_frac = float(proxy_holdout_frac)
+        self.proxy_year_min = int(proxy_year_min) if proxy_year_min is not None else None
+        self.proxy_year_max = int(proxy_year_max) if proxy_year_max is not None else None
         self.proxy_seed = int(proxy_seed)
         self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_split_info = None
@@ -373,6 +398,8 @@ class GxE_Dataset(Dataset):
                     proxy_tester=self.proxy_tester,
                     holdout_frac=self.proxy_holdout_frac,
                     seed=self.proxy_seed,
+                    year_min=self.proxy_year_min,
+                    year_max=self.proxy_year_max,
                 )
             self.proxy_split_info = proxy_split_info
 
@@ -401,6 +428,8 @@ class GxE_Dataset(Dataset):
                     proxy_tester=self.proxy_tester,
                     holdout_frac=self.proxy_holdout_frac,
                     seed=self.proxy_seed,
+                    year_min=self.proxy_year_min,
+                    year_max=self.proxy_year_max,
                 )
             self.proxy_split_info = proxy_split_info
 
@@ -464,6 +493,8 @@ class GxE_Dataset(Dataset):
             "proxy_tester": self.proxy_tester if self.proxy_split_info is not None else None,
             "proxy_holdout_frac": self.proxy_holdout_frac if self.proxy_split_info is not None else None,
             "proxy_seed": self.proxy_seed if self.proxy_split_info is not None else None,
+            "proxy_year_min": self.proxy_year_min if self.proxy_split_info is not None else None,
+            "proxy_year_max": self.proxy_year_max if self.proxy_split_info is not None else None,
             "proxy_heldout_parent1": self.proxy_heldout_parent1_list if self.proxy_split_info is not None else [],
             "proxy_heldout_parent1_hash": self.proxy_heldout_parent1_hash,
             "proxy_row_count": int(self.proxy_split_info["row_count"]) if self.proxy_split_info is not None else None,
@@ -663,8 +694,12 @@ class GxE_Dataset(Dataset):
         if self.split in ('sub', 'test'):
             row = self.y_data.iloc[index]
             # return only the columns that exist (Env and Yield_Mg_ha are typical)
-            keep_cols = [c for c in ('Env', 'Hybrid', 'Yield_Mg_ha') if c in self.y_data.columns]
+            keep_cols = [c for c in ('id', 'Env', 'Hybrid', 'Yield_Mg_ha') if c in self.y_data.columns]
+            if "id" not in keep_cols and "id" in self.meta.columns:
+                keep_cols = ["id"] + keep_cols
             y = {c: row[c] for c in keep_cols}
+            if "id" not in y and "id" in self.meta.columns:
+                y["id"] = self.meta.iloc[index]["id"]
             return x, y
 
         # scaled targets if scale_targets=True or raw otherwise

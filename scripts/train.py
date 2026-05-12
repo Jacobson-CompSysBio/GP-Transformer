@@ -232,6 +232,8 @@ def main():
     )
     proxy_tester = str(_get_arg_or_env("proxy_tester", "PROXY_TESTER", args.proxy_tester, str))
     proxy_holdout_frac = float(_get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", args.proxy_holdout_frac, float))
+    proxy_year_min = _get_arg_or_env("proxy_year_min", "PROXY_YEAR_MIN", args.proxy_year_min, int)
+    proxy_year_max = _get_arg_or_env("proxy_year_max", "PROXY_YEAR_MAX", args.proxy_year_max, int)
     proxy_seed = int(_get_arg_or_env("proxy_seed", "PROXY_SEED", args.proxy_seed, int))
     proxy_disjoint_from_leo = _get_arg_or_env(
         "proxy_disjoint_from_leo",
@@ -260,6 +262,7 @@ def main():
             print(
                 f"[INFO] Proxy split: tester={proxy_tester}, "
                 f"holdout_frac={proxy_holdout_frac:.2f}, seed={proxy_seed}, "
+                f"year_min={proxy_year_min}, year_max={proxy_year_max}, "
                 f"disjoint_from_leo={bool(proxy_disjoint_from_leo)}"
             )
         print(f"[INFO] Canonical checkpoint metric: {checkpoint_metric}")
@@ -282,6 +285,8 @@ def main():
         leo_seed=args.split_seed,
         proxy_tester=proxy_tester,
         proxy_holdout_frac=proxy_holdout_frac,
+        proxy_year_min=proxy_year_min,
+        proxy_year_max=proxy_year_max,
         proxy_seed=proxy_seed,
         proxy_split_info=None,
         proxy_disjoint_from_leo=proxy_disjoint_from_leo,
@@ -313,6 +318,8 @@ def main():
         leo_seed=args.split_seed,
         proxy_tester=proxy_tester,
         proxy_holdout_frac=proxy_holdout_frac,
+        proxy_year_min=proxy_year_min,
+        proxy_year_max=proxy_year_max,
         proxy_seed=proxy_seed,
         proxy_split_info=proxy_split_info,
         proxy_disjoint_from_leo=proxy_disjoint_from_leo,
@@ -339,6 +346,8 @@ def main():
             leo_seed=args.split_seed,
             proxy_tester=proxy_tester,
             proxy_holdout_frac=proxy_holdout_frac,
+            proxy_year_min=proxy_year_min,
+            proxy_year_max=proxy_year_max,
             proxy_seed=proxy_seed,
             proxy_split_info=proxy_split_info,
             proxy_disjoint_from_leo=proxy_disjoint_from_leo,
@@ -368,6 +377,8 @@ def main():
         "leo_val_env_hash": train_ds.leo_val_env_hash,
         "proxy_tester": proxy_tester if use_proxy_split else None,
         "proxy_holdout_frac": proxy_holdout_frac if use_proxy_split else None,
+        "proxy_year_min": proxy_year_min if use_proxy_split else None,
+        "proxy_year_max": proxy_year_max if use_proxy_split else None,
         "proxy_seed": proxy_seed if use_proxy_split else None,
         "proxy_disjoint_from_leo": bool(proxy_disjoint_from_leo) if use_proxy_split else None,
         "proxy_heldout_parent1": list(train_ds.proxy_heldout_parent1_list) if use_proxy_split else [],
@@ -658,6 +669,8 @@ def main():
             "val_scheme": val_scheme,
             "proxy_tester": proxy_tester if use_proxy_split else None,
             "proxy_holdout_frac": proxy_holdout_frac if use_proxy_split else None,
+            "proxy_year_min": proxy_year_min if use_proxy_split else None,
+            "proxy_year_max": proxy_year_max if use_proxy_split else None,
             "proxy_seed": proxy_seed if use_proxy_split else None,
             "proxy_disjoint_from_leo": bool(proxy_disjoint_from_leo) if use_proxy_split else None,
             "proxy_score_weight": args.proxy_score_weight if val_scheme == "hybrid_combo" else None,
@@ -686,6 +699,9 @@ def main():
         run.summary["split_seed"] = int(args.split_seed)
         run.summary["leo/val_env_hash"] = split_fingerprints["leo_val_env_hash"]
         run.summary["leo/val_envs"] = json.dumps(split_fingerprints["leo_val_envs"])
+        if use_proxy_split:
+            run.summary["proxy/year_min"] = proxy_year_min
+            run.summary["proxy/year_max"] = proxy_year_max
 
         # make checkpoint dir that matches run name
         run_ckpt_dir = Path("checkpoints") / wandb_run_name
@@ -802,6 +818,8 @@ def main():
             run.summary["proxy/row_count"] = int(len(proxy_ds))
             run.summary["proxy/hybrid_count"] = int(proxy_ds.meta['Hybrid'].astype(str).nunique())
             run.summary["proxy/env_count"] = int(proxy_ds.meta['Env'].astype(str).nunique())
+            run.summary["proxy/year_min"] = proxy_year_min
+            run.summary["proxy/year_max"] = proxy_year_max
             run.summary["proxy/heldout_parent1_hash"] = split_fingerprints["proxy_heldout_parent1_hash"]
             run.summary["proxy/heldout_parent1"] = json.dumps(split_fingerprints["proxy_heldout_parent1"])
             run.summary["proxy/year_distribution"] = json.dumps(
@@ -1412,6 +1430,8 @@ def main():
                     "checkpoint_metric": checkpoint_metric,
                     "proxy_tester": proxy_tester if use_proxy_split else None,
                     "proxy_holdout_frac": proxy_holdout_frac if use_proxy_split else None,
+                    "proxy_year_min": proxy_year_min if use_proxy_split else None,
+                    "proxy_year_max": proxy_year_max if use_proxy_split else None,
                     "proxy_seed": proxy_seed if use_proxy_split else None,
                     "proxy_disjoint_from_leo": bool(proxy_disjoint_from_leo) if use_proxy_split else None,
                     "proxy_heldout_parent1": proxy_split_info.get("heldout_parent1") if proxy_split_info else None,

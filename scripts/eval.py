@@ -156,6 +156,8 @@ def _update_selector_audit(checkpoint_root: Path,
         "proxy_seed": payload.get("config", {}).get("proxy_seed"),
         "leo_val_env_hash": payload.get("split_fingerprints", {}).get("leo_val_env_hash"),
         "proxy_heldout_parent1_hash": payload.get("split_fingerprints", {}).get("proxy_heldout_parent1_hash"),
+        "proxy_year_min": payload.get("split_fingerprints", {}).get("proxy_year_min"),
+        "proxy_year_max": payload.get("split_fingerprints", {}).get("proxy_year_max"),
         "proxy_row_count": payload.get("split_fingerprints", {}).get("proxy_row_count"),
         "proxy_env_count": payload.get("split_fingerprints", {}).get("proxy_env_count"),
         "proxy_hybrid_count": payload.get("split_fingerprints", {}).get("proxy_hybrid_count"),
@@ -249,10 +251,14 @@ def evaluate(model,
             else:
                 actual = np.full_like(total_pred, fill_value=np.nan, dtype=float)
 
+            row_ids = np.asarray(yb['id']).astype(str) if 'id' in yb else np.array(['UNK'] * len(total_pred))
             env = np.asarray(yb['Env']).astype(str) if 'Env' in yb else np.array(['UNK'] * len(total_pred))
+            hybrid = np.asarray(yb['Hybrid']).astype(str) if 'Hybrid' in yb else np.array(['UNK'] * len(total_pred))
             rows.extend(
                 zip(
+                    row_ids.tolist(),
                     env.tolist(),
+                    hybrid.tolist(),
                     actual.tolist(),
                     total_pred.tolist(),
                     rank_pred.tolist(),
@@ -262,7 +268,7 @@ def evaluate(model,
             )
     
     # convert our multi-dimensional list to a dataframe
-    df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred', 'RankPred', 'Scale', 'Shift'])
+    df = pd.DataFrame(rows, columns=['id', 'Env', 'Hybrid', 'Actual', 'Pred', 'RankPred', 'Scale', 'Shift'])
 
     # filter to finite pairs for metric computation
     y_true = df['Actual'].to_numpy(dtype=float)
@@ -433,6 +439,21 @@ def save_results(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_DIR)
     by_env.to_csv(out_path, index=False)
     return out_path
 
+
+def save_prediction_rows(df: pd.DataFrame,
+                         checkpoint_root: Path,
+                         alias: str,
+                         split_name: str,
+                         run_name: str | None = None) -> Path:
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    pred_df = df.copy()
+    pred_df["alias"] = str(alias)
+    pred_df["split"] = str(split_name)
+    pred_df["run_name"] = run_name
+    out_path = checkpoint_root / f"predictions_{alias}_{split_name}.csv"
+    pred_df.to_csv(out_path, index=False)
+    return out_path
+
 def load_model(device: torch.device,
                args):
     best_path = _resolve_checkpoint_path(args)
@@ -571,6 +592,7 @@ def main():
     model_type = resolve_model_type(args)
     model_base_type, _ = split_runtime_suffix(model_type)
     metric_prefix = _resolve_metric_prefix(args)
+    eval_split = "test"
 
     # set up wand tracking
     load_dotenv()
@@ -615,6 +637,13 @@ def main():
     print("Evaluating model...")
     results, df = evaluate(model, test_loader, y_scalers, device)
     plot_path = plot_results(model_type, df['Actual'], df['Pred'])
+    prediction_csv_path = save_prediction_rows(
+        df=df,
+        checkpoint_root=checkpoint_path.parent,
+        alias=_resolve_eval_alias(args, checkpoint_path),
+        split_name=eval_split,
+        run_name=checkpoint_payload.get("run", {}).get("name"),
+    )
     #save_results(model_type, actuals, preds)
 
     # print results
@@ -641,6 +670,7 @@ def main():
     run.summary[f"{metric_prefix}/max_env_shift_std"] = float(results['max_env_shift_std'])
     run.summary[f"{metric_prefix}/checkpoint_tag"] = getattr(args, "checkpoint_tag", None) or "latest_numeric"
     run.summary[f"{metric_prefix}/checkpoint_path"] = str(checkpoint_path)
+    run.summary[f"{metric_prefix}/prediction_csv"] = str(prediction_csv_path)
     run.summary[f"{metric_prefix}/model_type"] = model_type
     run.summary[f"{metric_prefix}/model_base_type"] = model_base_type
     run.summary[f"{metric_prefix}/model_seed"] = checkpoint_payload.get("config", {}).get("model_seed")
