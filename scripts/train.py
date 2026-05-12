@@ -1,5 +1,5 @@
 # imports
-import time, os, json, random, math, argparse, sys
+import time, os, json, random, math, argparse, sys, hashlib
 import shutil
 from pathlib import Path
 from dotenv import load_dotenv
@@ -93,12 +93,22 @@ def _normalize_choice(name: str, value, allowed: set[str], default: str) -> str:
         raise ValueError(f"Unsupported {name}='{value}'. Allowed: {sorted(allowed)}")
     return v
 
+
+def _wandb_safe_group_name(name: str, limit: int = 128) -> str:
+    """W&B group names are capped at 128 chars; preserve uniqueness with a hash suffix."""
+    name = str(name)
+    if len(name) <= limit:
+        return name
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return f"{name[:limit - 9]}-{digest}"
+
 ### main ###
 def main():
     # setup
     args = parse_args()
     base_run_name = make_run_name(args)
     wandb_run_name = add_runtime_suffix(base_run_name, getattr(args, "seed", None))
+    wandb_group_name = _wandb_safe_group_name(base_run_name)
 
     device, local_rank, rank, world_size = setup_ddp()
 
@@ -427,10 +437,11 @@ def main():
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
             name=wandb_run_name,
-            group=base_run_name,
+            group=wandb_group_name,
         )
         run.config.update({
             "base_model_type": base_run_name,
+            "wandb_group": wandb_group_name,
             "run_name": wandb_run_name,
         }, allow_val_change=True)
         run.summary["model_type"] = base_run_name
