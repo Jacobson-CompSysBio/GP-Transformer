@@ -70,15 +70,35 @@ export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc los
 export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
 
 # Contrastive loss
-export CONTRASTIVE_MODE=e  # new best: environment contrastive only
-export CONTRASTIVE_WEIGHT=0.1
-export CONTRASTIVE_TEMPERATURE=0.1
-export ENV_CONTRASTIVE_WEIGHT=0.1
-export ENV_CONTRASTIVE_TEMPERATURE=0.5
+export CONTRASTIVE_MODE="${CONTRASTIVE_MODE:-e}"  # new best: environment contrastive only
+export CONTRASTIVE_WEIGHT="${CONTRASTIVE_WEIGHT:-0.1}"
+export CONTRASTIVE_TEMPERATURE="${CONTRASTIVE_TEMPERATURE:-0.1}"
+export CONTRASTIVE_SIM_TYPE="${CONTRASTIVE_SIM_TYPE:-grm}"
+export CONTRASTIVE_LOSS_TYPE="${CONTRASTIVE_LOSS_TYPE:-mse}"
+export ENV_CONTRASTIVE_WEIGHT="${ENV_CONTRASTIVE_WEIGHT:-0.1}"
+export ENV_CONTRASTIVE_TEMPERATURE="${ENV_CONTRASTIVE_TEMPERATURE:-0.5}"
+export CONTRASTIVE_WARMUP_EPOCHS="${CONTRASTIVE_WARMUP_EPOCHS:-50}"
+export CONTRASTIVE_RAMP_EPOCHS="${CONTRASTIVE_RAMP_EPOCHS:-50}"
 
 # LEO (Leave-Environment-Out) validation
-export LEO_VAL=True
-export LEO_VAL_FRACTION=0.15
+export VAL_SCHEME="${VAL_SCHEME:-leo}"
+export LEO_VAL="${LEO_VAL:-True}"
+export LEO_VAL_FRACTION="${LEO_VAL_FRACTION:-0.15}"
+export PROXY_TESTER="${PROXY_TESTER:-PHP02}"
+export PROXY_HOLDOUT_FRAC="${PROXY_HOLDOUT_FRAC:-0.25}"
+export PROXY_SEED="${PROXY_SEED:-1}"
+
+# Rank-safe calibration and optional ablations. Disabled by default.
+export CALIBRATION_MODE="${CALIBRATION_MODE:-none}"
+export CALIBRATION_START_EPOCH="${CALIBRATION_START_EPOCH:-150}"
+export CALIBRATION_RAMP_EPOCHS="${CALIBRATION_RAMP_EPOCHS:-100}"
+export CALIBRATION_DETACH_RANK_UNTIL_EPOCH="${CALIBRATION_DETACH_RANK_UNTIL_EPOCH:-250}"
+export CALIBRATION_JOINT_GRAD_FRACTION="${CALIBRATION_JOINT_GRAD_FRACTION:-0.10}"
+export ENVCCC_WEIGHT="${ENVCCC_WEIGHT:-0.0}"
+export HUBER_WEIGHT="${HUBER_WEIGHT:-0.0}"
+export USE_PARENT_EMBEDDINGS="${USE_PARENT_EMBEDDINGS:-False}"
+export USE_DUAL_CHANNEL="${USE_DUAL_CHANNEL:-False}"
+export CHECKPOINT_TAG="${CHECKPOINT_TAG:-best_leo}"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -148,10 +168,27 @@ srun -N ${SLURM_NNODES} \
         --contrastive_mode $CONTRASTIVE_MODE \
         --contrastive_weight $CONTRASTIVE_WEIGHT \
         --contrastive_temperature $CONTRASTIVE_TEMPERATURE \
+        --contrastive_sim_type $CONTRASTIVE_SIM_TYPE \
+        --contrastive_loss_type $CONTRASTIVE_LOSS_TYPE \
         --env_contrastive_weight $ENV_CONTRASTIVE_WEIGHT \
         --env_contrastive_temperature $ENV_CONTRASTIVE_TEMPERATURE \
+        --contrastive_warmup_epochs $CONTRASTIVE_WARMUP_EPOCHS \
+        --contrastive_ramp_epochs $CONTRASTIVE_RAMP_EPOCHS \
+        --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
-        --leo_val_fraction $LEO_VAL_FRACTION
+        --leo_val_fraction $LEO_VAL_FRACTION \
+        --proxy_tester $PROXY_TESTER \
+        --proxy_holdout_frac $PROXY_HOLDOUT_FRAC \
+        --proxy_seed $PROXY_SEED \
+        --calibration_mode $CALIBRATION_MODE \
+        --calibration_start_epoch $CALIBRATION_START_EPOCH \
+        --calibration_ramp_epochs $CALIBRATION_RAMP_EPOCHS \
+        --calibration_detach_rank_until_epoch $CALIBRATION_DETACH_RANK_UNTIL_EPOCH \
+        --calibration_joint_grad_fraction $CALIBRATION_JOINT_GRAD_FRACTION \
+        --envccc_weight $ENVCCC_WEIGHT \
+        --huber_weight $HUBER_WEIGHT \
+        --use_parent_embeddings $USE_PARENT_EMBEDDINGS \
+        --use_dual_channel $USE_DUAL_CHANNEL
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -194,6 +231,7 @@ python -u scripts/eval.py \
     --g_input_type $G_INPUT_TYPE \
     --env_categorical_mode $ENV_CATEGORICAL_MODE \
     --checkpoint_dir "$CHECKPOINT_DIR" \
+    --checkpoint_tag $CHECKPOINT_TAG \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
     --scale_targets $SCALE_TARGETS

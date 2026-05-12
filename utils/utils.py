@@ -57,6 +57,10 @@ def parse_args():
                    help="Env categorical handling: 'drop' (legacy baseline) or 'onehot' (added feature path).")
     p.add_argument("--env_cat_embeddings", type=str2bool, default=None,
                    help="Deprecated alias: True -> env_categorical_mode=onehot, False -> drop.")
+    p.add_argument("--use_parent_embeddings", type=str2bool, default=False,
+                   help="Add P1/P2 parent ID tokens. Disabled by default.")
+    p.add_argument("--use_dual_channel", type=str2bool, default=False,
+                   help="Use additive and dominance marker channels instead of token/scalar marker projection.")
 
     p.add_argument("--detach_ymean", type=str2bool, default=True)
     p.add_argument("--lambda_ymean", type=float, default=0.5)
@@ -100,14 +104,45 @@ def parse_args():
                    help="Weight for environment contrastive loss")
     p.add_argument("--env_contrastive_temperature", type=float, default=0.5,
                    help="Temperature for environment contrastive loss")
+    p.add_argument("--contrastive_warmup_epochs", type=int, default=50,
+                   help="Epochs before contrastive objectives begin contributing.")
+    p.add_argument("--contrastive_ramp_epochs", type=int, default=50,
+                   help="Epochs used to linearly ramp contrastive weights after warmup.")
     p.add_argument("--env_stratified", type=str2bool, default=False,
                    help="Use environment-stratified sampling for envwise losses (recommended for envpcc)")
     p.add_argument("--min_samples_per_env", type=int, default=32,
                    help="Minimum samples per environment in each batch for env-stratified sampling")
+    p.add_argument("--val_scheme", type=str, default=None,
+                   choices=["year", "leo", "proxy_same_tester"],
+                   help="Validation scheme. If unset, --leo_val True maps to 'leo', otherwise 'year'.")
     p.add_argument("--leo_val", type=str2bool, default=False,
                    help="Use Leave-Environment-Out validation (hold out entire environments, not years)")
     p.add_argument("--leo_val_fraction", type=float, default=0.15,
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
+    p.add_argument("--proxy_tester", type=str, default="PHP02",
+                   help="Tester line used for proxy_same_tester validation.")
+    p.add_argument("--proxy_holdout_frac", type=float, default=0.25,
+                   help="Fraction of proxy tester parent1 groups to hold out for validation.")
+    p.add_argument("--proxy_seed", type=int, default=1,
+                   help="Seed for grouped proxy validation sampling.")
+    p.add_argument("--calibration_mode", type=str, default="none",
+                   choices=["none", "env_affine"],
+                   help="Rank-safe calibration mode. env_affine preserves within-env order.")
+    p.add_argument("--calibration_start_epoch", type=int, default=150,
+                   help="Epoch when calibration losses start.")
+    p.add_argument("--calibration_ramp_epochs", type=int, default=100,
+                   help="Epochs used to ramp calibration losses.")
+    p.add_argument("--calibration_detach_rank_until_epoch", type=int, default=250,
+                   help="Detach rank prediction from calibration branch until this epoch.")
+    p.add_argument("--calibration_joint_grad_fraction", type=float, default=0.10,
+                   help="Fraction of calibration gradient allowed into rank head after detach period.")
+    p.add_argument("--envccc_weight", type=float, default=0.0,
+                   help="Environment-wise CCC calibration loss weight.")
+    p.add_argument("--huber_weight", type=float, default=0.0,
+                   help="SmoothL1/Huber calibration loss weight on calibrated totals.")
+    p.add_argument("--checkpoint_tag", type=str, default=None,
+                   choices=["best_leo", "best_scale", "latest"],
+                   help="Eval-only checkpoint alias to load from checkpoint_manifest.json or alias file.")
     p.add_argument('--checkpoint_dir', type=str, required=False,
                    help='Directory from train.py for this run')
     args = p.parse_args()
@@ -141,7 +176,20 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
-    leo = "leo+" if getattr(args, "leo_val", False) else ""
+    val_scheme = getattr(args, "val_scheme", None)
+    if val_scheme is None:
+        val_scheme = "leo" if getattr(args, "leo_val", False) else "year"
+    val_scheme = str(val_scheme).strip().lower()
+    if val_scheme == "leo":
+        valtag = "leo+"
+    elif val_scheme == "proxy_same_tester":
+        proxy_tester = str(getattr(args, "proxy_tester", "PHP02")).strip().lower()
+        valtag = f"proxy{proxy_tester}+"
+    else:
+        valtag = ""
+    cal = "affcal+" if getattr(args, "calibration_mode", "none") == "env_affine" else ""
+    parent = "parent+" if getattr(args, "use_parent_embeddings", False) else ""
+    dual = "adddom+" if getattr(args, "use_dual_channel", False) else ""
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -176,7 +224,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + leo + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + valtag + cal + parent + dual + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

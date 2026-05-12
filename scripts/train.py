@@ -27,6 +27,8 @@ from utils.loss import (
     compute_ibs_similarity,
     compute_grm_similarity,
     macro_env_pearson,
+    envwise_mse,
+    envwise_ccc,
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
@@ -117,16 +119,51 @@ def main():
     # Check if using LEO (Leave-Environment-Out) validation
     leo_val = _get_arg_or_env("leo_val", "LEO_VAL", False, str2bool)
     leo_val_fraction = _get_arg_or_env("leo_val_fraction", "LEO_VAL_FRACTION", 0.15, float)
+    val_scheme = _get_arg_or_env("val_scheme", "VAL_SCHEME", None, str)
+    if val_scheme is None:
+        val_scheme = "leo" if leo_val else "year"
+    val_scheme = str(val_scheme).strip().lower()
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
+    proxy_tester = str(_get_arg_or_env("proxy_tester", "PROXY_TESTER", "PHP02", str)).strip()
+    proxy_holdout_frac = _get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", 0.25, float)
+    proxy_seed = _get_arg_or_env("proxy_seed", "PROXY_SEED", args.seed, int)
+    calibration_mode = str(_get_arg_or_env("calibration_mode", "CALIBRATION_MODE", "none", str)).lower()
+    calibration_enabled = calibration_mode == "env_affine"
+    if calibration_enabled and not args.full_transformer:
+        raise ValueError("calibration_mode=env_affine is only supported for FullTransformer.")
+    calibration_start_epoch = _get_arg_or_env("calibration_start_epoch", "CALIBRATION_START_EPOCH", 150, int)
+    calibration_ramp_epochs = _get_arg_or_env("calibration_ramp_epochs", "CALIBRATION_RAMP_EPOCHS", 100, int)
+    calibration_detach_rank_until_epoch = _get_arg_or_env(
+        "calibration_detach_rank_until_epoch", "CALIBRATION_DETACH_RANK_UNTIL_EPOCH", 250, int
+    )
+    calibration_joint_grad_fraction = _get_arg_or_env(
+        "calibration_joint_grad_fraction", "CALIBRATION_JOINT_GRAD_FRACTION", 0.10, float
+    )
+    envccc_weight = _get_arg_or_env("envccc_weight", "ENVCCC_WEIGHT", 0.0, float)
+    huber_weight = _get_arg_or_env("huber_weight", "HUBER_WEIGHT", 0.0, float)
+    use_parent_embeddings = _get_arg_or_env("use_parent_embeddings", "USE_PARENT_EMBEDDINGS", False, str2bool)
+    use_dual_channel = _get_arg_or_env("use_dual_channel", "USE_DUAL_CHANNEL", False, str2bool)
+    contrastive_warmup_epochs = _get_arg_or_env(
+        "contrastive_warmup_epochs", "CONTRASTIVE_WARMUP_EPOCHS", 50, int
+    )
+    contrastive_ramp_epochs = _get_arg_or_env(
+        "contrastive_ramp_epochs", "CONTRASTIVE_RAMP_EPOCHS", 50, int
+    )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Using LEO (Leave-Environment-Out) validation")
         print(f"[INFO] Holding out {leo_val_fraction*100:.0f}% of environments for validation")
+    if is_main(rank) and val_scheme == "proxy_same_tester":
+        print(
+            f"[INFO] Using proxy_same_tester validation: tester={proxy_tester}, "
+            f"holdout_frac={proxy_holdout_frac:.2f}, seed={proxy_seed}"
+        )
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
+        print(f"[INFO] Calibration mode: {calibration_mode}")
 
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
@@ -141,15 +178,23 @@ def main():
         leo_val=leo_val,
         leo_val_fraction=leo_val_fraction,
         leo_seed=args.seed,
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
     marker_stats = train_ds.marker_stats
     leo_val_envs = train_ds.leo_val_envs  # Pass to val_ds for consistency
+    proxy_val_parent1s = train_ds.proxy_val_parent1s
+    parent_vocab = train_ds.parent_vocab
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
         print(f"[INFO] Train samples: {len(train_ds):,}, Train envs: {train_ds.env_id_tensor.unique().numel()}")
         print(f"[INFO] LEO val envs: {len(leo_val_envs) if leo_val_envs else 0}")
+    if is_main(rank) and val_scheme == "proxy_same_tester":
+        print(f"[INFO] Proxy diagnostics: {json.dumps(train_ds.proxy_info, sort_keys=True)}")
     
     val_ds = GxE_Dataset(
         split="val",
@@ -162,9 +207,17 @@ def main():
         marker_stats=marker_stats,
         leo_val=leo_val,
         leo_val_envs=leo_val_envs,  # Use same held-out envs computed by train
+        val_scheme=val_scheme,
+        proxy_tester=proxy_tester,
+        proxy_holdout_frac=proxy_holdout_frac,
+        proxy_seed=proxy_seed,
+        proxy_val_parent1s=proxy_val_parent1s,
+        parent_vocab=parent_vocab,
     )
     
-    if is_main(rank) and leo_val:
+    if is_main(rank) and val_scheme == "leo":
+        print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
+    if is_main(rank) and val_scheme == "proxy_same_tester":
         print(f"[INFO] Val samples: {len(val_ds):,}, Val envs: {val_ds.env_id_tensor.unique().numel()}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True)
@@ -230,7 +283,11 @@ def main():
                     n_gxe_layer=args.gxe_layers,
                     n_embd=args.emb_size,
                     dropout=args.dropout,
-                    n_env_fts=train_ds.n_env_fts)
+                    n_env_fts=train_ds.n_env_fts,
+                    calibration_mode=calibration_mode,
+                    use_parent_embeddings=use_parent_embeddings,
+                    use_dual_channel=use_dual_channel,
+                    n_parents=train_ds.n_parents)
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -279,7 +336,8 @@ def main():
         model.print_trainable_parameters()
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
-              f"full_transformer={args.full_transformer}")
+              f"full_transformer={args.full_transformer}, calibration_mode={calibration_mode}, "
+              f"parent_tokens={use_parent_embeddings}, dual_channel={use_dual_channel}")
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -445,7 +503,23 @@ def main():
                              "env_categorical_mode": env_categorical_mode,
                              "env_cat_embeddings": (env_categorical_mode == "onehot"),
                              "full_transformer": args.full_transformer,
-                             "full_tf_mlp_type": full_tf_mlp_type},
+                             "full_tf_mlp_type": full_tf_mlp_type,
+                             "val_scheme": val_scheme,
+                             "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
+                             "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
+                             "proxy_info": train_ds.proxy_info if val_scheme == "proxy_same_tester" else None,
+                             "calibration_mode": calibration_mode,
+                             "calibration_start_epoch": calibration_start_epoch,
+                             "calibration_ramp_epochs": calibration_ramp_epochs,
+                             "calibration_detach_rank_until_epoch": calibration_detach_rank_until_epoch,
+                             "calibration_joint_grad_fraction": calibration_joint_grad_fraction,
+                             "envccc_weight": envccc_weight,
+                             "huber_weight": huber_weight,
+                             "contrastive_warmup_epochs": contrastive_warmup_epochs,
+                             "contrastive_ramp_epochs": contrastive_ramp_epochs,
+                             "use_parent_embeddings": use_parent_embeddings,
+                             "use_dual_channel": use_dual_channel,
+                             "n_parents": train_ds.n_parents},
                              allow_val_change=True)
         for name in loss_function.names:
             run.define_metric(f"train_loss/{name}", step_metric="iter_num")
@@ -466,15 +540,37 @@ def main():
             run.define_metric("train_loss/moe_lb", step_metric="iter_num")
             run.define_metric("train_loss_epoch/moe_lb", step_metric="epoch")
             run.define_metric("val_loss/moe_lb", step_metric="epoch")
+        if calibration_enabled:
+            run.define_metric("train_loss/cal_envccc", step_metric="iter_num")
+            run.define_metric("train_loss/cal_huber", step_metric="iter_num")
+            run.define_metric("val_loss/total_env_avg_pearson", step_metric="epoch")
+            run.define_metric("val_loss/total_env_mse", step_metric="epoch")
 
     # initialize training states
     best_val_loss = float("inf")
     best_val_env_pcc = -float("inf")
+    best_val_total_env_mse = float("inf")
     last_improved = 0
     iter_num = 0
     t0 = time.time()
     if is_main(rank):
         print("[INFO] Checkpoint/early-stop selection metric: val_loss/env_avg_pearson (maximize)")
+
+    def _calibration_schedule(epoch: int) -> tuple[float, bool, float]:
+        if not calibration_enabled or epoch < calibration_start_epoch:
+            return 0.0, True, 0.0
+        ramp = max(1, int(calibration_ramp_epochs))
+        weight = min(1.0, float(epoch - calibration_start_epoch + 1) / float(ramp))
+        detach_rank = epoch < calibration_detach_rank_until_epoch
+        rank_grad_scale = 0.0 if detach_rank else float(calibration_joint_grad_fraction)
+        return weight, detach_rank, rank_grad_scale
+
+    def _prediction_tensors(preds):
+        if isinstance(preds, dict):
+            total_pred = preds.get("total")
+            rank_pred = preds.get("rank", total_pred)
+            return total_pred, rank_pred
+        return preds, preds
 
     ### training loop ###
     for epoch_num in range(max_epochs):
@@ -502,31 +598,53 @@ def main():
 
             # fwd/bwd pass
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                cal_weight, detach_rank, rank_grad_scale = _calibration_schedule(epoch_num)
+                forward_kwargs = {}
+                if calibration_enabled:
+                    forward_kwargs = {
+                        "detach_rank_in_calibration": detach_rank,
+                        "calibration_rank_grad_scale": rank_grad_scale,
+                    }
                 if use_g_contrastive and use_e_contrastive:
                     preds, g_embeddings, e_embeddings = model(
                         xb,
                         return_g_embeddings=True,
                         return_e_embeddings=True,
+                        **forward_kwargs,
                     )
                 elif use_g_contrastive:
-                    preds, g_embeddings = model(xb, return_g_embeddings=True)
+                    preds, g_embeddings = model(xb, return_g_embeddings=True, **forward_kwargs)
                     e_embeddings = None
                 elif use_e_contrastive:
-                    preds, e_embeddings = model(xb, return_e_embeddings=True)
+                    preds, e_embeddings = model(xb, return_e_embeddings=True, **forward_kwargs)
                     g_embeddings = None
                 else:
-                    preds = model(xb)
+                    preds = model(xb, **forward_kwargs)
                     g_embeddings = None
                     e_embeddings = None
-                    
-                loss_total, loss_parts = loss_function(preds, y_true, env_id=env_id)
+
+                total_pred, rank_pred = _prediction_tensors(preds)
+                loss_total, loss_parts = loss_function(rank_pred, y_true, env_id=env_id)
+                if calibration_enabled and cal_weight > 0.0:
+                    if envccc_weight:
+                        cal_envccc = envwise_ccc(total_pred, y_true, env_id=env_id)
+                        loss_total = loss_total + cal_weight * float(envccc_weight) * cal_envccc
+                        loss_parts["cal_envccc"] = float(cal_envccc.detach().item())
+                        loss_parts["cal_envccc_weight_eff"] = cal_weight * float(envccc_weight)
+                    if huber_weight:
+                        cal_huber = F.smooth_l1_loss(total_pred, y_true)
+                        loss_total = loss_total + cal_weight * float(huber_weight) * cal_huber
+                        loss_parts["cal_huber"] = float(cal_huber.detach().item())
+                        loss_parts["cal_huber_weight_eff"] = cal_weight * float(huber_weight)
                 
                 # Add contrastive loss if enabled (with warmup).
-                contrastive_warmup_epochs = 50  # Start contrastive after 50 epochs
                 if use_g_contrastive or use_e_contrastive:
                     if epoch_num >= contrastive_warmup_epochs:
                         # Ramp up contrastive weights linearly after warmup
-                        warmup_factor = min(1.0, (epoch_num - contrastive_warmup_epochs) / 50.0)
+                        warmup_factor = min(
+                            1.0,
+                            (epoch_num - contrastive_warmup_epochs) / max(1, contrastive_ramp_epochs),
+                        )
                         contrastive_total = 0.0
 
                         if use_g_contrastive and g_embeddings is not None and g_contrastive_loss_fn is not None:
@@ -622,7 +740,8 @@ def main():
                 """Gather ALL predictions/targets across batches and DDP ranks,
                 then compute metrics on the full dataset.  This aligns the
                 validation metric with how eval.py computes test metrics."""
-                all_preds = []
+                all_rank_preds = []
+                all_total_preds = []
                 all_targets = []
                 all_env_ids = []
 
@@ -634,11 +753,14 @@ def main():
                     env_id = yb["env_id"].to(device, non_blocking=True).long()
 
                     preds = model(xb)
-                    all_preds.append(preds.squeeze(-1))
+                    total_pred, rank_pred = _prediction_tensors(preds)
+                    all_rank_preds.append(rank_pred.squeeze(-1))
+                    all_total_preds.append(total_pred.squeeze(-1))
                     all_targets.append(y_true.squeeze(-1))
                     all_env_ids.append(env_id)
 
-                local_preds = torch.cat(all_preds) if all_preds else torch.empty(0, device=device)
+                local_rank_preds = torch.cat(all_rank_preds) if all_rank_preds else torch.empty(0, device=device)
+                local_total_preds = torch.cat(all_total_preds) if all_total_preds else torch.empty(0, device=device)
                 local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, device=device)
                 local_env_ids = torch.cat(all_env_ids) if all_env_ids else torch.empty(0, dtype=torch.long, device=device)
 
@@ -655,33 +777,46 @@ def main():
                     parts = [gathered[i][:all_n[i].item()] for i in range(world_size)]
                     return torch.cat(parts)
 
-                full_preds = _all_gather_flat(local_preds)[:dataset_len]
+                full_rank_preds = _all_gather_flat(local_rank_preds)[:dataset_len]
+                full_total_preds = _all_gather_flat(local_total_preds)[:dataset_len]
                 full_targets = _all_gather_flat(local_targets)[:dataset_len]
                 full_env_ids = _all_gather_flat(local_env_ids.float()).long()[:dataset_len]
-                return full_preds, full_targets, full_env_ids
+                return full_total_preds, full_rank_preds, full_targets, full_env_ids
 
             def eval_loader(loader, dataset_len, max_batches=None):
                 """Compute validation metrics using gather-then-compute approach."""
-                full_preds, full_targets, full_env_ids = \
+                full_total_preds, full_rank_preds, full_targets, full_env_ids = \
                     _gather_predictions(loader, dataset_len, max_batches)
 
-                ltot, lparts = loss_function(full_preds, full_targets, env_id=full_env_ids)
-                env_pcc = macro_env_pearson(
-                    full_preds, full_targets, full_env_ids, min_samples=2
+                ltot, lparts = loss_function(full_rank_preds, full_targets, env_id=full_env_ids)
+                rank_env_pcc = macro_env_pearson(
+                    full_rank_preds, full_targets, full_env_ids, min_samples=2
+                )
+                total_env_pcc = macro_env_pearson(
+                    full_total_preds, full_targets, full_env_ids, min_samples=2
+                )
+                total_env_mse = envwise_mse(
+                    full_total_preds, full_targets, full_env_ids, min_samples=2
                 )
                 mean_parts = {k: float(v) for k, v in lparts.items()}
-                return ltot, mean_parts, float(env_pcc.item())
+                return (
+                    ltot,
+                    mean_parts,
+                    float(rank_env_pcc.item()),
+                    float(total_env_pcc.item()),
+                    float(total_env_mse.item()),
+                )
             
             # reshuffle train sampler s.t. sampled subset is different each epoch
             if isinstance(train_sampler, DistributedSampler):
                 train_sampler.set_epoch(10_000 + epoch_num)
             # eval on subset of train for speed, full val
-            train_total, train_parts, train_env_pcc = eval_loader(
+            train_total, train_parts, train_env_pcc, train_total_env_pcc, train_total_env_mse = eval_loader(
                 train_loader,
                 len(train_ds),
                 max_batches=int(math.ceil(len(val_loader) / world_size)),
             )
-            val_total, val_parts, val_env_pcc = eval_loader(
+            val_total, val_parts, val_env_pcc, val_total_env_pcc, val_total_env_mse = eval_loader(
                 val_loader,
                 len(val_ds),
                 max_batches=None,
@@ -693,11 +828,15 @@ def main():
                 "epoch": epoch_num,
                 "val_loss": val_total.item(),
                 "val_loss/env_avg_pearson": val_env_pcc,
+                "val_loss/total_env_avg_pearson": val_total_env_pcc,
+                "val_loss/total_env_mse": val_total_env_mse,
             }
             for k, v in val_parts.items():
                 log_epoch_payload[f"val_loss/{k}"] = float(v)
             log_epoch_payload["train_loss_epoch"] = train_total.item()
             log_epoch_payload["train_loss_epoch/env_avg_pearson"] = train_env_pcc
+            log_epoch_payload["train_loss_epoch/total_env_avg_pearson"] = train_total_env_pcc
+            log_epoch_payload["train_loss_epoch/total_env_mse"] = train_total_env_mse
             for k, v in train_parts.items():
                 log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
             wandb.log(log_epoch_payload)
@@ -772,18 +911,63 @@ def main():
                         "g_input_type": g_input_type,
                         "env_categorical_mode": env_categorical_mode,
                         "env_cat_embeddings": (env_categorical_mode == "onehot"),
+                        "val_scheme": val_scheme,
+                        "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
+                        "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "calibration_mode": calibration_mode,
+                        "use_parent_embeddings": use_parent_embeddings,
+                        "use_dual_channel": use_dual_channel,
+                        "n_parents": train_ds.n_parents,
                     },
                     "env_scaler": env_scaler_payload,
                     "y_scalers": label_scalers_payload,
                     "marker_stats": marker_stats_payload,
+                    "parent_vocab": parent_vocab,
                     "run": {"id": run.id if 'run' in locals() else None,
                             "name": wandb_run_name}
                 }
                 ckpt_path = Path("checkpoints") / wandb_run_name / f"checkpoint_{epoch_num:04d}.pt"
                 torch.save(ckpt, ckpt_path)
+                shutil.copy2(ckpt_path, run_ckpt_dir / "best_leo.pt")
+                shutil.copy2(ckpt_path, run_ckpt_dir / "latest.pt")
+                manifest_path = run_ckpt_dir / "checkpoint_manifest.json"
+                manifest = {}
+                if manifest_path.exists():
+                    try:
+                        with open(manifest_path, "r") as f:
+                            manifest = json.load(f)
+                    except Exception:
+                        manifest = {}
+                manifest.setdefault("aliases", {})
+                manifest["aliases"]["best_leo"] = {
+                    "path": str((run_ckpt_dir / "best_leo.pt").resolve()),
+                    "epoch": int(epoch_num),
+                    "val_env_avg_pearson": float(val_env_pcc),
+                    "val_total_env_avg_pearson": float(val_total_env_pcc),
+                    "val_total_env_mse": float(val_total_env_mse),
+                }
+                manifest["aliases"]["latest"] = {
+                    "path": str((run_ckpt_dir / "latest.pt").resolve()),
+                    "epoch": int(epoch_num),
+                    "val_env_avg_pearson": float(val_env_pcc),
+                    "val_total_env_avg_pearson": float(val_total_env_pcc),
+                    "val_total_env_mse": float(val_total_env_mse),
+                }
+                if calibration_enabled and val_total_env_mse < best_val_total_env_mse:
+                    best_val_total_env_mse = val_total_env_mse
+                    shutil.copy2(ckpt_path, run_ckpt_dir / "best_scale.pt")
+                    manifest["aliases"]["best_scale"] = {
+                        "path": str((run_ckpt_dir / "best_scale.pt").resolve()),
+                        "epoch": int(epoch_num),
+                        "val_env_avg_pearson": float(val_env_pcc),
+                        "val_total_env_avg_pearson": float(val_total_env_pcc),
+                        "val_total_env_mse": float(val_total_env_mse),
+                    }
+                with open(manifest_path, "w") as f:
+                    json.dump(manifest, f, indent=2, sort_keys=True)
                 print(
                     "*** validation env_avg_pearson improved: "
                     f"{best_val_env_pcc:.5f} (val_loss={best_val_loss:.4e}) ***"
@@ -808,7 +992,8 @@ def main():
             print(
                 f"[Epoch {epoch_num}] train_loss={train_total.item():.4e} | "
                 f"val_loss={val_total.item():.4e} | "
-                f"val_env_pcc={val_env_pcc:.5f} | best_env_pcc={best_val_env_pcc:.5f} | "
+                f"val_env_pcc={val_env_pcc:.5f} | val_total_env_pcc={val_total_env_pcc:.5f} | "
+                f"val_total_env_mse={val_total_env_mse:.5f} | best_env_pcc={best_val_env_pcc:.5f} | "
                 f"elapsed={elapsed:.2f}m"
             )
 

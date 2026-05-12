@@ -40,24 +40,43 @@ class FullTransformer(nn.Module):
         self.moe_loss_weight = moe_loss_weight
         self.moe_aux_loss = None
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
+        self.calibration_mode = str(getattr(config, "calibration_mode", "none")).lower()
+        self.use_parent_embeddings = bool(getattr(config, "use_parent_embeddings", False))
+        self.use_dual_channel = bool(getattr(config, "use_dual_channel", False))
+        self.n_parent_tokens = 2 if self.use_parent_embeddings and int(getattr(config, "n_parents", 1)) > 1 else 0
         if self.g_input_type not in {"tokens", "grm"}:
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
+        if self.calibration_mode not in {"none", "env_affine"}:
+            raise ValueError(f"config.calibration_mode must be 'none' or 'env_affine' (got {self.calibration_mode})")
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, config.n_embd))
-        if self.g_input_type == "tokens":
+        if self.use_dual_channel:
+            self.g_embed = None
+            self.g_scalar_proj = None
+            self.g_additive_proj = nn.Linear(1, config.n_embd)
+            self.g_dominance_proj = nn.Linear(1, config.n_embd)
+        elif self.g_input_type == "tokens":
             self.g_embed = nn.Embedding(config.vocab_size, config.n_embd)
             self.g_scalar_proj = None
+            self.g_additive_proj = None
+            self.g_dominance_proj = None
         else:
             self.g_embed = None
             # Keep tokenizer projection separate from contrastive projection head.
             self.g_scalar_proj = nn.Linear(1, config.n_embd)
+            self.g_additive_proj = None
+            self.g_dominance_proj = None
+        if self.n_parent_tokens:
+            self.parent_embed = nn.Embedding(int(getattr(config, "n_parents", 1)), config.n_embd)
+        else:
+            self.parent_embed = None
         # project each scalar env feature to a token embedding
         self.e_proj = nn.Linear(1, config.n_embd)
 
         # positional encoding for combined marker + env + cls tokens
-        max_len = config.block_size + config.n_env_fts + 1
+        max_len = config.block_size + config.n_env_fts + 1 + self.n_parent_tokens
         class _PE(nn.Module):
             def __init__(self, n_embd, max_len, dropout):
                 super().__init__()
@@ -95,6 +114,16 @@ class FullTransformer(nn.Module):
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+        self.scale_head = None
+        self.shift_head = None
+        self.calibration_eps = 1e-4
+        if self.calibration_mode == "env_affine":
+            self.scale_head = nn.Linear(config.n_embd, 1)
+            self.shift_head = nn.Linear(config.n_embd, 1)
+            nn.init.zeros_(self.scale_head.weight)
+            nn.init.constant_(self.scale_head.bias, math.log(math.expm1(1.0)))
+            nn.init.zeros_(self.shift_head.weight)
+            nn.init.zeros_(self.shift_head.bias)
         
         # Projection head for contrastive learning (like SimCLR)
         # Projects G embeddings to a space good for contrastive learning
@@ -104,21 +133,47 @@ class FullTransformer(nn.Module):
             nn.Linear(config.n_embd, config.n_embd // 2),
         )
 
+    @staticmethod
+    def _scale_rank_grad(rank_pred, detach_rank: bool = False, rank_grad_scale: float = 1.0):
+        if detach_rank:
+            return rank_pred.detach()
+        grad_scale = float(rank_grad_scale)
+        if grad_scale >= 0.999999:
+            return rank_pred
+        base = rank_pred.detach()
+        return base + grad_scale * (rank_pred - base)
+
+    def _pool_env_input_repr(self, e_tok, cls_like):
+        if e_tok.size(1) > 0:
+            return e_tok.mean(dim=1)
+        return torch.zeros_like(cls_like)
+
     def _build_tokens(self, x):
         g = x["g_data"]            # (B, Tm)
         e = x["e_data"]            # (B, Feats)
         B, Tm = g.shape
         # embeddings
-        if self.g_input_type == "tokens":
+        if self.use_dual_channel:
+            g_tok = (
+                self.g_additive_proj(x["g_additive"].float().unsqueeze(-1))
+                + self.g_dominance_proj(x["g_dominance"].float().unsqueeze(-1))
+            )
+        elif self.g_input_type == "tokens":
             g_tok = self.g_embed(g.long())             # (B, Tm, C)
         else:
             g_tok = self.g_scalar_proj(g.float().unsqueeze(-1))  # (B, Tm, C)
         e_tok = self.e_proj(e.unsqueeze(-1))           # (B, Feats, C)
         cls = (self.cls_token + self.cls_pos).expand(B, -1, -1)
-        tokens = torch.cat([cls, g_tok, e_tok], dim=1) # (B, 1+Tm+Feats, C)
+        parent_tok = []
+        if self.parent_embed is not None:
+            parent_ids = x["parent_ids"].long()
+            parent_tok = [self.parent_embed(parent_ids[:, :2])]
+        env_input_repr = self._pool_env_input_repr(e_tok, cls[:, 0, :])
+        tokens = torch.cat([cls, *parent_tok, g_tok, e_tok], dim=1) # (B, 1(+2)+Tm+Feats, C)
         tokens = self.wpe(tokens)
-        env_start = 1 + Tm
-        return tokens, env_start
+        g_start = 1 + self.n_parent_tokens
+        env_start = g_start + Tm
+        return tokens, env_start, g_start, env_input_repr
 
     def _encode_tokens(self, tokens):
         self.moe_aux_loss = None
@@ -146,8 +201,10 @@ class FullTransformer(nn.Module):
         x,
         return_g_embeddings: bool = False,
         return_e_embeddings: bool = False,
+        detach_rank_in_calibration: bool = False,
+        calibration_rank_grad_scale: float = 1.0,
     ):
-        tokens, env_start = self._build_tokens(x)
+        tokens, env_start, g_start, env_input_repr = self._build_tokens(x)
         tokens = self._encode_tokens(tokens)
 
         # Extract G embeddings AFTER transformer (for contrastive loss)
@@ -155,7 +212,7 @@ class FullTransformer(nn.Module):
         g_embed = None
         if return_g_embeddings:
             # G tokens are from index 1 to env_start (excluding CLS at 0)
-            g_tokens = tokens[:, 1:env_start, :]  # (B, Tm, C)
+            g_tokens = tokens[:, g_start:env_start, :]  # (B, Tm, C)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             # Project through contrastive head (like SimCLR)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
@@ -165,7 +222,23 @@ class FullTransformer(nn.Module):
             e_tokens = tokens[:, env_start:, :]  # (B, Feats, C)
             e_embed = e_tokens.mean(dim=1)       # (B, C)
 
-        pred = self.head(tokens[:, 0])
+        rank_pred = self.head(tokens[:, 0])
+        if self.calibration_mode == "env_affine":
+            scale = F.softplus(self.scale_head(env_input_repr)) + self.calibration_eps
+            shift = self.shift_head(env_input_repr)
+            rank_for_cal = self._scale_rank_grad(
+                rank_pred,
+                detach_rank=detach_rank_in_calibration,
+                rank_grad_scale=calibration_rank_grad_scale,
+            )
+            pred = {
+                "total": scale * rank_for_cal + shift,
+                "rank": rank_pred,
+                "scale": scale,
+                "shift": shift,
+            }
+        else:
+            pred = rank_pred
 
         if return_g_embeddings and return_e_embeddings:
             return pred, g_embed, e_embed
@@ -222,7 +295,7 @@ class FullTransformerResidual(FullTransformer):
         return_g_embeddings: bool = False,
         return_e_embeddings: bool = False,
     ):
-        tokens, env_start = self._build_tokens(x)
+        tokens, env_start, g_start, _ = self._build_tokens(x)
 
         # IMPORTANT: Encode FIRST, then extract features from encoded tokens
         tokens = self._encode_tokens(tokens)
@@ -242,7 +315,7 @@ class FullTransformerResidual(FullTransformer):
         # Extract G embeddings for contrastive loss
         g_embed = None
         if return_g_embeddings:
-            g_tokens = tokens[:, 1:env_start, :]  # G tokens (excluding CLS)
+            g_tokens = tokens[:, g_start:env_start, :]  # G tokens (excluding CLS/parent tokens)
             g_pooled = g_tokens.mean(dim=1)  # Pool to (B, C)
             g_embed = self.g_contrast_proj(g_pooled)  # (B, C//2)
 

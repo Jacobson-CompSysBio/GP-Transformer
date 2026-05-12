@@ -100,7 +100,41 @@ Auxiliary contrastive objectives align learned representations with known geneti
 |----------|----------|-------------|
 | Year-based | default | Train ≤ 2022, validate on 2023 |
 | **LEO** | `LEO_VAL=True` | Leave-Environment-Out: hold out 15% of environments (all years) |
+| Proxy same-tester | `VAL_SCHEME=proxy_same_tester` | Hold out grouped parent1 crosses for one tester, default `PROXY_TESTER=PHP02`, as a diagnostic for novel 2024-style crosses |
 | Env-stratified batching | `ENV_STRATIFIED=True` | Ensures each batch contains ≥ `MIN_SAMPLES_PER_ENV` samples per environment for stable envwise loss computation |
+
+### PCC-First Scale Workflow
+
+The `dev/gxe-pcc-scale` branch keeps the main trunk optimized for macro environment PCC and treats scale improvements as secondary diagnostics unless rank is preserved.
+
+Key flags:
+
+| Flag | Values | Purpose |
+|------|--------|---------|
+| `--val_scheme` | `year`, `leo`, `proxy_same_tester` | Select validation split; `leo` remains the primary checkpoint-selection scheme |
+| `--checkpoint_tag` | `best_leo`, `best_scale`, `latest` | Eval alias loaded from `checkpoint_manifest.json` |
+| `--calibration_mode` | `none`, `env_affine` | Environment-only affine calibration, `softplus(a(E)) * rank_pred + b(E)`, preserving within-env rank order |
+| `--contrastive_warmup_epochs` / `--contrastive_ramp_epochs` | integer | Sweep e-contrastive schedule without changing the trunk loss |
+| `--use_parent_embeddings` | bool | Add parent ID tokens with `UNK=0` for unseen parents |
+| `--use_dual_channel` | bool | Use additive and dominance marker channels |
+
+Recommended launch path:
+
+```bash
+# Primary trunk run; writes best_leo.pt and checkpoint_manifest.json
+sbatch best_train.slurm
+
+# Focused e-contrastive/calibration/proxy sweep
+bash sweep_econtrastive_pcc.sh --dry
+bash sweep_econtrastive_pcc.sh
+
+# Evaluate a saved run with the PCC-selected checkpoint
+python -u scripts/eval.py --checkpoint_dir checkpoints/RUN_NAME --checkpoint_tag best_leo
+```
+
+`scripts/eval.py` writes no-leak audit artifacts under `data/results/`: scored predictions, per-environment metrics, seen/novel hybrid metrics, tester metrics, and a run-level test metrics CSV. The 2024 labels in `y_test.csv` are used only in this final reporting path.
+
+SINN-style structured-interaction ablations are available through `scripts/train_sinn.py` and `slurm/sinn_pipeline.sh`. They fit split-aware decomposition targets and support explicit additive output plus bilinear interaction with differential LR for encoder fine-tuning.
 
 ## Usage
 

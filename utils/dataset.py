@@ -96,6 +96,23 @@ def _env_year_from_str(env_str: str) -> int:
         return int(m.group(1))
     raise ValueError(f"Could not parse year from Env='{env_str}'")
 
+
+def extract_hybrid_name(sample_id: str) -> str:
+    """Extract hybrid name from ids formatted like '<Env>-<Parent1>/<Parent2>'."""
+    sample_id = str(sample_id)
+    return sample_id.split("-", 1)[1] if "-" in sample_id else sample_id
+
+
+def split_hybrid_parents(hybrid: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Split hybrid names into parent1/parent2, mapping missing parent2 to empty string."""
+    parts = hybrid.astype(str).str.split("/", n=1, expand=True)
+    parent1 = parts[0].fillna("").astype(str).str.strip()
+    if parts.shape[1] > 1:
+        parent2 = parts[1].fillna("").astype(str).str.strip()
+    else:
+        parent2 = pd.Series("", index=hybrid.index)
+    return parent1, parent2
+
 # ----------------------------------------------------------------
 # LEO (Leave-Environment-Out) validation split helper
 def compute_leo_val_envs(
@@ -128,6 +145,99 @@ def compute_leo_val_envs(
     return val_envs
 
 
+def summarize_proxy_same_tester_holdout(
+    x_raw: pd.DataFrame,
+    holdout_parent1s: set[str],
+    proxy_tester: str,
+    test_year: int = 2024,
+) -> Dict[str, object]:
+    """Return diagnostics for same-tester novel-cross proxy validation."""
+    x = x_raw.copy()
+    if "Year" not in x.columns:
+        x["Year"] = x["Env"].astype(str).apply(_env_year_from_str)
+    if "Hybrid" not in x.columns:
+        x["Hybrid"] = x["id"].astype(str).apply(extract_hybrid_name)
+    if "parent1" not in x.columns or "parent2" not in x.columns:
+        x["parent1"], x["parent2"] = split_hybrid_parents(x["Hybrid"])
+
+    pre_test = x[x["Year"] < test_year].copy()
+    holdout = pre_test[
+        (pre_test["parent2"] == proxy_tester)
+        & (pre_test["parent1"].isin(holdout_parent1s))
+    ].copy()
+    holdout_parent1_unique = sorted(set(holdout["parent1"].astype(str)))
+    other_tester_parent1s = set(
+        pre_test.loc[pre_test["parent2"] != proxy_tester, "parent1"].astype(str)
+    )
+    other_support = sum(p in other_tester_parent1s for p in holdout_parent1_unique)
+
+    return {
+        "proxy_tester": proxy_tester,
+        "proxy_row_count": int(len(holdout)),
+        "proxy_hybrid_count": int(holdout["Hybrid"].nunique()) if len(holdout) else 0,
+        "proxy_env_count": int(holdout["Env"].nunique()) if len(holdout) else 0,
+        "proxy_parent1_count": int(len(holdout_parent1_unique)),
+        "proxy_parent1_other_tester_support_frac": (
+            float(other_support / len(holdout_parent1_unique))
+            if holdout_parent1_unique else 0.0
+        ),
+        "proxy_year_counts": {
+            str(int(year)): int(count)
+            for year, count in holdout.groupby("Year")["id"].size().items()
+        },
+        "proxy_year_hybrid_counts": {
+            str(int(year)): int(count)
+            for year, count in holdout.groupby("Year")["Hybrid"].nunique().items()
+        },
+    }
+
+
+def compute_proxy_same_tester_holdout(
+    x_raw: pd.DataFrame,
+    proxy_tester: str = "PHP02",
+    holdout_frac: float = 0.25,
+    seed: int = 1,
+    test_year: int = 2024,
+) -> tuple[set[str], Dict[str, object]]:
+    """Hold out parent1 groups crossed to one tester, preserving same-tester proxy structure."""
+    if not (0.0 < holdout_frac < 1.0):
+        raise ValueError(f"proxy holdout fraction must be in (0, 1), got {holdout_frac}")
+
+    x = x_raw.copy()
+    if "Year" not in x.columns:
+        x["Year"] = x["Env"].astype(str).apply(_env_year_from_str)
+    x = x[x["Year"] < test_year].copy()
+    x["Hybrid"] = x["id"].astype(str).apply(extract_hybrid_name)
+    x["parent1"], x["parent2"] = split_hybrid_parents(x["Hybrid"])
+
+    tester_rows = x[x["parent2"] == proxy_tester].copy()
+    if tester_rows.empty:
+        raise ValueError(f"No pre-{test_year} rows found for proxy tester '{proxy_tester}'")
+
+    group_year = tester_rows.groupby("parent1")["Year"].min().sort_values(kind="stable")
+    rng = np.random.default_rng(seed)
+    holdout_parent1s: set[str] = set()
+    for _, group in group_year.groupby(group_year):
+        parent1s = group.index.to_numpy()
+        n_holdout = max(1, int(round(len(parent1s) * holdout_frac)))
+        picked = rng.choice(parent1s, size=min(n_holdout, len(parent1s)), replace=False)
+        holdout_parent1s.update(str(p) for p in picked.tolist())
+
+    diagnostics = summarize_proxy_same_tester_holdout(
+        x_raw=x_raw,
+        holdout_parent1s=holdout_parent1s,
+        proxy_tester=proxy_tester,
+        test_year=test_year,
+    )
+    diagnostics["proxy_holdout_frac"] = float(holdout_frac)
+    diagnostics["proxy_seed"] = int(seed)
+    diagnostics["proxy_group_years"] = {
+        str(int(year)): int(count)
+        for year, count in group_year.groupby(group_year).size().items()
+    }
+    return holdout_parent1s, diagnostics
+
+
 # can use this for both rolling and non-rolling training
 class GxE_Dataset(Dataset):
 
@@ -147,6 +257,14 @@ class GxE_Dataset(Dataset):
                  leo_val_envs: Optional[set] = None,
                  leo_val_fraction: float = 0.15,
                  leo_seed: int = 42,
+                 val_scheme: str = "year",
+                 proxy_tester: str = "PHP02",
+                 proxy_holdout_frac: float = 0.25,
+                 proxy_seed: int = 1,
+                 proxy_val_parent1s: Optional[set[str]] = None,
+                 parent_vocab: Optional[Dict[str, int]] = None,
+                 decomposition_path: Optional[str] = None,
+                 decomposition_payload: Optional[Dict[str, object]] = None,
                  ):
         
         """
@@ -166,12 +284,30 @@ class GxE_Dataset(Dataset):
             leo_val_envs (Optional[set]): pre-computed set of val environments (from train split)
             leo_val_fraction (float): fraction of environments to hold out for LEO val
             leo_seed (int): random seed for LEO environment selection
+            val_scheme (str): one of 'year', 'leo', or 'proxy_same_tester'
+            proxy_tester (str): tester used for proxy_same_tester validation
+            proxy_holdout_frac (float): fraction of proxy-tester parent1 groups to hold out
+            proxy_seed (int): seed for proxy holdout group sampling
+            proxy_val_parent1s (Optional[set[str]]): precomputed proxy held-out parent1 groups
+            parent_vocab (Optional[Dict[str, int]]): train-fitted parent vocabulary, with 0 reserved for UNK
+            decomposition_path (Optional[str]): JSON from fit_decomposition.py for SINN-style targets
+            decomposition_payload (Optional[Dict[str, object]]): pre-loaded decomposition dict
         """
         super().__init__()
         self.split = split
         self.data_path = data_path
         self.residual_flag = residual
         self.leo_val = leo_val
+        self.val_scheme = str(val_scheme).strip().lower()
+        if self.leo_val and self.val_scheme == "year":
+            self.val_scheme = "leo"
+        if self.val_scheme not in {"year", "leo", "proxy_same_tester"}:
+            raise ValueError(f"Unsupported val_scheme='{val_scheme}'")
+        self.proxy_tester = str(proxy_tester).strip()
+        self.proxy_holdout_frac = float(proxy_holdout_frac)
+        self.proxy_seed = int(proxy_seed)
+        self.proxy_val_parent1s = set(proxy_val_parent1s) if proxy_val_parent1s is not None else None
+        self.proxy_info: Optional[Dict[str, object]] = None
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
@@ -217,10 +353,12 @@ class GxE_Dataset(Dataset):
 
         # derive Year from Env
         x_raw['Year'] = x_raw['Env'].astype(str).apply(_env_year_from_str)
+        x_raw['Hybrid'] = x_raw['id'].astype(str).apply(extract_hybrid_name)
+        x_raw['parent1'], x_raw['parent2'] = split_hybrid_parents(x_raw['Hybrid'])
 
         ### SPLIT MASK (ROLLING SETUP DEFAULTS) ###
         # LEO validation: hold out entire environments (not years)
-        if leo_val and split in ("train", "val"):
+        if self.val_scheme == "leo" and split in ("train", "val"):
             # Compute or use provided LEO val environments
             if leo_val_envs is None:
                 # First call (train split) - compute the held-out environments
@@ -239,6 +377,34 @@ class GxE_Dataset(Dataset):
             else:  # val
                 # Val: only the held-out environments (from any year < 2024)
                 keep_mask = pre_test_mask & env_in_val
+        elif self.val_scheme == "proxy_same_tester" and split in ("train", "val"):
+            self.leo_val_envs = None
+            if self.proxy_val_parent1s is None:
+                holdout_parent1s, self.proxy_info = compute_proxy_same_tester_holdout(
+                    x_raw,
+                    proxy_tester=self.proxy_tester,
+                    holdout_frac=self.proxy_holdout_frac,
+                    seed=self.proxy_seed,
+                    test_year=2024,
+                )
+                self.proxy_val_parent1s = holdout_parent1s
+            else:
+                self.proxy_info = summarize_proxy_same_tester_holdout(
+                    x_raw=x_raw,
+                    holdout_parent1s=self.proxy_val_parent1s,
+                    proxy_tester=self.proxy_tester,
+                    test_year=2024,
+                )
+
+            pre_test_mask = x_raw['Year'] < 2024
+            in_proxy_val = (
+                (x_raw['parent2'] == self.proxy_tester)
+                & (x_raw['parent1'].isin(self.proxy_val_parent1s))
+            )
+            if split == "train":
+                keep_mask = pre_test_mask & ~in_proxy_val
+            else:
+                keep_mask = pre_test_mask & in_proxy_val
         else:
             self.leo_val_envs = None
             if split == "train":
@@ -260,7 +426,7 @@ class GxE_Dataset(Dataset):
                              "Ensue X_* and y_* have identical row order.")
 
         # separate metadata
-        self.meta = x_filt[['id', 'Env', 'Year']].copy()
+        self.meta = x_filt[['id', 'Env', 'Year', 'Hybrid', 'parent1', 'parent2']].copy()
 
         ### CATEGORICAL ENV MAPPING FOR ENVWISE LOSSES ###
         # use *only* filtered envs so codes match indices
@@ -270,11 +436,24 @@ class GxE_Dataset(Dataset):
         ### HYBRID ID MAPPING FOR CONTRASTIVE LOSSES ###
         # Extract hybrid name from id column (format: "{Env}-{Hybrid}")
         # Falls back to full id if no "-" separator is present
-        hybrid_names = self.meta['id'].astype(str).apply(
-            lambda x: x.split('-', 1)[1] if '-' in x else x
-        )
+        hybrid_names = self.meta['Hybrid'].astype(str)
         self.hybrid_codes = pd.Categorical(hybrid_names)
         self.hybrid_id_tensor = torch.tensor(self.hybrid_codes.codes, dtype=torch.long)
+
+        ### PARENT METADATA / OPTIONAL ABLATION TENSORS ###
+        parent1_names = self.meta['parent1'].astype(str)
+        parent2_names = self.meta['parent2'].astype(str)
+        if parent_vocab is not None:
+            self.parent_vocab = parent_vocab
+        else:
+            all_parents = sorted(set(parent1_names) | set(parent2_names))
+            self.parent_vocab = {name: idx + 1 for idx, name in enumerate(all_parents) if name}
+        p1_ids = parent1_names.map(lambda n: self.parent_vocab.get(n, 0))
+        p2_ids = parent2_names.map(lambda n: self.parent_vocab.get(n, 0))
+        self.parent_id_tensor = torch.stack([
+            torch.tensor(p1_ids.values, dtype=torch.long),
+            torch.tensor(p2_ids.values, dtype=torch.long),
+        ], dim=1)
 
         ### BUILD FT. MATRICES ###
         # drop metadata and accidental columns
@@ -309,6 +488,9 @@ class GxE_Dataset(Dataset):
         # - grm: standardized dosage features (x - 2p) / sqrt(2p(1-p))
         g_dosage = (g_block * 2.0).astype(np.float32)  # convert from [0, 0.5, 1] -> [0, 1, 2]
         self.g_raw_dosage = g_dosage
+        g_dosage_np = g_dosage.to_numpy(dtype=np.float32)
+        self.g_additive = (g_dosage_np - 1.0).astype(np.float32)
+        self.g_dominance = (1.0 - np.abs(g_dosage_np - 1.0)).astype(np.float32)
         self.marker_stats = None
         if self.g_input_type == "tokens":
             self.g_data = g_dosage.round().astype('int64')
@@ -394,9 +576,59 @@ class GxE_Dataset(Dataset):
         self.env_mean = ymean.reset_index(drop=True)
         self.residual = resid.reset_index(drop=True)
 
+        ### OPTIONAL SINN DECOMPOSITION TARGETS ###
+        self.decomposition_path = decomposition_path
+        self.decomposition_payload = decomposition_payload
+        self.has_decomposition = False
+        if (decomposition_payload is not None or decomposition_path is not None) and split not in ("sub", "test"):
+            import json
+
+            if decomposition_payload is not None:
+                decomp = decomposition_payload
+            else:
+                with open(decomposition_path, "r") as f:
+                    decomp = json.load(f)
+
+            mu = float(decomp["mu"])
+            g_lookup = decomp["G"]
+            e_lookup = decomp["E"]
+            year_means = {int(k): float(v) for k, v in decomp.get("year_means", {}).items()}
+
+            env_names = self.meta["Env"].astype(str)
+            hybrid_names = self.meta["Hybrid"].astype(str)
+            row_years = self.meta["Year"].astype(int)
+            row_mu_year = row_years.map(year_means).fillna(mu).astype(float)
+
+            g_hat = hybrid_names.map(g_lookup).astype(float)
+            e_hat = env_names.map(e_lookup).astype(float)
+
+            n_missing_g = int(g_hat.isna().sum())
+            n_missing_e = int(e_hat.isna().sum())
+            if n_missing_g > 0:
+                print(f"[Decomposition] {n_missing_g}/{len(g_hat)} rows have no G_hat; set to 0.0")
+            if n_missing_e > 0:
+                print(f"[Decomposition] {n_missing_e}/{len(e_hat)} rows have no E_hat; set to 0.0")
+
+            self._has_g_hat = (~g_hat.isna()).reset_index(drop=True)
+            self._has_e_hat = (~e_hat.isna()).reset_index(drop=True)
+            g_hat = g_hat.fillna(0.0)
+            e_hat = e_hat.fillna(0.0)
+
+            raw_yield = self.y_data["Yield_Mg_ha"].astype(float)
+            ge_hat = raw_yield - row_mu_year - g_hat - e_hat
+
+            self.decomp_mu = mu
+            self.decomp_year_means = year_means
+            self.decomp_mu_year = row_mu_year.reset_index(drop=True)
+            self.decomp_g = g_hat.reset_index(drop=True)
+            self.decomp_e = e_hat.reset_index(drop=True)
+            self.decomp_ge = ge_hat.reset_index(drop=True)
+            self.has_decomposition = True
+
         # block size for tokenizers, etc.
         self.block_size = self.g_data.shape[1]
         self.n_env_fts = len(self.e_cols)
+        self.n_parents = (max(self.parent_vocab.values()) + 1) if self.parent_vocab else 1
 
         # final sanity check 
         assert len(self.env_id_tensor) == len(self.g_data) == len(self.e_data) == len(self.y_data), \
@@ -423,12 +655,21 @@ class GxE_Dataset(Dataset):
         x = {'g_data': g_tensor, 'e_data': env_data}
         if self.g_input_type == "grm":
             x["g_data_raw"] = torch.tensor(self.g_raw_dosage.iloc[index, :].values, dtype=torch.float32)
+        x["parent_ids"] = self.parent_id_tensor[index]
+        x["g_additive"] = torch.tensor(self.g_additive[index], dtype=torch.float32)
+        x["g_dominance"] = torch.tensor(self.g_dominance[index], dtype=torch.float32)
         
         if self.split in ('sub', 'test'):
             row = self.y_data.iloc[index]
-            # return only the columns that exist (Env and Yield_Mg_ha are typical)
-            keep_cols = [c for c in ('Env', 'Hybrid', 'Yield_Mg_ha') if c in self.y_data.columns]
+            meta = self.meta.iloc[index]
+            # return columns needed for no-leak audit reporting
+            keep_cols = [c for c in ('id', 'Env', 'Hybrid', 'Yield_Mg_ha') if c in self.y_data.columns]
             y = {c: row[c] for c in keep_cols}
+            y.setdefault("id", meta["id"])
+            y.setdefault("Env", meta["Env"])
+            y.setdefault("Hybrid", meta["Hybrid"])
+            y["parent1"] = meta["parent1"]
+            y["parent2"] = meta["parent2"]
             return x, y
 
         # scaled targets if scale_targets=True or raw otherwise 
@@ -438,7 +679,15 @@ class GxE_Dataset(Dataset):
         hybrid_id = self.hybrid_id_tensor[index]
 
         if not self.residual_flag:
-            return x, {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
+            y_dict = {"y": y_total, "env_id": env_id, "hybrid_id": hybrid_id}
+            if self.has_decomposition:
+                y_dict["g_hat"] = torch.tensor([self.decomp_g.iloc[index]], dtype=torch.float32)
+                y_dict["e_hat"] = torch.tensor([self.decomp_e.iloc[index]], dtype=torch.float32)
+                y_dict["ge_hat"] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
+                y_dict["has_g_hat"] = torch.tensor([self._has_g_hat.iloc[index]], dtype=torch.bool)
+                y_dict["has_e_hat"] = torch.tensor([self._has_e_hat.iloc[index]], dtype=torch.bool)
+                y_dict["year_mean"] = torch.tensor([self.decomp_mu_year.iloc[index]], dtype=torch.float32)
+            return x, y_dict
 
         # residual out
         y_env_mean = torch.tensor([self.env_mean.iloc[index]], dtype=torch.float32)
@@ -450,4 +699,9 @@ class GxE_Dataset(Dataset):
             'env_id': env_id,
             'hybrid_id': hybrid_id,
         }
+        if self.has_decomposition:
+            targets["g_hat"] = torch.tensor([self.decomp_g.iloc[index]], dtype=torch.float32)
+            targets["e_hat"] = torch.tensor([self.decomp_e.iloc[index]], dtype=torch.float32)
+            targets["ge_hat"] = torch.tensor([self.decomp_ge.iloc[index]], dtype=torch.float32)
+            targets["year_mean"] = torch.tensor([self.decomp_mu_year.iloc[index]], dtype=torch.float32)
         return x, targets

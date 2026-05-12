@@ -18,3 +18,7 @@ class Config:
     n_embd: int = 768 # embedding size
     dropout: float = 0.25 # dropout frequency
     n_env_fts: int = 705 # number of environmental features
+    calibration_mode: str = "none" # "none" or "env_affine"
+    use_parent_embeddings: bool = False
+    use_dual_channel: bool = False
+    n_parents: int = 1
