@@ -555,13 +555,13 @@ def main():
     run.summary["test/mse"] = float(results['global_mse'])
     run.summary["test/env_avg_pearson"] = float(results['env_pcc'])
     run.summary["test/env_avg_mse"] = float(results['env_mse'])
-    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
+    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])
     run.summary["test/model_type"] = model_type
     run.summary["test/model_base_type"] = model_base_type
-    
+
     # table for pcc by env
     pcc_series = results['pcc_by_env']
-    pcc_df = pcc_series.rename("PCC").reset_index()
+    pcc_df = pcc_series.rename("PCC").rename_axis("Env").reset_index()
     pcc_df["Env"] = pcc_df["Env"].astype(str)
     pcc_df = pcc_df.replace({np.nan: None})
 

@@ -140,6 +140,16 @@ def parse_args():
                    help="Environment-wise CCC calibration loss weight.")
     p.add_argument("--huber_weight", type=float, default=0.0,
                    help="SmoothL1/Huber calibration loss weight on calibrated totals.")
+    p.add_argument("--debug_probe", type=str2bool, default=None,
+                   help="Synchronize and print first-step tensor probes for ROCm crash localization.")
+    p.add_argument("--debug_max_steps", type=int, default=None,
+                   help="Stop each training epoch after this many steps when debugging. 0 disables.")
+    p.add_argument("--debug_skip_backward", type=str2bool, default=None,
+                   help="Debug only: skip backward pass.")
+    p.add_argument("--debug_skip_optimizer", type=str2bool, default=None,
+                   help="Debug only: skip optimizer step.")
+    p.add_argument("--debug_no_autocast", type=str2bool, default=None,
+                   help="Debug only: disable bf16 autocast for the training step.")
     p.add_argument("--checkpoint_tag", type=str, default=None,
                    choices=["best_leo", "best_scale", "latest"],
                    help="Eval-only checkpoint alias to load from checkpoint_manifest.json or alias file.")

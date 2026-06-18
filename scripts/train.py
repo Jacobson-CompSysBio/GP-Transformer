@@ -82,6 +82,22 @@ def is_main(rank) -> bool:
     """check if current process is main"""
     return rank == 0
 
+
+def _debug_sync_probe(enabled: bool, rank: int, label: str, tensor: torch.Tensor | None = None):
+    if not enabled or not is_main(rank):
+        return
+    torch.cuda.synchronize()
+    msg = f"[DEBUG_PROBE] {label}"
+    if tensor is not None and isinstance(tensor, torch.Tensor):
+        with torch.no_grad():
+            msg += (
+                f" shape={tuple(tensor.shape)}"
+                f" dtype={tensor.dtype}"
+                f" finite={bool(torch.isfinite(tensor).all().item())}"
+            )
+    print(msg, flush=True)
+
+
 def _normalize_choice(name: str, value, allowed: set[str], default: str) -> str:
     """
     Backward-compatible normalizer for legacy boolean-like CLI values.
@@ -154,6 +170,11 @@ def main():
     )
     envccc_weight = _get_arg_or_env("envccc_weight", "ENVCCC_WEIGHT", 0.0, float)
     huber_weight = _get_arg_or_env("huber_weight", "HUBER_WEIGHT", 0.0, float)
+    debug_probe = _get_arg_or_env("debug_probe", "DEBUG_PROBE", False, str2bool)
+    debug_max_steps = _get_arg_or_env("debug_max_steps", "DEBUG_MAX_STEPS", 0, int)
+    debug_skip_backward = _get_arg_or_env("debug_skip_backward", "DEBUG_SKIP_BACKWARD", False, str2bool)
+    debug_skip_optimizer = _get_arg_or_env("debug_skip_optimizer", "DEBUG_SKIP_OPTIMIZER", False, str2bool)
+    debug_no_autocast = _get_arg_or_env("debug_no_autocast", "DEBUG_NO_AUTOCAST", False, str2bool)
     use_parent_embeddings = _get_arg_or_env("use_parent_embeddings", "USE_PARENT_EMBEDDINGS", False, str2bool)
     use_dual_channel = _get_arg_or_env("use_dual_channel", "USE_DUAL_CHANNEL", False, str2bool)
     contrastive_warmup_epochs = _get_arg_or_env(
@@ -174,6 +195,13 @@ def main():
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
         print(f"[INFO] Calibration mode: {calibration_mode}")
+        if debug_probe:
+            print(
+                f"[DEBUG_PROBE] enabled=True max_steps={debug_max_steps} "
+                f"skip_backward={debug_skip_backward} skip_optimizer={debug_skip_optimizer} "
+                f"no_autocast={debug_no_autocast}",
+                flush=True,
+            )
 
     # data (samplers are needed for DDP)
     train_ds = GxE_Dataset(
@@ -298,6 +326,7 @@ def main():
                     use_parent_embeddings=use_parent_embeddings,
                     use_dual_channel=use_dual_channel,
                     n_parents=train_ds.n_parents)
+    config.debug_probe = debug_probe
     g_encoder_type = _get_arg_or_env("g_encoder_type", "G_ENCODER_TYPE", "dense", str)
     moe_num_experts = _get_arg_or_env("moe_num_experts", "MOE_NUM_EXPERTS", 4, int)
     moe_top_k = _get_arg_or_env("moe_top_k", "MOE_TOP_K", 2, int)
@@ -601,14 +630,43 @@ def main():
         for step_idx, (xb, yb) in enumerate(train_loader):
             if epoch_num == 0 and is_main(rank):
                 t_step_start = time.time()
+
+            if debug_probe and step_idx == 0 and is_main(rank):
+                g_cpu = xb.get("g_data")
+                e_cpu = xb.get("e_data")
+                if isinstance(g_cpu, torch.Tensor):
+                    msg = (
+                        f"[DEBUG_PROBE] cpu_batch/g_data shape={tuple(g_cpu.shape)} "
+                        f"dtype={g_cpu.dtype}"
+                    )
+                    if g_cpu.numel():
+                        msg += f" min={float(g_cpu.min().item()):.6g} max={float(g_cpu.max().item()):.6g}"
+                    print(msg, flush=True)
+                    if args.full_transformer and getattr(model.module, "g_input_type", "tokens") == "tokens":
+                        vocab_size = int(getattr(model.module.config, "vocab_size", 3))
+                        bad = ((g_cpu < 0) | (g_cpu >= vocab_size)).sum().item()
+                        print(f"[DEBUG_PROBE] cpu_batch/g_vocab_size={vocab_size} bad_token_count={int(bad)}", flush=True)
+                if isinstance(e_cpu, torch.Tensor):
+                    msg = (
+                        f"[DEBUG_PROBE] cpu_batch/e_data shape={tuple(e_cpu.shape)} "
+                        f"dtype={e_cpu.dtype}"
+                    )
+                    if e_cpu.numel():
+                        msg += f" finite={bool(torch.isfinite(e_cpu).all().item())}"
+                    print(msg, flush=True)
             
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
             y_true = yb["y"].to(device, non_blocking=True).float()
             env_id = yb["env_id"].to(device, non_blocking=True).long()
+            if debug_probe and step_idx == 0:
+                _debug_sync_probe(debug_probe, rank, "batch_on_device/y_true", y_true)
+                _debug_sync_probe(debug_probe, rank, "batch_on_device/env_id", env_id.float())
 
             # fwd/bwd pass
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            autocast_ctx = nullcontext() if debug_no_autocast else torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+            _debug_sync_probe(debug_probe and step_idx == 0, rank, "before_forward")
+            with autocast_ctx:
                 cal_weight, detach_rank, rank_grad_scale = _calibration_schedule(epoch_num)
                 forward_kwargs = {}
                 if calibration_enabled:
@@ -635,6 +693,10 @@ def main():
                     e_embeddings = None
 
                 total_pred, rank_pred = _prediction_tensors(preds)
+                _debug_sync_probe(debug_probe and step_idx == 0, rank, "after_forward")
+                if debug_probe and step_idx == 0:
+                    _debug_sync_probe(True, rank, "rank_pred", rank_pred)
+                    _debug_sync_probe(True, rank, "total_pred", total_pred)
                 loss_total, loss_parts = loss_function(rank_pred, y_true, env_id=env_id)
                 if calibration_enabled and cal_weight > 0.0:
                     if envccc_weight:
@@ -699,6 +761,7 @@ def main():
                     # DDP handles this with find_unused_parameters=True
                     loss_total = loss_total + moe_aux_loss
                     loss_parts["moe_lb"] = float(moe_aux_loss.detach().item())
+            _debug_sync_probe(debug_probe and step_idx == 0, rank, "after_loss", loss_total)
             if torch.isnan(loss_total):
                 raise RuntimeError("Loss is NaN, stopping training.")
 
@@ -712,9 +775,19 @@ def main():
                 pg['lr'] = lr
 
             # clip gradients on bwd to avoid unstable training 
-            loss_total.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if debug_skip_backward:
+                if debug_probe and step_idx == 0 and is_main(rank):
+                    print("[DEBUG_PROBE] skipping backward()", flush=True)
+            else:
+                loss_total.backward()
+                _debug_sync_probe(debug_probe and step_idx == 0, rank, "after_backward")
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if debug_skip_backward or debug_skip_optimizer:
+                if debug_probe and step_idx == 0 and is_main(rank):
+                    print("[DEBUG_PROBE] skipping optimizer.step()", flush=True)
+            else:
+                optimizer.step()
+                _debug_sync_probe(debug_probe and step_idx == 0, rank, "after_optimizer")
             optimizer.zero_grad(set_to_none=True)
 
             # log wandb
@@ -736,6 +809,10 @@ def main():
             
             iter_num += 1
             pbar.update(1)
+            if debug_max_steps and (step_idx + 1) >= int(debug_max_steps):
+                if is_main(rank):
+                    print(f"[DEBUG_PROBE] stopping epoch after {debug_max_steps} step(s)", flush=True)
+                break
         pbar.close()
         
         # End of epoch timing
