@@ -21,6 +21,7 @@ def _has_modules(*names: str) -> bool:
 
 HAS_DATASET_RUNTIME = _has_modules("torch", "transformers")
 HAS_TORCH = _has_modules("torch")
+HAS_LOSS_RUNTIME = _has_modules("torch", "torchsort")
 
 
 def _write_synthetic_gxe_data(root: Path) -> None:
@@ -86,6 +87,26 @@ class CheckpointResolutionTests(unittest.TestCase):
             self.assertEqual(resolve_checkpoint_path(root), latest)
 
 
+@unittest.skipIf(not HAS_TORCH, "torch is required to import utils.utils")
+class CliDefaultTests(unittest.TestCase):
+    def test_schedule_and_proxy_defaults_match_rank_first_plan(self):
+        from utils.utils import parse_args
+
+        old_argv = sys.argv
+        try:
+            sys.argv = ["prog"]
+            args = parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.contrastive_warmup_epochs, 50)
+        self.assertEqual(args.contrastive_ramp_epochs, 50)
+        self.assertEqual(args.proxy_holdout_frac, 0.20)
+        self.assertTrue(args.proxy_disjoint_from_leo)
+        self.assertEqual(args.envccc_weight, 0.10)
+        self.assertEqual(args.huber_weight, 0.02)
+
+
 @unittest.skipIf(not HAS_DATASET_RUNTIME, "torch/transformers are required for dataset tests")
 class DatasetSplitTests(unittest.TestCase):
     def test_proxy_same_tester_validation_is_group_disjoint(self):
@@ -123,6 +144,32 @@ class DatasetSplitTests(unittest.TestCase):
             self.assertEqual(set(val.meta["parent2"]), {"PHP02"})
             self.assertTrue(set(val.meta["parent1"]).issubset(train.proxy_val_parent1s))
             self.assertEqual(train.proxy_info["proxy_row_count"], len(val))
+
+    def test_proxy_same_tester_can_be_disjoint_from_leo_envs(self):
+        from utils.dataset import GxE_Dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_synthetic_gxe_data(root)
+            data_path = f"{root}/"
+            leo_envs = {"LOC1_2019"}
+
+            val = GxE_Dataset(
+                split="val",
+                data_path=data_path,
+                scale_targets=False,
+                val_scheme="proxy_same_tester",
+                proxy_tester="PHP02",
+                proxy_holdout_frac=0.50,
+                proxy_seed=3,
+                leo_val_envs=leo_envs,
+                proxy_disjoint_from_leo=True,
+            )
+
+            self.assertGreater(len(val), 0)
+            self.assertFalse(set(val.meta["Env"]) & leo_envs)
+            self.assertTrue(val.proxy_info["proxy_disjoint_from_leo"])
+            self.assertGreaterEqual(val.proxy_info["proxy_leo_overlap_rows_removed"], 0)
 
     def test_leo_validation_has_no_environment_overlap(self):
         from utils.dataset import GxE_Dataset
@@ -218,6 +265,31 @@ class EnvAffineCalibrationTests(unittest.TestCase):
         rank_diff = out["rank"][0] - out["rank"][1]
         total_diff = out["total"][0] - out["total"][1]
         self.assertGreaterEqual(float((rank_diff * total_diff).item()), -1e-7)
+
+
+@unittest.skipIf(not HAS_LOSS_RUNTIME, "torch/torchsort are required for loss tests")
+class LossBehaviorTests(unittest.TestCase):
+    def test_xi_loss_fails_fast_until_implemented(self):
+        from utils.loss import build_loss
+
+        with self.assertRaises(NotImplementedError):
+            build_loss("xi")
+
+    def test_env_affine_positive_scale_preserves_envwise_pcc(self):
+        import torch
+        from utils.loss import macro_env_pearson
+
+        rank_pred = torch.tensor([0.0, 1.0, 2.0, 2.0, 1.0, 0.0])
+        target = torch.tensor([0.1, 1.1, 2.1, 2.2, 1.2, 0.2])
+        env_id = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long)
+        scale = torch.tensor([2.0, 2.0, 2.0, 0.5, 0.5, 0.5])
+        shift = torch.tensor([-3.0, -3.0, -3.0, 4.0, 4.0, 4.0])
+        total_pred = scale * rank_pred + shift
+
+        rank_pcc = macro_env_pearson(rank_pred, target, env_id, min_samples=2)
+        total_pcc = macro_env_pearson(total_pred, target, env_id, min_samples=2)
+        self.assertTrue(torch.all(scale > 0))
+        self.assertAlmostEqual(float(rank_pcc), float(total_pcc), places=6)
 
 
 if __name__ == "__main__":

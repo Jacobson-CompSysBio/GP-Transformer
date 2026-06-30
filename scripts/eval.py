@@ -38,6 +38,21 @@ def _safe_pcc(a: np.ndarray, b: np.ndarray) -> float:
     return r # robust to old/new scipy versions
 
 
+def _safe_linear_fit(actual: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
+    actual = np.asarray(actual, dtype=float).ravel()
+    pred = np.asarray(pred, dtype=float).ravel()
+    valid = np.isfinite(actual) & np.isfinite(pred)
+    actual = actual[valid]
+    pred = pred[valid]
+    if actual.size < 2 or np.allclose(actual, actual[0]):
+        return np.nan, np.nan
+    try:
+        slope, intercept = np.polyfit(actual, pred, 1)
+    except Exception:
+        return np.nan, np.nan
+    return float(slope), float(intercept)
+
+
 def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:
     if not payload:
         return None
@@ -162,6 +177,11 @@ def evaluate(model,
         y_pred_valid = df_valid['Pred'].to_numpy(dtype=float)
         global_pcc = _safe_pcc(y_true_valid, y_pred_valid)
         global_mse = float(mean_squared_error(y_true_valid, y_pred_valid))
+        pred_slope, pred_intercept = _safe_linear_fit(y_true_valid, y_pred_valid)
+        rank_pred_slope, rank_pred_intercept = _safe_linear_fit(
+            y_true_valid,
+            df_valid['RankPred'].to_numpy(dtype=float),
+        )
 
         # env-avg Pearson via shared helper (same as training selection metric)
         env_ids = pd.Categorical(df_valid['Env'].astype(str)).codes
@@ -202,6 +222,10 @@ def evaluate(model,
     else:
         global_pcc = np.nan
         global_mse = np.nan
+        pred_slope = np.nan
+        pred_intercept = np.nan
+        rank_pred_slope = np.nan
+        rank_pred_intercept = np.nan
         macro_env_pcc = np.nan
         weighted_env_pcc = np.nan
         macro_env_mse = np.nan
@@ -211,6 +235,10 @@ def evaluate(model,
     results = {
         'global_pcc': float(global_pcc) if not np.isnan(global_pcc) else None,
         'global_mse': global_mse,
+        'pred_slope': pred_slope,
+        'pred_intercept': pred_intercept,
+        'rank_pred_slope': rank_pred_slope,
+        'rank_pred_intercept': rank_pred_intercept,
         'env_pcc': macro_env_pcc,
         'env_mse': macro_env_mse,
         'env_pcc_weighted': weighted_env_pcc,
@@ -286,12 +314,21 @@ def _split_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
             "n": int(valid.sum()),
             "pcc": _safe_pcc(yt[valid], yp[valid]) if valid.any() else np.nan,
             "rank_pcc": _safe_pcc(yt[valid_rank], yr[valid_rank]) if valid_rank.any() else np.nan,
+            "pred_slope": _safe_linear_fit(yt[valid], yp[valid])[0] if valid.any() else np.nan,
+            "pred_intercept": _safe_linear_fit(yt[valid], yp[valid])[1] if valid.any() else np.nan,
+            "rank_pred_slope": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[0] if valid_rank.any() else np.nan,
+            "rank_pred_intercept": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[1] if valid_rank.any() else np.nan,
             "mse": float(mean_squared_error(yt[valid], yp[valid])) if valid.any() else np.nan,
         })
     return pd.DataFrame(rows)
 
 
-def save_scoreboard(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_DIR):
+def save_scoreboard(
+    model_type: str,
+    df: pd.DataFrame,
+    out_dir: Path = RESULTS_DIR,
+    checkpoint_dir: str | Path | None = None,
+):
     """
     Save no-leak audit artifacts. Test labels are used only here, after checkpoint
     selection, to analyze final behavior by environment, novelty, and tester.
@@ -304,6 +341,8 @@ def save_scoreboard(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_D
     scored["Hybrid"] = scored["Hybrid"].astype(str)
     scored["novel_hybrid"] = ~scored["Hybrid"].isin(train_hybrids)
     scored["tester"] = scored["parent2"].fillna("").astype(str).replace({"": "UNK"})
+    scored["model_name"] = str(model_type)
+    scored["checkpoint_dir"] = str(Path(checkpoint_dir).resolve()) if checkpoint_dir else ""
 
     env_rows = []
     for env, g in scored.groupby("Env", sort=False):
@@ -317,6 +356,10 @@ def save_scoreboard(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_D
             "n": int(valid.sum()),
             "env_pcc": _safe_pcc(yt[valid], yp[valid]) if valid.any() else np.nan,
             "rank_env_pcc": _safe_pcc(yt[valid_rank], yr[valid_rank]) if valid_rank.any() else np.nan,
+            "pred_slope": _safe_linear_fit(yt[valid], yp[valid])[0] if valid.any() else np.nan,
+            "pred_intercept": _safe_linear_fit(yt[valid], yp[valid])[1] if valid.any() else np.nan,
+            "rank_pred_slope": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[0] if valid_rank.any() else np.nan,
+            "rank_pred_intercept": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[1] if valid_rank.any() else np.nan,
             "env_mse": float(mean_squared_error(yt[valid], yp[valid])) if valid.any() else np.nan,
         })
     env_metrics = pd.DataFrame(env_rows)
@@ -527,7 +570,11 @@ def main():
     print("Evaluating model...")
     results, df = evaluate(model, test_loader, y_scalers, device)
     plot_path = plot_results(model_type, df['Actual'], df['Pred'])
-    scoreboard_paths, env_metrics_df, novelty_metrics_df, tester_metrics_df = save_scoreboard(model_type, df)
+    scoreboard_paths, env_metrics_df, novelty_metrics_df, tester_metrics_df = save_scoreboard(
+        model_type,
+        df,
+        checkpoint_dir=args.checkpoint_dir,
+    )
     metrics_path = RESULTS_DIR / f"{model_type}_test_metrics.csv"
     pd.DataFrame([{
         "run_name": model_type,
@@ -536,6 +583,10 @@ def main():
         "n_rows": int(len(df)),
         "global_pcc": results["global_pcc"],
         "global_mse": results["global_mse"],
+        "pred_slope": results["pred_slope"],
+        "pred_intercept": results["pred_intercept"],
+        "rank_pred_slope": results["rank_pred_slope"],
+        "rank_pred_intercept": results["rank_pred_intercept"],
         "env_pcc": results["env_pcc"],
         "env_mse": results["env_mse"],
         "env_pcc_weighted": results["env_pcc_weighted"],
@@ -544,6 +595,8 @@ def main():
     # print results
     print("Pearson Correlation:", results['global_pcc'])
     print("Mean Squared Error:", results['global_mse'])
+    print("Pred-vs-Actual Slope:", results['pred_slope'])
+    print("Pred-vs-Actual Intercept:", results['pred_intercept'])
     print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
     print("Environment-Averaged MSE:", results['env_mse'])
     print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
@@ -553,6 +606,10 @@ def main():
     # log metrics
     run.summary["test/pearson"] = float(results['global_pcc'])
     run.summary["test/mse"] = float(results['global_mse'])
+    run.summary["test/pred_slope"] = float(results['pred_slope'])
+    run.summary["test/pred_intercept"] = float(results['pred_intercept'])
+    run.summary["test/rank_pred_slope"] = float(results['rank_pred_slope'])
+    run.summary["test/rank_pred_intercept"] = float(results['rank_pred_intercept'])
     run.summary["test/env_avg_pearson"] = float(results['env_pcc'])
     run.summary["test/env_avg_mse"] = float(results['env_mse'])
     run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])
@@ -579,6 +636,10 @@ def main():
         "test/env_avg_pearson_weighted": float(results['env_pcc_weighted']),
         "test/mse": float(results['global_mse']),
         "test/env_avg_mse": float(results['env_mse']),
+        "test/pred_slope": float(results['pred_slope']),
+        "test/pred_intercept": float(results['pred_intercept']),
+        "test/rank_pred_slope": float(results['rank_pred_slope']),
+        "test/rank_pred_intercept": float(results['rank_pred_intercept']),
     })
 
     # plot image

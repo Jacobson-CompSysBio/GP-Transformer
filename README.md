@@ -75,14 +75,14 @@ Composite losses are specified via `LOSS` (e.g., `"envpcc"`, `"mse+envpcc"`) wit
 
 | Loss | Description |
 |------|-------------|
-| `envpcc` | 1 − macro-averaged per-environment Pearson correlation (with Fisher z-transform) |
+| `envpcc` | 1 - uniform macro average of valid local-batch per-environment Pearson correlations |
 | `pcc` | 1 − global Pearson correlation |
 | `mse` | Mean squared error |
 | `envspearman` | 1 − macro-averaged per-environment Spearman correlation (differentiable via soft ranks) |
 | `spearman` | 1 − global differentiable Spearman correlation |
 | `envmse` | Macro-averaged per-environment MSE |
 | `ktau` | Differentiable Kendall-tau ranking loss |
-| `xi` | Chatterjee's Xi coefficient loss |
+| `xi` | Reserved placeholder; `build_loss("xi")` raises until `XiLoss.forward()` is implemented |
 
 ### Contrastive Learning (Optional)
 
@@ -100,7 +100,8 @@ Auxiliary contrastive objectives align learned representations with known geneti
 |----------|----------|-------------|
 | Year-based | default | Train ≤ 2022, validate on 2023 |
 | **LEO** | `LEO_VAL=True` | Leave-Environment-Out: hold out 15% of environments (all years) |
-| Proxy same-tester | `VAL_SCHEME=proxy_same_tester` | Hold out grouped parent1 crosses for one tester, default `PROXY_TESTER=PHP02`, as a diagnostic for novel 2024-style crosses |
+| Proxy same-tester selector | `VAL_SCHEME=proxy_same_tester` | Hold out grouped parent1 crosses for one tester as an ablation selector; not the primary policy |
+| Proxy same-tester diagnostic | `PROXY_VALIDATION_MODE=same_tester_novel_cross` | Log `val_proxy/*` beside LEO using default `PROXY_TESTER=PHP02`, `PROXY_HOLDOUT_FRAC=0.20`, and `PROXY_DISJOINT_FROM_LEO=True` |
 | Env-stratified batching | `ENV_STRATIFIED=True` | Ensures each batch contains ≥ `MIN_SAMPLES_PER_ENV` samples per environment for stable envwise loss computation |
 
 ### PCC-First Scale Workflow
@@ -115,6 +116,7 @@ Key flags:
 | `--checkpoint_tag` | `best_leo`, `best_scale`, `latest` | Eval alias loaded from `checkpoint_manifest.json` |
 | `--calibration_mode` | `none`, `env_affine` | Environment-only affine calibration, `softplus(a(E)) * rank_pred + b(E)`, preserving within-env rank order |
 | `--contrastive_warmup_epochs` / `--contrastive_ramp_epochs` | integer | Sweep e-contrastive schedule without changing the trunk loss |
+| `--proxy_validation_mode` | `none`, `same_tester_novel_cross` | Optional proxy diagnostic logged beside canonical LEO metrics; not used for checkpoint selection |
 | `--use_parent_embeddings` | bool | Add parent ID tokens with `UNK=0` for unseen parents |
 | `--use_dual_channel` | bool | Use additive and dominance marker channels |
 
@@ -124,15 +126,21 @@ Recommended launch path:
 # Primary trunk run; writes best_leo.pt and checkpoint_manifest.json
 sbatch best_train.slurm
 
-# Focused e-contrastive/calibration/proxy sweep
-bash sweep_econtrastive_pcc.sh --dry
-bash sweep_econtrastive_pcc.sh
+# Rank-first campaign phases
+bash sweep_econtrastive_pcc.sh --dry --phase baseline
+bash sweep_econtrastive_pcc.sh --dry --phase grid
+TOP_CONFIGS="top1:0.1:0.5,top2:0.2:0.25,top3:0.15:1.0" bash sweep_econtrastive_pcc.sh --dry --phase repeat-top
 
 # Evaluate a saved run with the PCC-selected checkpoint
 python -u scripts/eval.py --checkpoint_dir checkpoints/RUN_NAME --checkpoint_tag best_leo
+
+# Fit a nonnegative stack on out-of-fold rolling-year predictions, then apply once to 2024
+python -u scripts/stack_predictions.py \
+  --train-predictions "data/results/rolling_oof/*_scored_predictions.csv" \
+  --test-predictions "data/results/2024_candidates/*_scored_predictions.csv"
 ```
 
-`scripts/eval.py` writes no-leak audit artifacts under `data/results/`: scored predictions, per-environment metrics, seen/novel hybrid metrics, tester metrics, and a run-level test metrics CSV. The 2024 labels in `y_test.csv` are used only in this final reporting path.
+`scripts/eval.py` writes no-leak audit artifacts under `data/results/`: scored predictions with `Env,id,Actual,Pred,model_name,checkpoint_dir`, per-environment metrics, seen/novel hybrid metrics, tester metrics, prediction-scale slope/intercept diagnostics, and a run-level test metrics CSV. The 2024 labels in `y_test.csv` are used only in this final reporting path.
 
 SINN-style structured-interaction ablations are available through `scripts/train_sinn.py` and `slurm/sinn_pipeline.sh`. They fit split-aware decomposition targets and support explicit additive output plus bilinear interaction with differential LR for encoder fine-tuning.
 

@@ -84,9 +84,11 @@ export CONTRASTIVE_RAMP_EPOCHS="${CONTRASTIVE_RAMP_EPOCHS:-50}"
 export VAL_SCHEME="${VAL_SCHEME:-leo}"
 export LEO_VAL="${LEO_VAL:-True}"
 export LEO_VAL_FRACTION="${LEO_VAL_FRACTION:-0.15}"
+export PROXY_VALIDATION_MODE="${PROXY_VALIDATION_MODE:-same_tester_novel_cross}"
 export PROXY_TESTER="${PROXY_TESTER:-PHP02}"
-export PROXY_HOLDOUT_FRAC="${PROXY_HOLDOUT_FRAC:-0.25}"
+export PROXY_HOLDOUT_FRAC="${PROXY_HOLDOUT_FRAC:-0.20}"
 export PROXY_SEED="${PROXY_SEED:-1}"
+export PROXY_DISJOINT_FROM_LEO="${PROXY_DISJOINT_FROM_LEO:-True}"
 
 # Rank-safe calibration and optional ablations. Disabled by default.
 export CALIBRATION_MODE="${CALIBRATION_MODE:-none}"
@@ -94,8 +96,8 @@ export CALIBRATION_START_EPOCH="${CALIBRATION_START_EPOCH:-150}"
 export CALIBRATION_RAMP_EPOCHS="${CALIBRATION_RAMP_EPOCHS:-100}"
 export CALIBRATION_DETACH_RANK_UNTIL_EPOCH="${CALIBRATION_DETACH_RANK_UNTIL_EPOCH:-250}"
 export CALIBRATION_JOINT_GRAD_FRACTION="${CALIBRATION_JOINT_GRAD_FRACTION:-0.10}"
-export ENVCCC_WEIGHT="${ENVCCC_WEIGHT:-0.0}"
-export HUBER_WEIGHT="${HUBER_WEIGHT:-0.0}"
+export ENVCCC_WEIGHT="${ENVCCC_WEIGHT:-0.10}"
+export HUBER_WEIGHT="${HUBER_WEIGHT:-0.02}"
 export USE_PARENT_EMBEDDINGS="${USE_PARENT_EMBEDDINGS:-False}"
 export USE_DUAL_CHANNEL="${USE_DUAL_CHANNEL:-False}"
 export CHECKPOINT_TAG="${CHECKPOINT_TAG:-best_leo}"
@@ -177,9 +179,11 @@ srun -N ${SLURM_NNODES} \
         --val_scheme $VAL_SCHEME \
         --leo_val $LEO_VAL \
         --leo_val_fraction $LEO_VAL_FRACTION \
+        --proxy_validation_mode $PROXY_VALIDATION_MODE \
         --proxy_tester $PROXY_TESTER \
         --proxy_holdout_frac $PROXY_HOLDOUT_FRAC \
         --proxy_seed $PROXY_SEED \
+        --proxy_disjoint_from_leo $PROXY_DISJOINT_FROM_LEO \
         --calibration_mode $CALIBRATION_MODE \
         --calibration_start_epoch $CALIBRATION_START_EPOCH \
         --calibration_ramp_epochs $CALIBRATION_RAMP_EPOCHS \

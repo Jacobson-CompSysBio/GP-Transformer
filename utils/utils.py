@@ -121,10 +121,15 @@ def parse_args():
                    help="Fraction of environments to hold out for LEO validation (default 0.15)")
     p.add_argument("--proxy_tester", type=str, default="PHP02",
                    help="Tester line used for proxy_same_tester validation.")
-    p.add_argument("--proxy_holdout_frac", type=float, default=0.25,
+    p.add_argument("--proxy_holdout_frac", type=float, default=0.20,
                    help="Fraction of proxy tester parent1 groups to hold out for validation.")
     p.add_argument("--proxy_seed", type=int, default=1,
                    help="Seed for grouped proxy validation sampling.")
+    p.add_argument("--proxy_validation_mode", type=str, default=None,
+                   choices=["none", "same_tester_novel_cross"],
+                   help="Optional diagnostic proxy validation logged beside the primary validation metric.")
+    p.add_argument("--proxy_disjoint_from_leo", type=str2bool, default=True,
+                   help="For proxy diagnostics, remove rows whose environments are already held out by LEO.")
     p.add_argument("--calibration_mode", type=str, default="none",
                    choices=["none", "env_affine"],
                    help="Rank-safe calibration mode. env_affine preserves within-env order.")
@@ -136,9 +141,9 @@ def parse_args():
                    help="Detach rank prediction from calibration branch until this epoch.")
     p.add_argument("--calibration_joint_grad_fraction", type=float, default=0.10,
                    help="Fraction of calibration gradient allowed into rank head after detach period.")
-    p.add_argument("--envccc_weight", type=float, default=0.0,
+    p.add_argument("--envccc_weight", type=float, default=0.10,
                    help="Environment-wise CCC calibration loss weight.")
-    p.add_argument("--huber_weight", type=float, default=0.0,
+    p.add_argument("--huber_weight", type=float, default=0.02,
                    help="SmoothL1/Huber calibration loss weight on calibrated totals.")
     p.add_argument("--debug_probe", type=str2bool, default=None,
                    help="Synchronize and print first-step tensor probes for ROCm crash localization.")

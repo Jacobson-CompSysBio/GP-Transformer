@@ -192,8 +192,9 @@ def envwise_ccc(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
 def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     """
     Compute Pearson r independently for each environment.
-    Computes LOCAL correlation per environment - DDP handles gradient sync.
-    Uses Fisher z-transform weighted by sample count for stable averaging.
+    Computes LOCAL correlation per environment, then averages valid
+    environments uniformly within the current batch. This intentionally does
+    not use Fisher-z or sample-count weighting.
     
     IMPORTANT: For this loss to work well during training, batches should
     contain multiple samples from the same environment. Use EnvStratifiedSampler
@@ -456,7 +457,9 @@ class XiLoss(nn.Module):
         self.reduction = reduction
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
-        pass
+        raise NotImplementedError(
+            "XiLoss is registered as a placeholder, but Xi correlation is not implemented."
+        )
 
 
 # =============================================================================
@@ -950,7 +953,9 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
         if term == "ktau":
             return term, _CallableLoss(KTauLoss(), expects_env=False, name=term)
         if term == "xi":
-            return term, _CallableLoss(XiLoss(), expects_env=False, name=term)
+            raise NotImplementedError(
+                "loss term 'xi' is not implemented; do not use it until XiLoss.forward is filled in."
+            )
         if term == "triplet":
             return term, _CallableLoss(TripletRankingLoss(), expects_env=True, name=term)
         raise ValueError(f"Unknown loss term: {term}")

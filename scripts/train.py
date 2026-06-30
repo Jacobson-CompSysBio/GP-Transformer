@@ -149,13 +149,28 @@ def main():
     if val_scheme is None:
         val_scheme = "leo" if leo_val else "year"
     val_scheme = str(val_scheme).strip().lower()
+    if val_scheme == "same_tester_novel_cross":
+        val_scheme = "proxy_same_tester"
+    proxy_validation_mode = str(
+        _get_arg_or_env("proxy_validation_mode", "PROXY_VALIDATION_MODE", "none", str)
+    ).strip().lower()
+    if proxy_validation_mode in {"", "false", "0", "off", "no"}:
+        proxy_validation_mode = "none"
+    if proxy_validation_mode not in {"none", "same_tester_novel_cross"}:
+        raise ValueError(
+            "PROXY_VALIDATION_MODE must be 'none' or 'same_tester_novel_cross' "
+            f"(got {proxy_validation_mode!r})"
+        )
     g_input_type = str(_get_arg_or_env("g_input_type", "G_INPUT_TYPE", "tokens", str)).lower()
     env_categorical_mode = normalize_env_categorical_mode(
         _get_arg_or_env("env_categorical_mode", "ENV_CATEGORICAL_MODE", "drop", str)
     )
     proxy_tester = str(_get_arg_or_env("proxy_tester", "PROXY_TESTER", "PHP02", str)).strip()
-    proxy_holdout_frac = _get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", 0.25, float)
+    proxy_holdout_frac = _get_arg_or_env("proxy_holdout_frac", "PROXY_HOLDOUT_FRAC", 0.20, float)
     proxy_seed = _get_arg_or_env("proxy_seed", "PROXY_SEED", args.seed, int)
+    proxy_disjoint_from_leo = _get_arg_or_env(
+        "proxy_disjoint_from_leo", "PROXY_DISJOINT_FROM_LEO", True, str2bool
+    )
     calibration_mode = str(_get_arg_or_env("calibration_mode", "CALIBRATION_MODE", "none", str)).lower()
     calibration_enabled = calibration_mode == "env_affine"
     if calibration_enabled and not args.full_transformer:
@@ -168,8 +183,8 @@ def main():
     calibration_joint_grad_fraction = _get_arg_or_env(
         "calibration_joint_grad_fraction", "CALIBRATION_JOINT_GRAD_FRACTION", 0.10, float
     )
-    envccc_weight = _get_arg_or_env("envccc_weight", "ENVCCC_WEIGHT", 0.0, float)
-    huber_weight = _get_arg_or_env("huber_weight", "HUBER_WEIGHT", 0.0, float)
+    envccc_weight = _get_arg_or_env("envccc_weight", "ENVCCC_WEIGHT", 0.10, float)
+    huber_weight = _get_arg_or_env("huber_weight", "HUBER_WEIGHT", 0.02, float)
     debug_probe = _get_arg_or_env("debug_probe", "DEBUG_PROBE", False, str2bool)
     debug_max_steps = _get_arg_or_env("debug_max_steps", "DEBUG_MAX_STEPS", 0, int)
     debug_skip_backward = _get_arg_or_env("debug_skip_backward", "DEBUG_SKIP_BACKWARD", False, str2bool)
@@ -191,6 +206,12 @@ def main():
         print(
             f"[INFO] Using proxy_same_tester validation: tester={proxy_tester}, "
             f"holdout_frac={proxy_holdout_frac:.2f}, seed={proxy_seed}"
+        )
+    if is_main(rank) and proxy_validation_mode == "same_tester_novel_cross":
+        print(
+            f"[INFO] Logging proxy validation diagnostic beside primary validation: "
+            f"tester={proxy_tester}, holdout_frac={proxy_holdout_frac:.2f}, "
+            f"seed={proxy_seed}, disjoint_from_leo={proxy_disjoint_from_leo}"
         )
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
@@ -220,6 +241,7 @@ def main():
         proxy_tester=proxy_tester,
         proxy_holdout_frac=proxy_holdout_frac,
         proxy_seed=proxy_seed,
+        proxy_disjoint_from_leo=proxy_disjoint_from_leo,
     )
     env_scaler = train_ds.scaler
     y_scalers = train_ds.label_scalers
@@ -250,6 +272,7 @@ def main():
         proxy_holdout_frac=proxy_holdout_frac,
         proxy_seed=proxy_seed,
         proxy_val_parent1s=proxy_val_parent1s,
+        proxy_disjoint_from_leo=proxy_disjoint_from_leo,
         parent_vocab=parent_vocab,
     )
     
@@ -310,6 +333,39 @@ def main():
         num_workers=0,
         worker_init_fn=seed_worker,
     )
+
+    proxy_val_ds = None
+    proxy_val_loader = None
+    if proxy_validation_mode == "same_tester_novel_cross" and val_scheme != "proxy_same_tester":
+        proxy_val_ds = GxE_Dataset(
+            split="val",
+            data_path="data/maize_data_2014-2023_vs_2024_v2/",
+            scaler=env_scaler,
+            y_scalers=y_scalers,
+            scale_targets=args.scale_targets,
+            g_input_type=g_input_type,
+            env_categorical_mode=env_categorical_mode,
+            marker_stats=marker_stats,
+            val_scheme="proxy_same_tester",
+            proxy_tester=proxy_tester,
+            proxy_holdout_frac=proxy_holdout_frac,
+            proxy_seed=proxy_seed,
+            proxy_disjoint_from_leo=proxy_disjoint_from_leo,
+            leo_val_envs=leo_val_envs if proxy_disjoint_from_leo else None,
+            parent_vocab=parent_vocab,
+        )
+        proxy_val_sampler = DistributedSampler(proxy_val_ds, shuffle=False)
+        proxy_val_loader = DataLoader(
+            proxy_val_ds,
+            batch_size=args.batch_size,
+            sampler=proxy_val_sampler,
+            pin_memory=True,
+            num_workers=0,
+            worker_init_fn=seed_worker,
+        )
+        if is_main(rank):
+            print(f"[INFO] Proxy diagnostic samples: {len(proxy_val_ds):,}, envs: {proxy_val_ds.env_id_tensor.unique().numel()}")
+            print(f"[INFO] Proxy diagnostic split: {json.dumps(proxy_val_ds.proxy_info, sort_keys=True)}")
 
     # set up config
     config = Config(block_size=train_ds.block_size,
@@ -548,6 +604,13 @@ def main():
                              "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
                              "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
                              "proxy_info": train_ds.proxy_info if val_scheme == "proxy_same_tester" else None,
+                             "proxy_validation_mode": proxy_validation_mode,
+                             "proxy_disjoint_from_leo": proxy_disjoint_from_leo,
+                             "proxy_diagnostic_info": (
+                                 proxy_val_ds.proxy_info
+                                 if proxy_val_ds is not None and proxy_val_ds.proxy_info is not None
+                                 else None
+                             ),
                              "calibration_mode": calibration_mode,
                              "calibration_start_epoch": calibration_start_epoch,
                              "calibration_ramp_epochs": calibration_ramp_epochs,
@@ -585,6 +648,11 @@ def main():
             run.define_metric("train_loss/cal_huber", step_metric="iter_num")
             run.define_metric("val_loss/total_env_avg_pearson", step_metric="epoch")
             run.define_metric("val_loss/total_env_mse", step_metric="epoch")
+        if proxy_val_loader is not None:
+            run.define_metric("val_proxy/loss", step_metric="epoch")
+            run.define_metric("val_proxy/env_avg_pearson", step_metric="epoch")
+            run.define_metric("val_proxy/total_env_avg_pearson", step_metric="epoch")
+            run.define_metric("val_proxy/total_env_mse", step_metric="epoch")
 
     # initialize training states
     best_val_loss = float("inf")
@@ -909,6 +977,20 @@ def main():
                 len(val_ds),
                 max_batches=None,
             )
+            proxy_eval = None
+            if proxy_val_loader is not None and proxy_val_ds is not None and len(proxy_val_ds) > 0:
+                proxy_total, proxy_parts, proxy_env_pcc, proxy_total_env_pcc, proxy_total_env_mse = eval_loader(
+                    proxy_val_loader,
+                    len(proxy_val_ds),
+                    max_batches=None,
+                )
+                proxy_eval = {
+                    "loss": float(proxy_total.item()),
+                    "parts": proxy_parts,
+                    "env_avg_pearson": proxy_env_pcc,
+                    "total_env_avg_pearson": proxy_total_env_pcc,
+                    "total_env_mse": proxy_total_env_mse,
+                }
 
         # log eval / early stop (only rank 0)
         if is_main(rank):
@@ -927,6 +1009,13 @@ def main():
             log_epoch_payload["train_loss_epoch/total_env_mse"] = train_total_env_mse
             for k, v in train_parts.items():
                 log_epoch_payload[f"train_loss_epoch/{k}"] = float(v)
+            if proxy_eval is not None:
+                log_epoch_payload["val_proxy/loss"] = proxy_eval["loss"]
+                log_epoch_payload["val_proxy/env_avg_pearson"] = proxy_eval["env_avg_pearson"]
+                log_epoch_payload["val_proxy/total_env_avg_pearson"] = proxy_eval["total_env_avg_pearson"]
+                log_epoch_payload["val_proxy/total_env_mse"] = proxy_eval["total_env_mse"]
+                for k, v in proxy_eval["parts"].items():
+                    log_epoch_payload[f"val_proxy/{k}"] = float(v)
             wandb.log(log_epoch_payload)
 
             val_loss_value = float(val_total.item())
@@ -1002,6 +1091,13 @@ def main():
                         "val_scheme": val_scheme,
                         "proxy_tester": proxy_tester if val_scheme == "proxy_same_tester" else None,
                         "proxy_holdout_frac": proxy_holdout_frac if val_scheme == "proxy_same_tester" else None,
+                        "proxy_validation_mode": proxy_validation_mode,
+                        "proxy_disjoint_from_leo": proxy_disjoint_from_leo,
+                        "proxy_diagnostic_info": (
+                            proxy_val_ds.proxy_info
+                            if proxy_val_ds is not None and proxy_val_ds.proxy_info is not None
+                            else None
+                        ),
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,

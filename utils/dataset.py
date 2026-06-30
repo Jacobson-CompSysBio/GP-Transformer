@@ -195,7 +195,7 @@ def summarize_proxy_same_tester_holdout(
 def compute_proxy_same_tester_holdout(
     x_raw: pd.DataFrame,
     proxy_tester: str = "PHP02",
-    holdout_frac: float = 0.25,
+    holdout_frac: float = 0.20,
     seed: int = 1,
     test_year: int = 2024,
 ) -> tuple[set[str], Dict[str, object]]:
@@ -259,9 +259,10 @@ class GxE_Dataset(Dataset):
                  leo_seed: int = 42,
                  val_scheme: str = "year",
                  proxy_tester: str = "PHP02",
-                 proxy_holdout_frac: float = 0.25,
+                 proxy_holdout_frac: float = 0.20,
                  proxy_seed: int = 1,
                  proxy_val_parent1s: Optional[set[str]] = None,
+                 proxy_disjoint_from_leo: bool = False,
                  parent_vocab: Optional[Dict[str, int]] = None,
                  decomposition_path: Optional[str] = None,
                  decomposition_payload: Optional[Dict[str, object]] = None,
@@ -289,6 +290,8 @@ class GxE_Dataset(Dataset):
             proxy_holdout_frac (float): fraction of proxy-tester parent1 groups to hold out
             proxy_seed (int): seed for proxy holdout group sampling
             proxy_val_parent1s (Optional[set[str]]): precomputed proxy held-out parent1 groups
+            proxy_disjoint_from_leo (bool): if True and leo_val_envs is provided,
+                exclude proxy rows from the LEO validation environments
             parent_vocab (Optional[Dict[str, int]]): train-fitted parent vocabulary, with 0 reserved for UNK
             decomposition_path (Optional[str]): JSON from fit_decomposition.py for SINN-style targets
             decomposition_payload (Optional[Dict[str, object]]): pre-loaded decomposition dict
@@ -307,6 +310,7 @@ class GxE_Dataset(Dataset):
         self.proxy_holdout_frac = float(proxy_holdout_frac)
         self.proxy_seed = int(proxy_seed)
         self.proxy_val_parent1s = set(proxy_val_parent1s) if proxy_val_parent1s is not None else None
+        self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_info: Optional[Dict[str, object]] = None
         self.scale_targets = scale_targets
         self.g_input_type = str(g_input_type).strip().lower()
@@ -401,6 +405,19 @@ class GxE_Dataset(Dataset):
                 (x_raw['parent2'] == self.proxy_tester)
                 & (x_raw['parent1'].isin(self.proxy_val_parent1s))
             )
+            if self.proxy_disjoint_from_leo and leo_val_envs:
+                leo_env_mask = x_raw['Env'].isin(leo_val_envs)
+                removed = int((pre_test_mask & in_proxy_val & leo_env_mask).sum())
+                in_proxy_val = in_proxy_val & ~leo_env_mask
+                if self.proxy_info is None:
+                    self.proxy_info = {}
+                self.proxy_info["proxy_disjoint_from_leo"] = True
+                self.proxy_info["proxy_leo_overlap_rows_removed"] = removed
+                self.proxy_info["proxy_row_count_effective"] = int((pre_test_mask & in_proxy_val).sum())
+            elif self.proxy_info is not None:
+                self.proxy_info["proxy_disjoint_from_leo"] = False
+                self.proxy_info["proxy_leo_overlap_rows_removed"] = 0
+                self.proxy_info["proxy_row_count_effective"] = int((pre_test_mask & in_proxy_val).sum())
             if split == "train":
                 keep_mask = pre_test_mask & ~in_proxy_val
             else:
