@@ -153,11 +153,48 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
     per_env_mse = sum_se[valid] / count[valid]
     return per_env_mse.mean()
 
+
+def envwise_ccc(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
+    """
+    Loss = 1 - macro-averaged Lin concordance correlation coefficient by environment.
+    CCC combines correlation, mean bias, and scale mismatch, making it useful for
+    rank-preserving calibration branches.
+    """
+    if pred.ndim > 1:
+        pred = pred.squeeze(-1)
+    if target.ndim > 1:
+        target = target.squeeze(-1)
+
+    pred = pred.float()
+    target = target.float()
+    env_id = env_id.to(pred.device)
+    cccs = []
+    for env in torch.unique(env_id):
+        mask = env_id == env
+        if int(mask.sum().item()) < min_samples:
+            continue
+        p = pred[mask]
+        t = target[mask]
+        mean_p = p.mean()
+        mean_t = t.mean()
+        var_p = ((p - mean_p) ** 2).mean()
+        var_t = ((t - mean_t) ** 2).mean()
+        if var_p <= eps or var_t <= eps:
+            continue
+        cov = ((p - mean_p) * (t - mean_t)).mean()
+        ccc = (2.0 * cov) / (var_p + var_t + (mean_p - mean_t) ** 2 + eps)
+        if torch.isfinite(ccc):
+            cccs.append(ccc.clamp(-1.0, 1.0))
+    if not cccs:
+        return F.mse_loss(pred, target)
+    return 1.0 - torch.stack(cccs).mean()
+
 def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
     """
     Compute Pearson r independently for each environment.
-    Computes LOCAL correlation per environment - DDP handles gradient sync.
-    Uses Fisher z-transform weighted by sample count for stable averaging.
+    Computes LOCAL correlation per environment, then averages valid
+    environments uniformly within the current batch. This intentionally does
+    not use Fisher-z or sample-count weighting.
     
     IMPORTANT: For this loss to work well during training, batches should
     contain multiple samples from the same environment. Use EnvStratifiedSampler
@@ -214,7 +251,7 @@ def envwise_pcc(pred, target, env_id, eps=1e-8, min_samples=4):
             return (pred.sum() * 0.0) + 1.0
         return 1.0 - r
 
-    # Uniform (macro) average across environments — matches eval.py's test metric
+    # Uniform (macro) average across environments; matches eval.py's test metric.
     r_valid = r_per_env[valid]
     r_bar = r_valid.mean()
     
@@ -420,7 +457,9 @@ class XiLoss(nn.Module):
         self.reduction = reduction
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
-        pass
+        raise NotImplementedError(
+            "XiLoss is registered as a placeholder, but Xi correlation is not implemented."
+        )
 
 
 # =============================================================================
@@ -905,6 +944,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(LocalSpearmanCorrLoss(dim=0), expects_env=False, name=term)
         if term == "envmse":
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
+        if term == "envccc":
+            return term, _CallableLoss(envwise_ccc, expects_env=True, name=term)
         if term == "envpcc":
             return term, _CallableLoss(envwise_pcc, expects_env=True, name=term)
         if term == "envspearman":
@@ -912,7 +953,9 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
         if term == "ktau":
             return term, _CallableLoss(KTauLoss(), expects_env=False, name=term)
         if term == "xi":
-            return term, _CallableLoss(XiLoss(), expects_env=False, name=term)
+            raise NotImplementedError(
+                "loss term 'xi' is not implemented; do not use it until XiLoss.forward is filled in."
+            )
         if term == "triplet":
             return term, _CallableLoss(TripletRankingLoss(), expects_env=True, name=term)
         raise ValueError(f"Unknown loss term: {term}")

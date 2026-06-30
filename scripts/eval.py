@@ -1,4 +1,4 @@
-# import packages 
+# import packages
 import os, sys
 import wandb
 import argparse
@@ -19,6 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.dataset import *
 from models.config import *
 from models.model import *
+from utils.checkpoints import resolve_checkpoint_path
 from utils.loss import macro_env_pearson
 from utils.utils import *
 
@@ -35,6 +36,21 @@ def _safe_pcc(a: np.ndarray, b: np.ndarray) -> float:
         return np.nan
     r = pearsonr(a, b)[0]
     return r # robust to old/new scipy versions
+
+
+def _safe_linear_fit(actual: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
+    actual = np.asarray(actual, dtype=float).ravel()
+    pred = np.asarray(pred, dtype=float).ravel()
+    valid = np.isfinite(actual) & np.isfinite(pred)
+    actual = actual[valid]
+    pred = pred[valid]
+    if actual.size < 2 or np.allclose(actual, actual[0]):
+        return np.nan, np.nan
+    try:
+        slope, intercept = np.polyfit(actual, pred, 1)
+    except Exception:
+        return np.nan, np.nan
+    return float(slope), float(intercept)
 
 
 def _rebuild_env_scaler(payload: dict) -> StandardScaler | None:
@@ -71,17 +87,19 @@ def load_data(args,
               y_scalers: dict | None = None,
               marker_stats: dict | None = None,
               g_input_type: str = "tokens",
-              env_categorical_mode: str = "drop"):
+              env_categorical_mode: str = "drop",
+              parent_vocab: dict | None = None):
 
     ds = GxE_Dataset(
         split=split,
         data_path=DATA_DIR,
         scaler=env_scaler,
-        y_scalers=y_scalers,                           # <— pass dict here
+        y_scalers=y_scalers,
         scale_targets=args.scale_targets,
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
+        parent_vocab=parent_vocab,
     )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, pin_memory=True)
     return ds, loader
@@ -103,14 +121,20 @@ def evaluate(model,
             # forward pass
             out = model(xb)
             if isinstance(out, dict):
-                out = out['total'] 
+                rank_out = out.get("rank", out["total"])
+                out = out['total']
+            else:
+                rank_out = out
 
             # inverse transform if we have scalers
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
+                rank_out = y_scalers['total'].inverse_transform(rank_out)
                 pred = np.array(out, dtype=float).ravel()
+                rank_pred = np.array(rank_out, dtype=float).ravel()
             else:
                 pred = out.detach().cpu().numpy().ravel()
+                rank_pred = rank_out.detach().cpu().numpy().ravel()
             actual = np.asarray(yb['Yield_Mg_ha'], dtype=float)
             
             # track env for location-avg 
@@ -123,10 +147,23 @@ def evaluate(model,
                 actual = np.full_like(pred, fill_value=np.nan, dtype=float)
 
             env = np.asarray(yb['Env']).astype(str) if 'Env' in yb else np.array(['UNK'] * len(pred))
-            rows.extend(zip(env.tolist(), actual.tolist(), pred.tolist()))
+            sample_id = np.asarray(yb.get('id', [''] * len(pred))).astype(str)
+            hybrid = np.asarray(yb.get('Hybrid', [''] * len(pred))).astype(str)
+            parent1 = np.asarray(yb.get('parent1', [''] * len(pred))).astype(str)
+            parent2 = np.asarray(yb.get('parent2', [''] * len(pred))).astype(str)
+            rows.extend(zip(
+                sample_id.tolist(),
+                env.tolist(),
+                hybrid.tolist(),
+                parent1.tolist(),
+                parent2.tolist(),
+                actual.tolist(),
+                pred.tolist(),
+                rank_pred.tolist(),
+            ))
     
     # convert our multi-dimensional list to a dataframe
-    df = pd.DataFrame(rows, columns=['Env', 'Actual', 'Pred'])
+    df = pd.DataFrame(rows, columns=['id', 'Env', 'Hybrid', 'parent1', 'parent2', 'Actual', 'Pred', 'RankPred'])
 
     # filter to finite pairs for metric computation
     y_true = df['Actual'].to_numpy(dtype=float)
@@ -140,6 +177,11 @@ def evaluate(model,
         y_pred_valid = df_valid['Pred'].to_numpy(dtype=float)
         global_pcc = _safe_pcc(y_true_valid, y_pred_valid)
         global_mse = float(mean_squared_error(y_true_valid, y_pred_valid))
+        pred_slope, pred_intercept = _safe_linear_fit(y_true_valid, y_pred_valid)
+        rank_pred_slope, rank_pred_intercept = _safe_linear_fit(
+            y_true_valid,
+            df_valid['RankPred'].to_numpy(dtype=float),
+        )
 
         # env-avg Pearson via shared helper (same as training selection metric)
         env_ids = pd.Categorical(df_valid['Env'].astype(str)).codes
@@ -157,10 +199,14 @@ def evaluate(model,
 
         # per-env tables for reporting
         grp = df_valid.groupby('Env', sort=False)[['Actual', 'Pred']]
-        pcc_by_env = grp.apply(
-            lambda g: _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy()),
-            include_groups=False
-        ).dropna()
+        pcc_by_env = pd.Series({
+            env: _safe_pcc(g['Actual'].to_numpy(), g['Pred'].to_numpy())
+            for env, g in grp
+        }).dropna()
+        rank_pcc_by_env = pd.Series({
+            env: _safe_pcc(g['Actual'].to_numpy(), g['RankPred'].to_numpy())
+            for env, g in df_valid.groupby('Env', sort=False)[['Actual', 'RankPred']]
+        }).dropna()
         counts = grp.size().loc[pcc_by_env.index]
         weighted_env_pcc = (
             float(np.nansum(pcc_by_env.values * counts.values) / counts.values.sum())
@@ -168,26 +214,36 @@ def evaluate(model,
             else np.nan
         )
 
-        mse_by_env = grp.apply(
-            lambda g: float(mean_squared_error(g['Actual'].to_numpy(), g['Pred'].to_numpy())),
-            include_groups=False
-        ).dropna()
+        mse_by_env = pd.Series({
+            env: float(mean_squared_error(g['Actual'].to_numpy(), g['Pred'].to_numpy()))
+            for env, g in grp
+        }).dropna()
         macro_env_mse = float(mse_by_env.mean()) if len(mse_by_env) else np.nan
     else:
         global_pcc = np.nan
         global_mse = np.nan
+        pred_slope = np.nan
+        pred_intercept = np.nan
+        rank_pred_slope = np.nan
+        rank_pred_intercept = np.nan
         macro_env_pcc = np.nan
         weighted_env_pcc = np.nan
         macro_env_mse = np.nan
         pcc_by_env = pd.Series(dtype=float)
+        rank_pcc_by_env = pd.Series(dtype=float)
 
     results = {
         'global_pcc': float(global_pcc) if not np.isnan(global_pcc) else None,
         'global_mse': global_mse,
+        'pred_slope': pred_slope,
+        'pred_intercept': pred_intercept,
+        'rank_pred_slope': rank_pred_slope,
+        'rank_pred_intercept': rank_pred_intercept,
         'env_pcc': macro_env_pcc,
         'env_mse': macro_env_mse,
         'env_pcc_weighted': weighted_env_pcc,
-        'pcc_by_env': pcc_by_env
+        'pcc_by_env': pcc_by_env,
+        'rank_pcc_by_env': rank_pcc_by_env,
     }
 
     return results, df
@@ -244,18 +300,90 @@ def save_results(model_type: str, df: pd.DataFrame, out_dir: Path = RESULTS_DIR)
     by_env.to_csv(out_path, index=False)
     return out_path
 
+
+def _split_metrics(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    rows = []
+    for group, g in df.groupby(group_col, dropna=False, sort=False):
+        yt = g["Actual"].to_numpy(dtype=float)
+        yp = g["Pred"].to_numpy(dtype=float)
+        yr = g["RankPred"].to_numpy(dtype=float) if "RankPred" in g else yp
+        valid = np.isfinite(yt) & np.isfinite(yp)
+        valid_rank = np.isfinite(yt) & np.isfinite(yr)
+        rows.append({
+            group_col: str(group),
+            "n": int(valid.sum()),
+            "pcc": _safe_pcc(yt[valid], yp[valid]) if valid.any() else np.nan,
+            "rank_pcc": _safe_pcc(yt[valid_rank], yr[valid_rank]) if valid_rank.any() else np.nan,
+            "pred_slope": _safe_linear_fit(yt[valid], yp[valid])[0] if valid.any() else np.nan,
+            "pred_intercept": _safe_linear_fit(yt[valid], yp[valid])[1] if valid.any() else np.nan,
+            "rank_pred_slope": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[0] if valid_rank.any() else np.nan,
+            "rank_pred_intercept": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[1] if valid_rank.any() else np.nan,
+            "mse": float(mean_squared_error(yt[valid], yp[valid])) if valid.any() else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def save_scoreboard(
+    model_type: str,
+    df: pd.DataFrame,
+    out_dir: Path = RESULTS_DIR,
+    checkpoint_dir: str | Path | None = None,
+):
+    """
+    Save no-leak audit artifacts. Test labels are used only here, after checkpoint
+    selection, to analyze final behavior by environment, novelty, and tester.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_x = pd.read_csv(Path(DATA_DIR) / "X_train.csv", usecols=["id"])
+    train_hybrids = set(train_x["id"].astype(str).apply(extract_hybrid_name))
+
+    scored = df.copy()
+    scored["Hybrid"] = scored["Hybrid"].astype(str)
+    scored["novel_hybrid"] = ~scored["Hybrid"].isin(train_hybrids)
+    scored["tester"] = scored["parent2"].fillna("").astype(str).replace({"": "UNK"})
+    scored["model_name"] = str(model_type)
+    scored["checkpoint_dir"] = str(Path(checkpoint_dir).resolve()) if checkpoint_dir else ""
+
+    env_rows = []
+    for env, g in scored.groupby("Env", sort=False):
+        yt = g["Actual"].to_numpy(dtype=float)
+        yp = g["Pred"].to_numpy(dtype=float)
+        yr = g["RankPred"].to_numpy(dtype=float)
+        valid = np.isfinite(yt) & np.isfinite(yp)
+        valid_rank = np.isfinite(yt) & np.isfinite(yr)
+        env_rows.append({
+            "Env": str(env),
+            "n": int(valid.sum()),
+            "env_pcc": _safe_pcc(yt[valid], yp[valid]) if valid.any() else np.nan,
+            "rank_env_pcc": _safe_pcc(yt[valid_rank], yr[valid_rank]) if valid_rank.any() else np.nan,
+            "pred_slope": _safe_linear_fit(yt[valid], yp[valid])[0] if valid.any() else np.nan,
+            "pred_intercept": _safe_linear_fit(yt[valid], yp[valid])[1] if valid.any() else np.nan,
+            "rank_pred_slope": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[0] if valid_rank.any() else np.nan,
+            "rank_pred_intercept": _safe_linear_fit(yt[valid_rank], yr[valid_rank])[1] if valid_rank.any() else np.nan,
+            "env_mse": float(mean_squared_error(yt[valid], yp[valid])) if valid.any() else np.nan,
+        })
+    env_metrics = pd.DataFrame(env_rows)
+    novelty_metrics = _split_metrics(scored, "novel_hybrid")
+    tester_metrics = _split_metrics(scored, "tester").sort_values("n", ascending=False)
+
+    paths = {
+        "scored": out_dir / f"{model_type}_scored_predictions.csv",
+        "env": out_dir / f"{model_type}_env_metrics.csv",
+        "novelty": out_dir / f"{model_type}_novelty_metrics.csv",
+        "tester": out_dir / f"{model_type}_tester_metrics.csv",
+    }
+    scored.to_csv(paths["scored"], index=False)
+    env_metrics.to_csv(paths["env"], index=False)
+    novelty_metrics.to_csv(paths["novelty"], index=False)
+    tester_metrics.to_csv(paths["tester"], index=False)
+    return paths, env_metrics, novelty_metrics, tester_metrics
+
 def load_model(device: torch.device,
                args):
 
     ckpt_root = Path(args.checkpoint_dir)
-    if not ckpt_root.exists():
-        raise FileNotFoundError(f"Checkpoint directory {ckpt_root} does not exist.")
-
-    ckpts = sorted([p for p in ckpt_root.glob("checkpoint_*.pt") if p.is_file()])
-    if not ckpts:
-        raise FileNotFoundError(f"No checkpoint files found in {ckpt_root}.")
-    
-    best_path = ckpts[-1]
+    checkpoint_tag = getattr(args, "checkpoint_tag", None)
+    best_path = resolve_checkpoint_path(ckpt_root, checkpoint_tag)
     print(f"Loading model from {best_path}")
     payload = torch.load(best_path, map_location="cpu")
     state = payload["model"]
@@ -293,6 +421,10 @@ def load_model(device: torch.device,
     )
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
+    calibration_mode = config.get("calibration_mode", getattr(args, "calibration_mode", "none"))
+    use_parent_embeddings = config.get("use_parent_embeddings", getattr(args, "use_parent_embeddings", False))
+    use_dual_channel = config.get("use_dual_channel", getattr(args, "use_dual_channel", False))
+    n_parents = config.get("n_parents", 1)
     if full_tf_mlp_type is None:
         full_tf_mlp_type = g_encoder_type
     if isinstance(full_tf_mlp_type, str):
@@ -304,6 +436,7 @@ def load_model(device: torch.device,
     env_scaler = _rebuild_env_scaler(payload.get("env_scaler", None))
     y_scalers = _rebuild_y_scalers(payload.get("y_scalers", None))
     marker_stats = _rebuild_marker_stats(payload.get("marker_stats", None))
+    parent_vocab = payload.get("parent_vocab", None)
 
     config = Config(block_size=blk,
                     g_input_type=g_input_type,
@@ -323,6 +456,10 @@ def load_model(device: torch.device,
     config.moe_shared_expert_hidden_dim = moe_shared_expert_hidden_dim
     config.moe_loss_weight = moe_loss_weight
     config.full_tf_mlp_type = full_tf_mlp_type
+    config.calibration_mode = calibration_mode
+    config.use_parent_embeddings = use_parent_embeddings
+    config.use_dual_channel = use_dual_channel
+    config.n_parents = n_parents
     if full_transformer:
         if residual:
             model = FullTransformerResidual(
@@ -381,7 +518,7 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode 
+    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_vocab
 
 def main():
     args = parse_args()
@@ -411,19 +548,21 @@ def main():
 
     # load model
     device = torch.device(f"cuda:{0}" if torch.cuda.is_available() else "cpu")
-    torch.cuda.set_device(0)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode = load_model(device, args)    
+    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_vocab = load_model(device, args)
     
     # load data
     print("Loading data...")
     test_data, test_loader = load_data(args,
                                     env_scaler=env_scaler,
-                                    y_scalers=y_scalers,   # <— name matches
+                                    y_scalers=y_scalers,
                                     marker_stats=marker_stats,
                                     g_input_type=g_input_type,
                                     env_categorical_mode=env_categorical_mode,
+                                    parent_vocab=parent_vocab,
                                     split="test",
                                     batch_size=32)
 
@@ -431,11 +570,33 @@ def main():
     print("Evaluating model...")
     results, df = evaluate(model, test_loader, y_scalers, device)
     plot_path = plot_results(model_type, df['Actual'], df['Pred'])
-    #save_results(model_type, actuals, preds)
+    scoreboard_paths, env_metrics_df, novelty_metrics_df, tester_metrics_df = save_scoreboard(
+        model_type,
+        df,
+        checkpoint_dir=args.checkpoint_dir,
+    )
+    metrics_path = RESULTS_DIR / f"{model_type}_test_metrics.csv"
+    pd.DataFrame([{
+        "run_name": model_type,
+        "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()) if args.checkpoint_dir else "",
+        "checkpoint_tag": getattr(args, "checkpoint_tag", None),
+        "n_rows": int(len(df)),
+        "global_pcc": results["global_pcc"],
+        "global_mse": results["global_mse"],
+        "pred_slope": results["pred_slope"],
+        "pred_intercept": results["pred_intercept"],
+        "rank_pred_slope": results["rank_pred_slope"],
+        "rank_pred_intercept": results["rank_pred_intercept"],
+        "env_pcc": results["env_pcc"],
+        "env_mse": results["env_mse"],
+        "env_pcc_weighted": results["env_pcc_weighted"],
+    }]).to_csv(metrics_path, index=False)
 
     # print results
     print("Pearson Correlation:", results['global_pcc'])
     print("Mean Squared Error:", results['global_mse'])
+    print("Pred-vs-Actual Slope:", results['pred_slope'])
+    print("Pred-vs-Actual Intercept:", results['pred_intercept'])
     print("Environment-Averaged Pearson Correlation:", results['env_pcc'])
     print("Environment-Averaged MSE:", results['env_mse'])
     print("Weighted Environment-Averaged Pearson Correlation:", results['env_pcc_weighted'])
@@ -445,20 +606,29 @@ def main():
     # log metrics
     run.summary["test/pearson"] = float(results['global_pcc'])
     run.summary["test/mse"] = float(results['global_mse'])
+    run.summary["test/pred_slope"] = float(results['pred_slope'])
+    run.summary["test/pred_intercept"] = float(results['pred_intercept'])
+    run.summary["test/rank_pred_slope"] = float(results['rank_pred_slope'])
+    run.summary["test/rank_pred_intercept"] = float(results['rank_pred_intercept'])
     run.summary["test/env_avg_pearson"] = float(results['env_pcc'])
     run.summary["test/env_avg_mse"] = float(results['env_mse'])
-    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])  
+    run.summary["test/env_avg_pearson_weighted"] = float(results['env_pcc_weighted'])
     run.summary["test/model_type"] = model_type
     run.summary["test/model_base_type"] = model_base_type
-    
+
     # table for pcc by env
     pcc_series = results['pcc_by_env']
-    pcc_df = pcc_series.rename("PCC").reset_index()
+    pcc_df = pcc_series.rename("PCC").rename_axis("Env").reset_index()
     pcc_df["Env"] = pcc_df["Env"].astype(str)
     pcc_df = pcc_df.replace({np.nan: None})
 
     pcc_table = wandb.Table(dataframe=pcc_df)
     run.log({"test/pcc_by_env": pcc_table})
+    run.log({
+        "test/env_metrics_table": wandb.Table(dataframe=env_metrics_df),
+        "test/novelty_metrics_table": wandb.Table(dataframe=novelty_metrics_df),
+        "test/tester_metrics_table": wandb.Table(dataframe=tester_metrics_df),
+    })
 
     run.log({
         "test/pearson": float(results['global_pcc']),
@@ -466,10 +636,17 @@ def main():
         "test/env_avg_pearson_weighted": float(results['env_pcc_weighted']),
         "test/mse": float(results['global_mse']),
         "test/env_avg_mse": float(results['env_mse']),
+        "test/pred_slope": float(results['pred_slope']),
+        "test/pred_intercept": float(results['pred_intercept']),
+        "test/rank_pred_slope": float(results['rank_pred_slope']),
+        "test/rank_pred_intercept": float(results['rank_pred_intercept']),
     })
 
     # plot image
     run.log({"test/pred_vs_actual": wandb.Image(str(plot_path))})
+    run.summary["test/metrics_csv"] = str(metrics_path)
+    for key, path in scoreboard_paths.items():
+        run.summary[f"test/{key}_csv"] = str(path)
     run.finish()
 
 if __name__ == "__main__":
