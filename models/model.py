@@ -62,6 +62,7 @@ class FullTransformer(nn.Module):
         self.moe_aux_loss = None
         self.g_input_type = str(getattr(config, "g_input_type", "tokens")).lower()
         self.calibration_mode = str(getattr(config, "calibration_mode", "none")).lower()
+        self.prediction_head = str(getattr(config, "prediction_head", "linear")).lower()
         self.debug_probe = bool(getattr(config, "debug_probe", False))
         self.use_parent_embeddings = bool(getattr(config, "use_parent_embeddings", False))
         self.use_dual_channel = bool(getattr(config, "use_dual_channel", False))
@@ -70,6 +71,13 @@ class FullTransformer(nn.Module):
             raise ValueError(f"config.g_input_type must be 'tokens' or 'grm' (got {self.g_input_type})")
         if self.calibration_mode not in {"none", "env_affine"}:
             raise ValueError(f"config.calibration_mode must be 'none' or 'env_affine' (got {self.calibration_mode})")
+        if self.prediction_head not in {"linear", "env_residual"}:
+            raise ValueError(
+                "config.prediction_head must be 'linear' or 'env_residual' "
+                f"(got {self.prediction_head})"
+            )
+        if self.prediction_head == "env_residual" and self.calibration_mode != "none":
+            raise ValueError("prediction_head='env_residual' requires calibration_mode='none'")
 
         # tokenizers
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
@@ -148,6 +156,17 @@ class FullTransformer(nn.Module):
         self.head = nn.Linear(config.n_embd, 1)
         nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
+        self.env_mean_head = None
+        if self.prediction_head == "env_residual":
+            self.env_mean_head = nn.Sequential(
+                nn.LayerNorm(config.n_env_fts),
+                nn.Linear(config.n_env_fts, config.n_embd),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.n_embd, 1),
+            )
+            nn.init.zeros_(self.env_mean_head[-1].weight)
+            nn.init.zeros_(self.env_mean_head[-1].bias)
         self.scale_head = None
         self.shift_head = None
         self.calibration_eps = 1e-4
@@ -271,7 +290,17 @@ class FullTransformer(nn.Module):
 
         rank_pred = self.head(tokens[:, 0])
         _debug_stage(self.debug_probe, "fulltf.rank_pred", rank_pred)
-        if self.calibration_mode == "env_affine":
+        if self.prediction_head == "env_residual":
+            env_mean_pred = self.env_mean_head(x["e_data"].float())
+            pred = {
+                "total": env_mean_pred + rank_pred,
+                "rank": rank_pred,
+                "env_mean": env_mean_pred,
+                "residual": rank_pred,
+            }
+            _debug_stage(self.debug_probe, "fulltf.env_mean", env_mean_pred)
+            _debug_stage(self.debug_probe, "fulltf.residual", rank_pred)
+        elif self.calibration_mode == "env_affine":
             scale_raw = self.scale_head(env_input_repr)
             _debug_stage(self.debug_probe, "fulltf.scale_raw", scale_raw)
             scale = F.softplus(scale_raw) + self.calibration_eps

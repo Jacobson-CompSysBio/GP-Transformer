@@ -250,6 +250,7 @@ class GxE_Dataset(Dataset):
                  val_year: int | None = None,
                  y_scalers: Optional[Dict[str, LabelScaler]] = None,
                  scale_targets: bool = True,
+                 decomposition_scale_mode: str = "independent",
                  g_input_type: str = "tokens",
                  env_categorical_mode: str = "drop",
                  marker_stats: Optional[Dict[str, object]] = None,
@@ -278,6 +279,7 @@ class GxE_Dataset(Dataset):
             val_year (int|None): if not None and split=='val', filter to this year
             y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
             scale_targets (bool): if True, scale targets using y_scalers
+            decomposition_scale_mode (str): "shared_total" keeps the additive target relation
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
             env_categorical_mode (str): "drop" (legacy baseline) or "onehot" categorical env handling
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
@@ -313,6 +315,11 @@ class GxE_Dataset(Dataset):
         self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_info: Optional[Dict[str, object]] = None
         self.scale_targets = scale_targets
+        self.decomposition_scale_mode = str(decomposition_scale_mode).strip().lower()
+        if self.decomposition_scale_mode not in {"independent", "shared_total"}:
+            raise ValueError(
+                "decomposition_scale_mode must be one of ['independent', 'shared_total']"
+            )
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
         if self.g_input_type not in {"tokens", "grm"}:
@@ -577,9 +584,20 @@ class GxE_Dataset(Dataset):
             if self.split == "train":
                 def fit_ls(series: pd.Series) -> LabelScaler:
                     return LabelScaler(mean=float(series.mean()), std=float(series.std(ddof=0)))
-                self.label_scalers['total'] = fit_ls(total)
-                self.label_scalers['ymean'] = fit_ls(ymean)
-                self.label_scalers['resid'] = fit_ls(resid)
+                total_scaler = fit_ls(total)
+                self.label_scalers['total'] = total_scaler
+                if self.decomposition_scale_mode == "shared_total":
+                    self.label_scalers['ymean'] = LabelScaler(
+                        mean=total_scaler.mean,
+                        std=total_scaler.std,
+                    )
+                    self.label_scalers['resid'] = LabelScaler(
+                        mean=0.0,
+                        std=total_scaler.std,
+                    )
+                else:
+                    self.label_scalers['ymean'] = fit_ls(ymean)
+                    self.label_scalers['resid'] = fit_ls(resid)
             else:
                 if y_scalers is None:
                     raise ValueError("For val/test/sub you must pass y_scalers.")
@@ -588,6 +606,16 @@ class GxE_Dataset(Dataset):
             total = pd.Series(self.label_scalers['total'].transform(total.values))
             ymean = pd.Series(self.label_scalers['ymean'].transform(ymean.values))
             resid = pd.Series(self.label_scalers['resid'].transform(resid.values))
+            if self.decomposition_scale_mode == "shared_total" and not np.allclose(
+                total.to_numpy(),
+                ymean.to_numpy() + resid.to_numpy(),
+                rtol=1e-6,
+                atol=1e-6,
+            ):
+                raise ValueError(
+                    "shared_total scaling violated scaled_total = "
+                    "scaled_env_mean + scaled_residual"
+                )
 
         self.total_series = total.reset_index(drop=True)
         self.env_mean = ymean.reset_index(drop=True)

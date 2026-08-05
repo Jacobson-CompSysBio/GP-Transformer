@@ -60,7 +60,8 @@ export GXE_LAYERS=1
 export HEADS=4
 export EMB_SIZE=256
 export SEED=1
-export SCALE_TARGETS=False
+export SCALE_TARGETS="${SCALE_TARGETS:-False}"
+export DECOMPOSITION_SCALE_MODE="${DECOMPOSITION_SCALE_MODE:-independent}"
 export G_INPUT_TYPE=tokens
 export ENV_CATEGORICAL_MODE=drop
 
@@ -100,6 +101,9 @@ export ENVCCC_WEIGHT="${ENVCCC_WEIGHT:-0.10}"
 export HUBER_WEIGHT="${HUBER_WEIGHT:-0.02}"
 export USE_PARENT_EMBEDDINGS="${USE_PARENT_EMBEDDINGS:-False}"
 export USE_DUAL_CHANNEL="${USE_DUAL_CHANNEL:-False}"
+export PREDICTION_HEAD="${PREDICTION_HEAD:-linear}"
+export ENV_MEAN_LOSS_WEIGHT="${ENV_MEAN_LOSS_WEIGHT:-1.0}"
+export ENV_TOTAL_HUBER_WEIGHT="${ENV_TOTAL_HUBER_WEIGHT:-0.05}"
 export CHECKPOINT_TAG="${CHECKPOINT_TAG:-best_leo}"
 
 ### wandb settings ###
@@ -165,6 +169,7 @@ srun -N ${SLURM_NNODES} \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
+        --decomposition_scale_mode $DECOMPOSITION_SCALE_MODE \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
         --contrastive_mode $CONTRASTIVE_MODE \
@@ -192,7 +197,10 @@ srun -N ${SLURM_NNODES} \
         --envccc_weight $ENVCCC_WEIGHT \
         --huber_weight $HUBER_WEIGHT \
         --use_parent_embeddings $USE_PARENT_EMBEDDINGS \
-        --use_dual_channel $USE_DUAL_CHANNEL
+        --use_dual_channel $USE_DUAL_CHANNEL \
+        --prediction_head $PREDICTION_HEAD \
+        --env_mean_loss_weight $ENV_MEAN_LOSS_WEIGHT \
+        --env_total_huber_weight $ENV_TOTAL_HUBER_WEIGHT
 
 ### python (model eval) ###
 if [[ -f "$WANDB_RUN_ID_FILE" ]]; then
@@ -238,4 +246,8 @@ python -u scripts/eval.py \
     --checkpoint_tag $CHECKPOINT_TAG \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS
+    --scale_targets $SCALE_TARGETS \
+    --decomposition_scale_mode $DECOMPOSITION_SCALE_MODE \
+    --prediction_head $PREDICTION_HEAD \
+    --env_mean_loss_weight $ENV_MEAN_LOSS_WEIGHT \
+    --env_total_huber_weight $ENV_TOTAL_HUBER_WEIGHT

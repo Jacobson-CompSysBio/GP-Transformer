@@ -88,7 +88,9 @@ def load_data(args,
               marker_stats: dict | None = None,
               g_input_type: str = "tokens",
               env_categorical_mode: str = "drop",
-              parent_vocab: dict | None = None):
+              parent_vocab: dict | None = None,
+              prediction_head: str = "linear",
+              decomposition_scale_mode: str = "independent"):
 
     ds = GxE_Dataset(
         split=split,
@@ -96,6 +98,8 @@ def load_data(args,
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        decomposition_scale_mode=decomposition_scale_mode,
+        residual=(prediction_head == "env_residual"),
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
@@ -129,7 +133,8 @@ def evaluate(model,
             # inverse transform if we have scalers
             if y_scalers and 'total' in y_scalers:
                 out = y_scalers['total'].inverse_transform(out)
-                rank_out = y_scalers['total'].inverse_transform(rank_out)
+                rank_scaler = y_scalers.get('resid', y_scalers['total'])
+                rank_out = rank_scaler.inverse_transform(rank_out)
                 pred = np.array(out, dtype=float).ravel()
                 rank_pred = np.array(rank_out, dtype=float).ravel()
             else:
@@ -422,6 +427,11 @@ def load_model(device: torch.device,
     env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
     full_tf_mlp_type = config.get("full_tf_mlp_type", getattr(args, "full_tf_mlp_type", None))
     calibration_mode = config.get("calibration_mode", getattr(args, "calibration_mode", "none"))
+    prediction_head = config.get("prediction_head", getattr(args, "prediction_head", "linear"))
+    decomposition_scale_mode = config.get(
+        "decomposition_scale_mode",
+        getattr(args, "decomposition_scale_mode", "independent"),
+    )
     use_parent_embeddings = config.get("use_parent_embeddings", getattr(args, "use_parent_embeddings", False))
     use_dual_channel = config.get("use_dual_channel", getattr(args, "use_dual_channel", False))
     n_parents = config.get("n_parents", 1)
@@ -446,7 +456,8 @@ def load_model(device: torch.device,
                     n_gxe_layer=gxe_layer,
                     n_head=n_head,
                     n_embd=n_embd,
-                    n_env_fts=n_env_fts)
+                    n_env_fts=n_env_fts,
+                    prediction_head=prediction_head)
     # stash MoE settings so downstream components can read from config if needed
     config.g_encoder_type = g_encoder_type
     config.moe_num_experts = moe_num_experts
@@ -518,7 +529,17 @@ def load_model(device: torch.device,
     model.load_state_dict(state, strict=False)
     model.eval()
 
-    return model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_vocab
+    return (
+        model,
+        y_scalers,
+        env_scaler,
+        marker_stats,
+        g_input_type,
+        env_categorical_mode,
+        parent_vocab,
+        prediction_head,
+        decomposition_scale_mode,
+    )
 
 def main():
     args = parse_args()
@@ -552,7 +573,17 @@ def main():
         torch.cuda.set_device(0)
     set_seed(args.seed)
     print("Loading model...")
-    model, y_scalers, env_scaler, marker_stats, g_input_type, env_categorical_mode, parent_vocab = load_model(device, args)
+    (
+        model,
+        y_scalers,
+        env_scaler,
+        marker_stats,
+        g_input_type,
+        env_categorical_mode,
+        parent_vocab,
+        prediction_head,
+        decomposition_scale_mode,
+    ) = load_model(device, args)
     
     # load data
     print("Loading data...")
@@ -563,6 +594,8 @@ def main():
                                     g_input_type=g_input_type,
                                     env_categorical_mode=env_categorical_mode,
                                     parent_vocab=parent_vocab,
+                                    prediction_head=prediction_head,
+                                    decomposition_scale_mode=decomposition_scale_mode,
                                     split="test",
                                     batch_size=32)
 

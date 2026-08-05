@@ -50,6 +50,22 @@ def parse_args():
     p.add_argument("--moe_loss_weight", type=float, default=None)
     p.add_argument("--full_transformer", type=str2bool, default=False)
     p.add_argument("--full_tf_mlp_type", type=str, default=None)
+    p.add_argument(
+        "--prediction_head",
+        type=str,
+        default="linear",
+        choices=["linear", "env_residual"],
+        help="Prediction head for FullTransformer.",
+    )
+    p.add_argument(
+        "--decomposition_scale_mode",
+        type=str,
+        default="independent",
+        choices=["independent", "shared_total"],
+        help="Target scale mode for additive targets.",
+    )
+    p.add_argument("--env_mean_loss_weight", type=float, default=1.0)
+    p.add_argument("--env_total_huber_weight", type=float, default=0.05)
     p.add_argument("--residual", type=str2bool, default=False)
     p.add_argument("--g_input_type", type=str, default="tokens", choices=["tokens", "grm"],
                    help="Genotype input representation: tokenized markers ('tokens') or GRM-standardized features ('grm').")
@@ -205,6 +221,7 @@ def make_run_name(args) -> str:
     cal = "affcal+" if getattr(args, "calibration_mode", "none") == "env_affine" else ""
     parent = "parent+" if getattr(args, "use_parent_embeddings", False) else ""
     dual = "adddom+" if getattr(args, "use_dual_channel", False) else ""
+    head = "envres+" if getattr(args, "prediction_head", "linear") == "env_residual" else ""
     # Contrastive mode can come from args or environment.
     # Keep this robust to legacy boolean-style values.
     contrastive_mode_raw = _get_arg_env("contrastive_mode", "CONTRASTIVE_MODE", "none", str)
@@ -239,7 +256,10 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + valtag + cal + parent + dual + contr + ginput + envcat).rstrip("+")
+    model_type = (
+        full + g + e + ld + gxe + wg + res + strat + valtag + cal
+        + parent + dual + head + contr + ginput + envcat
+    ).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""

@@ -29,6 +29,7 @@ from utils.loss import (
     macro_env_pearson,
     envwise_mse,
     envwise_ccc,
+    env_residual_auxiliary_loss,
 )
 from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
@@ -192,6 +193,38 @@ def main():
     debug_no_autocast = _get_arg_or_env("debug_no_autocast", "DEBUG_NO_AUTOCAST", False, str2bool)
     use_parent_embeddings = _get_arg_or_env("use_parent_embeddings", "USE_PARENT_EMBEDDINGS", False, str2bool)
     use_dual_channel = _get_arg_or_env("use_dual_channel", "USE_DUAL_CHANNEL", False, str2bool)
+    prediction_head = str(
+        _get_arg_or_env("prediction_head", "PREDICTION_HEAD", "linear", str)
+    ).strip().lower()
+    decomposition_scale_mode = str(
+        _get_arg_or_env(
+            "decomposition_scale_mode",
+            "DECOMPOSITION_SCALE_MODE",
+            "independent",
+            str,
+        )
+    ).strip().lower()
+    env_mean_loss_weight = float(
+        _get_arg_or_env("env_mean_loss_weight", "ENV_MEAN_LOSS_WEIGHT", 1.0, float)
+    )
+    env_total_huber_weight = float(
+        _get_arg_or_env(
+            "env_total_huber_weight", "ENV_TOTAL_HUBER_WEIGHT", 0.05, float
+        )
+    )
+    if prediction_head == "env_residual":
+        if not args.full_transformer:
+            raise ValueError("prediction_head=env_residual requires FullTransformer")
+        if not args.scale_targets:
+            raise ValueError("prediction_head=env_residual requires scale_targets=True")
+        if decomposition_scale_mode != "shared_total":
+            raise ValueError(
+                "prediction_head=env_residual requires decomposition_scale_mode=shared_total"
+            )
+        if calibration_enabled:
+            raise ValueError("prediction_head=env_residual requires calibration_mode=none")
+        if env_mean_loss_weight < 0 or env_total_huber_weight < 0:
+            raise ValueError("Environment-residual loss weights must be nonnegative")
     contrastive_warmup_epochs = _get_arg_or_env(
         "contrastive_warmup_epochs", "CONTRASTIVE_WARMUP_EPOCHS", 50, int
     )
@@ -216,6 +249,7 @@ def main():
     if is_main(rank):
         print(f"[INFO] Env categorical mode: {env_categorical_mode}")
         print(f"[INFO] Calibration mode: {calibration_mode}")
+        print(f"[INFO] Prediction head: {prediction_head}")
         if debug_probe:
             print(
                 f"[DEBUG_PROBE] enabled=True max_steps={debug_max_steps} "
@@ -231,6 +265,8 @@ def main():
         scaler=None,
         y_scalers=None, # train will fit the scalers
         scale_targets=args.scale_targets,
+        decomposition_scale_mode=decomposition_scale_mode,
+        residual=(prediction_head == "env_residual"),
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=None,
@@ -262,6 +298,8 @@ def main():
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        decomposition_scale_mode=decomposition_scale_mode,
+        residual=(prediction_head == "env_residual"),
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
@@ -343,6 +381,8 @@ def main():
             scaler=env_scaler,
             y_scalers=y_scalers,
             scale_targets=args.scale_targets,
+            decomposition_scale_mode=decomposition_scale_mode,
+            residual=(prediction_head == "env_residual"),
             g_input_type=g_input_type,
             env_categorical_mode=env_categorical_mode,
             marker_stats=marker_stats,
@@ -379,6 +419,7 @@ def main():
                     dropout=args.dropout,
                     n_env_fts=train_ds.n_env_fts,
                     calibration_mode=calibration_mode,
+                    prediction_head=prediction_head,
                     use_parent_embeddings=use_parent_embeddings,
                     use_dual_channel=use_dual_channel,
                     n_parents=train_ds.n_parents)
@@ -432,7 +473,8 @@ def main():
         print(f"[CONFIG] n_embd={config.n_embd}, n_gxe_layer={config.n_gxe_layer}, "
               f"n_head={config.n_head}, dropout={config.dropout}, "
               f"full_transformer={args.full_transformer}, calibration_mode={calibration_mode}, "
-              f"parent_tokens={use_parent_embeddings}, dual_channel={use_dual_channel}")
+              f"prediction_head={prediction_head}, parent_tokens={use_parent_embeddings}, "
+              f"dual_channel={use_dual_channel}")
     model = DDP(model,
                 device_ids=[local_rank],
                 output_device=local_rank,
@@ -622,6 +664,10 @@ def main():
                              "contrastive_ramp_epochs": contrastive_ramp_epochs,
                              "use_parent_embeddings": use_parent_embeddings,
                              "use_dual_channel": use_dual_channel,
+                             "prediction_head": prediction_head,
+                             "decomposition_scale_mode": decomposition_scale_mode,
+                             "env_mean_loss_weight": env_mean_loss_weight,
+                             "env_total_huber_weight": env_total_huber_weight,
                              "n_parents": train_ds.n_parents},
                              allow_val_change=True)
         for name in loss_function.names:
@@ -648,6 +694,11 @@ def main():
             run.define_metric("train_loss/cal_huber", step_metric="iter_num")
             run.define_metric("val_loss/total_env_avg_pearson", step_metric="epoch")
             run.define_metric("val_loss/total_env_mse", step_metric="epoch")
+        if prediction_head == "env_residual":
+            run.define_metric("train_loss/env_mean_huber", step_metric="iter_num")
+            run.define_metric("train_loss/total_huber", step_metric="iter_num")
+            run.define_metric("val_loss/env_mean_huber", step_metric="epoch")
+            run.define_metric("val_loss/total_huber", step_metric="epoch")
         if proxy_val_loader is not None:
             run.define_metric("val_proxy/loss", step_metric="epoch")
             run.define_metric("val_proxy/env_avg_pearson", step_metric="epoch")
@@ -725,10 +776,18 @@ def main():
             
             for k, v in xb.items():
                 xb[k] = v.to(device, non_blocking=True)
-            y_true = yb["y"].to(device, non_blocking=True).float()
+            if prediction_head == "env_residual":
+                y_rank = yb["resid"].to(device, non_blocking=True).float()
+                y_total = yb["total"].to(device, non_blocking=True).float()
+                y_env_mean = yb["ymean"].to(device, non_blocking=True).float()
+            else:
+                y_rank = yb["y"].to(device, non_blocking=True).float()
+                y_total = y_rank
+                y_env_mean = None
             env_id = yb["env_id"].to(device, non_blocking=True).long()
             if debug_probe and step_idx == 0:
-                _debug_sync_probe(debug_probe, rank, "batch_on_device/y_true", y_true)
+                _debug_sync_probe(debug_probe, rank, "batch_on_device/y_rank", y_rank)
+                _debug_sync_probe(debug_probe, rank, "batch_on_device/y_total", y_total)
                 _debug_sync_probe(debug_probe, rank, "batch_on_device/env_id", env_id.float())
 
             # fwd/bwd pass
@@ -765,15 +824,26 @@ def main():
                 if debug_probe and step_idx == 0:
                     _debug_sync_probe(True, rank, "rank_pred", rank_pred)
                     _debug_sync_probe(True, rank, "total_pred", total_pred)
-                loss_total, loss_parts = loss_function(rank_pred, y_true, env_id=env_id)
+                loss_total, loss_parts = loss_function(rank_pred, y_rank, env_id=env_id)
+                if prediction_head == "env_residual":
+                    auxiliary, auxiliary_parts = env_residual_auxiliary_loss(
+                        preds,
+                        total_target=y_total,
+                        env_mean_target=y_env_mean,
+                        env_id=env_id,
+                        env_mean_weight=env_mean_loss_weight,
+                        total_weight=env_total_huber_weight,
+                    )
+                    loss_total = loss_total + auxiliary
+                    loss_parts.update(auxiliary_parts)
                 if calibration_enabled and cal_weight > 0.0:
                     if envccc_weight:
-                        cal_envccc = envwise_ccc(total_pred, y_true, env_id=env_id)
+                        cal_envccc = envwise_ccc(total_pred, y_total, env_id=env_id)
                         loss_total = loss_total + cal_weight * float(envccc_weight) * cal_envccc
                         loss_parts["cal_envccc"] = float(cal_envccc.detach().item())
                         loss_parts["cal_envccc_weight_eff"] = cal_weight * float(envccc_weight)
                     if huber_weight:
-                        cal_huber = F.smooth_l1_loss(total_pred, y_true)
+                        cal_huber = F.smooth_l1_loss(total_pred, y_total)
                         loss_total = loss_total + cal_weight * float(huber_weight) * cal_huber
                         loss_parts["cal_huber"] = float(cal_huber.detach().item())
                         loss_parts["cal_huber_weight_eff"] = cal_weight * float(huber_weight)
@@ -898,26 +968,45 @@ def main():
                 validation metric with how eval.py computes test metrics."""
                 all_rank_preds = []
                 all_total_preds = []
-                all_targets = []
+                all_rank_targets = []
+                all_total_targets = []
+                all_env_mean_preds = []
+                all_env_mean_targets = []
                 all_env_ids = []
 
                 for i, (xb, yb) in enumerate(loader):
                     if (max_batches is not None) and (i >= max_batches):
                         break
                     xb = {k: v.to(device, non_blocking=True) for k, v in xb.items()}
-                    y_true = yb["y"].to(device, non_blocking=True).float()
+                    if prediction_head == "env_residual":
+                        y_rank = yb["resid"].to(device, non_blocking=True).float()
+                        y_total = yb["total"].to(device, non_blocking=True).float()
+                        y_env_mean = yb["ymean"].to(device, non_blocking=True).float()
+                    else:
+                        y_rank = yb["y"].to(device, non_blocking=True).float()
+                        y_total = y_rank
+                        y_env_mean = y_rank
                     env_id = yb["env_id"].to(device, non_blocking=True).long()
 
                     preds = model(xb)
                     total_pred, rank_pred = _prediction_tensors(preds)
                     all_rank_preds.append(rank_pred.squeeze(-1))
                     all_total_preds.append(total_pred.squeeze(-1))
-                    all_targets.append(y_true.squeeze(-1))
+                    all_rank_targets.append(y_rank.squeeze(-1))
+                    all_total_targets.append(y_total.squeeze(-1))
+                    if prediction_head == "env_residual":
+                        all_env_mean_preds.append(preds["env_mean"].squeeze(-1))
+                    else:
+                        all_env_mean_preds.append(total_pred.squeeze(-1))
+                    all_env_mean_targets.append(y_env_mean.squeeze(-1))
                     all_env_ids.append(env_id)
 
                 local_rank_preds = torch.cat(all_rank_preds) if all_rank_preds else torch.empty(0, device=device)
                 local_total_preds = torch.cat(all_total_preds) if all_total_preds else torch.empty(0, device=device)
-                local_targets = torch.cat(all_targets) if all_targets else torch.empty(0, device=device)
+                local_rank_targets = torch.cat(all_rank_targets) if all_rank_targets else torch.empty(0, device=device)
+                local_total_targets = torch.cat(all_total_targets) if all_total_targets else torch.empty(0, device=device)
+                local_env_mean_preds = torch.cat(all_env_mean_preds) if all_env_mean_preds else torch.empty(0, device=device)
+                local_env_mean_targets = torch.cat(all_env_mean_targets) if all_env_mean_targets else torch.empty(0, device=device)
                 local_env_ids = torch.cat(all_env_ids) if all_env_ids else torch.empty(0, dtype=torch.long, device=device)
 
                 # All-gather across DDP ranks
@@ -935,24 +1024,58 @@ def main():
 
                 full_rank_preds = _all_gather_flat(local_rank_preds)[:dataset_len]
                 full_total_preds = _all_gather_flat(local_total_preds)[:dataset_len]
-                full_targets = _all_gather_flat(local_targets)[:dataset_len]
+                full_rank_targets = _all_gather_flat(local_rank_targets)[:dataset_len]
+                full_total_targets = _all_gather_flat(local_total_targets)[:dataset_len]
+                full_env_mean_preds = _all_gather_flat(local_env_mean_preds)[:dataset_len]
+                full_env_mean_targets = _all_gather_flat(local_env_mean_targets)[:dataset_len]
                 full_env_ids = _all_gather_flat(local_env_ids.float()).long()[:dataset_len]
-                return full_total_preds, full_rank_preds, full_targets, full_env_ids
+                return (
+                    full_total_preds,
+                    full_rank_preds,
+                    full_total_targets,
+                    full_rank_targets,
+                    full_env_mean_preds,
+                    full_env_mean_targets,
+                    full_env_ids,
+                )
 
             def eval_loader(loader, dataset_len, max_batches=None):
                 """Compute validation metrics using gather-then-compute approach."""
-                full_total_preds, full_rank_preds, full_targets, full_env_ids = \
-                    _gather_predictions(loader, dataset_len, max_batches)
+                (
+                    full_total_preds,
+                    full_rank_preds,
+                    full_total_targets,
+                    full_rank_targets,
+                    full_env_mean_preds,
+                    full_env_mean_targets,
+                    full_env_ids,
+                ) = _gather_predictions(loader, dataset_len, max_batches)
 
-                ltot, lparts = loss_function(full_rank_preds, full_targets, env_id=full_env_ids)
+                ltot, lparts = loss_function(
+                    full_rank_preds, full_rank_targets, env_id=full_env_ids
+                )
+                if prediction_head == "env_residual":
+                    auxiliary, auxiliary_parts = env_residual_auxiliary_loss(
+                        {
+                            "total": full_total_preds,
+                            "env_mean": full_env_mean_preds,
+                        },
+                        total_target=full_total_targets,
+                        env_mean_target=full_env_mean_targets,
+                        env_id=full_env_ids,
+                        env_mean_weight=env_mean_loss_weight,
+                        total_weight=env_total_huber_weight,
+                    )
+                    ltot = ltot + auxiliary
+                    lparts.update(auxiliary_parts)
                 rank_env_pcc = macro_env_pearson(
-                    full_rank_preds, full_targets, full_env_ids, min_samples=2
+                    full_rank_preds, full_total_targets, full_env_ids, min_samples=2
                 )
                 total_env_pcc = macro_env_pearson(
-                    full_total_preds, full_targets, full_env_ids, min_samples=2
+                    full_total_preds, full_total_targets, full_env_ids, min_samples=2
                 )
                 total_env_mse = envwise_mse(
-                    full_total_preds, full_targets, full_env_ids, min_samples=2
+                    full_total_preds, full_total_targets, full_env_ids, min_samples=2
                 )
                 mean_parts = {k: float(v) for k, v in lparts.items()}
                 return (
@@ -1101,7 +1224,11 @@ def main():
                         "loss": args.loss,
                         "loss_weights": args.loss_weights,
                         "scale_targets": args.scale_targets,
+                        "decomposition_scale_mode": decomposition_scale_mode,
                         "calibration_mode": calibration_mode,
+                        "prediction_head": prediction_head,
+                        "env_mean_loss_weight": env_mean_loss_weight,
+                        "env_total_huber_weight": env_total_huber_weight,
                         "use_parent_embeddings": use_parent_embeddings,
                         "use_dual_channel": use_dual_channel,
                         "n_parents": train_ds.n_parents,

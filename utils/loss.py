@@ -154,6 +154,78 @@ def envwise_mse(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
     return per_env_mse.mean()
 
 
+def envwise_huber(pred, target, env_id, beta: float = 1.0, min_samples: int = 2):
+    """Return a macro SmoothL1 loss across environments."""
+    if beta <= 0:
+        raise ValueError(f"beta must be positive, got {beta}")
+    if min_samples < 1:
+        raise ValueError(f"min_samples must be positive, got {min_samples}")
+
+    if pred.ndim > 1:
+        pred = pred.squeeze(-1)
+    if target.ndim > 1:
+        target = target.squeeze(-1)
+
+    pred_f = pred.float()
+    target_f = target.to(device=pred_f.device, dtype=torch.float32)
+    env_id = env_id.to(device=pred_f.device, dtype=torch.long)
+    max_env = int(env_id.max().item()) + 1
+
+    def _accumulate(vec: torch.Tensor) -> torch.Tensor:
+        buf = vec.new_zeros(max_env)
+        return buf.scatter_add(0, env_id, vec)
+
+    per_sample = F.smooth_l1_loss(
+        pred_f,
+        target_f,
+        reduction="none",
+        beta=beta,
+    )
+    count = _accumulate(torch.ones_like(per_sample))
+    sum_loss = _accumulate(per_sample)
+    valid = count >= min_samples
+    if not valid.any():
+        return per_sample.mean()
+
+    return (sum_loss[valid] / count[valid]).mean()
+
+
+def env_residual_auxiliary_loss(
+    predictions,
+    *,
+    total_target,
+    env_mean_target,
+    env_id,
+    env_mean_weight: float = 1.0,
+    total_weight: float = 0.05,
+):
+    """Return the scale losses for the environment-residual head."""
+    if not isinstance(predictions, dict):
+        raise TypeError("env_residual predictions must be a dictionary")
+    missing = {"total", "env_mean"} - set(predictions)
+    if missing:
+        raise ValueError(f"env_residual predictions are missing {sorted(missing)}")
+    if env_mean_weight < 0 or total_weight < 0:
+        raise ValueError("env_residual auxiliary weights must be nonnegative")
+
+    env_mean_huber = envwise_huber(
+        predictions["env_mean"], env_mean_target, env_id=env_id
+    )
+    total_huber = envwise_huber(
+        predictions["total"], total_target, env_id=env_id
+    )
+    auxiliary = (
+        float(env_mean_weight) * env_mean_huber
+        + float(total_weight) * total_huber
+    )
+    return auxiliary, {
+        "env_mean_huber": float(env_mean_huber.detach().item()),
+        "env_mean_huber_weight_eff": float(env_mean_weight),
+        "total_huber": float(total_huber.detach().item()),
+        "total_huber_weight_eff": float(total_weight),
+    }
+
+
 def envwise_ccc(pred, target, env_id, eps: float = 1e-8, min_samples: int = 2):
     """
     Loss = 1 - macro-averaged Lin concordance correlation coefficient by environment.
@@ -944,6 +1016,8 @@ def build_loss(name: str, weights: str = None) -> CompositeLoss:
             return term, _CallableLoss(LocalSpearmanCorrLoss(dim=0), expects_env=False, name=term)
         if term == "envmse":
             return term, _CallableLoss(envwise_mse, expects_env=True, name=term)
+        if term == "envhuber":
+            return term, _CallableLoss(envwise_huber, expects_env=True, name=term)
         if term == "envccc":
             return term, _CallableLoss(envwise_ccc, expects_env=True, name=term)
         if term == "envpcc":
