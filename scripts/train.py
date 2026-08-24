@@ -34,9 +34,6 @@ from utils.utils import *
 from utils.utils import EnvStratifiedSampler, str2bool
 
 load_dotenv()
-os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
-os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
-os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
 
 def extract_master_addr():
     try:
@@ -231,6 +228,7 @@ def main():
         scaler=None,
         y_scalers=None, # train will fit the scalers
         scale_targets=args.scale_targets,
+        aggregate_cells=args.aggregate_cells,
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=None,
@@ -262,6 +260,7 @@ def main():
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        aggregate_cells=args.aggregate_cells,
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
@@ -343,6 +342,7 @@ def main():
             scaler=env_scaler,
             y_scalers=y_scalers,
             scale_targets=args.scale_targets,
+            aggregate_cells=args.aggregate_cells,
             g_input_type=g_input_type,
             env_categorical_mode=env_categorical_mode,
             marker_stats=marker_stats,

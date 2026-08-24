@@ -250,6 +250,7 @@ class GxE_Dataset(Dataset):
                  val_year: int | None = None,
                  y_scalers: Optional[Dict[str, LabelScaler]] = None,
                  scale_targets: bool = True,
+                 aggregate_cells: bool = False,
                  g_input_type: str = "tokens",
                  env_categorical_mode: str = "drop",
                  marker_stats: Optional[Dict[str, object]] = None,
@@ -278,6 +279,7 @@ class GxE_Dataset(Dataset):
             val_year (int|None): if not None and split=='val', filter to this year
             y_scalers (Optional[Dict[str, LabelScaler]]): if not None, use these scalers for y
             scale_targets (bool): if True, scale targets using y_scalers
+            aggregate_cells (bool): if True, average plot yields within each Hybrid x Env cell
             g_input_type (str): "tokens" for discrete marker tokens, "grm" for GRM-standardized marker features
             env_categorical_mode (str): "drop" (legacy baseline) or "onehot" categorical env handling
             marker_stats (Optional[Dict[str, object]]): train-fitted marker stats required for val/test in g_input_type='grm'
@@ -313,6 +315,7 @@ class GxE_Dataset(Dataset):
         self.proxy_disjoint_from_leo = bool(proxy_disjoint_from_leo)
         self.proxy_info: Optional[Dict[str, object]] = None
         self.scale_targets = scale_targets
+        self.aggregate_cells = bool(aggregate_cells)
         self.g_input_type = str(g_input_type).strip().lower()
         self.env_categorical_mode = normalize_env_categorical_mode(env_categorical_mode)
         if self.g_input_type not in {"tokens", "grm"}:
@@ -436,6 +439,16 @@ class GxE_Dataset(Dataset):
         ### FILTER/ALIGN X/Y BY MASK BUILT ON X ###
         x_filt = x_raw.loc[keep_mask.values].reset_index(drop=True)
         y_filt = y_raw.loc[keep_mask.values].reset_index(drop=True)
+
+        # Average plot yields for each Hybrid x Env cell.
+        if self.aggregate_cells:
+            cell_ids = x_filt['id'].astype(str)
+            cell_means = y_filt['Yield_Mg_ha'].groupby(cell_ids, sort=False).transform('mean')
+            keep_cell = ~cell_ids.duplicated()
+            x_filt = x_filt.loc[keep_cell].reset_index(drop=True)
+            y_filt = y_filt.loc[keep_cell].copy()
+            y_filt['Yield_Mg_ha'] = cell_means.loc[keep_cell].to_numpy()
+            y_filt = y_filt.reset_index(drop=True)
 
         # sanity check
         if len(x_filt) != len(y_filt):

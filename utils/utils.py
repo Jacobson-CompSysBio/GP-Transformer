@@ -84,6 +84,7 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.25)
     p.add_argument("--scale_targets", type=str2bool, default=False)
+    p.add_argument("--aggregate_cells", type=str2bool, default=False)
 
     p.add_argument("--loss", type=str, default="pcc",
                    help="composite loss string, e.g. 'mse+envpcc'")
@@ -191,6 +192,7 @@ def make_run_name(args) -> str:
     wg = "wg+" if args.wg and not full_transformer else ""
     res = "res+" if args.residual else ""
     strat = "strat+" if getattr(args, "env_stratified", False) else ""
+    cellmean = "cellmean+" if getattr(args, "aggregate_cells", False) else ""
     val_scheme = getattr(args, "val_scheme", None)
     if val_scheme is None:
         val_scheme = "leo" if getattr(args, "leo_val", False) else "year"
@@ -239,7 +241,7 @@ def make_run_name(args) -> str:
     else:
         gxe = ""
 
-    model_type = (full + g + e + ld + gxe + wg + res + strat + valtag + cal + parent + dual + contr + ginput + envcat).rstrip("+")
+    model_type = (full + g + e + ld + gxe + wg + res + strat + cellmean + valtag + cal + parent + dual + contr + ginput + envcat).rstrip("+")
 
     # optional contrastive hyperparameter tag
     contr_tag = ""
@@ -425,7 +427,7 @@ class EnvStratifiedSampler(Sampler[List[int]]):
         rank: Optional[int] = None,
         world_size: Optional[int] = None,
         drop_last: bool = False,
-        min_samples_per_env: int = 32,
+        min_samples_per_env: int = 16,
     ):
         self.batch_size = batch_size
         self.shuffle = shuffle

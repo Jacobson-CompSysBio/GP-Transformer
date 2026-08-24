@@ -96,6 +96,7 @@ def load_data(args,
         scaler=env_scaler,
         y_scalers=y_scalers,
         scale_targets=args.scale_targets,
+        aggregate_cells=args.aggregate_cells,
         g_input_type=g_input_type,
         env_categorical_mode=env_categorical_mode,
         marker_stats=marker_stats,
@@ -528,9 +529,6 @@ def main():
 
     # set up wand tracking
     load_dotenv()
-    os.environ["WANDB_PROJECT"] = os.getenv("WANDB_PROJECT")
-    os.environ["WANDB_ENTITY"] = os.getenv("WANDB_ENTITY")
-    os.environ["WANDB_API_KEY"] = os.getenv("WANDB_API_KEY")
 
     # resume the run from exported slurm id
     run_kwargs = dict(

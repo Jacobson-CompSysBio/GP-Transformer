@@ -47,7 +47,7 @@ export BATCH_SIZE=$MBS
 echo "Training with global batch size $GBS on $NGPUS GPUs (microbatch size $MBS)"
 
 export NUM_EPOCHS=3000
-export LR=8e-5
+export LR="${LR:-8e-5}"
 export WEIGHT_DECAY=1e-5
 export DROPOUT=0.15
 export EARLY_STOP=200
@@ -61,13 +61,14 @@ export HEADS=4
 export EMB_SIZE=256
 export SEED=1
 export SCALE_TARGETS=False
+export AGGREGATE_CELLS="${AGGREGATE_CELLS:-False}"
 export G_INPUT_TYPE=tokens    # options: "tokens", "grm"
 export ENV_CATEGORICAL_MODE=drop  # "drop" matches best baseline behavior; set "onehot" to include categorical env features
 
-export LOSS="mse" # + separated list of losses
+export LOSS="${LOSS:-mse}" # + separated list of losses
 export LOSS_WEIGHTS="1.0" # comma separated list of weights for each loss
 export ENV_STRATIFIED=True  # use environment-stratified batching for envpcc loss
-export MIN_SAMPLES_PER_ENV=32  # samples per environment per batch for stable correlation
+export MIN_SAMPLES_PER_ENV=16  # samples per environment per batch for stable correlation
 
 # Contrastive loss
 export CONTRASTIVE_MODE=e  # ablation: none, g, e, g+e
@@ -81,6 +82,7 @@ export ENV_CONTRASTIVE_TEMPERATURE=0.5
 # LEO (Leave-Environment-Out) validation
 export LEO_VAL=True
 export LEO_VAL_FRACTION=0.15
+export CHECKPOINT_TAG="${CHECKPOINT_TAG:-best_leo}"
 
 ### wandb settings ###
 export https_proxy=http://proxy.ccs.ornl.gov:3128
@@ -145,6 +147,7 @@ srun -N ${SLURM_NNODES} \
         --loss $LOSS \
         --loss_weights $LOSS_WEIGHTS \
         --scale_targets $SCALE_TARGETS \
+        --aggregate_cells $AGGREGATE_CELLS \
         --env_stratified $ENV_STRATIFIED \
         --min_samples_per_env $MIN_SAMPLES_PER_ENV \
         --contrastive_mode $CONTRASTIVE_MODE \
@@ -200,4 +203,6 @@ python -u scripts/eval.py \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --loss $LOSS \
     --loss_weights $LOSS_WEIGHTS \
-    --scale_targets $SCALE_TARGETS
+    --scale_targets $SCALE_TARGETS \
+    --aggregate_cells $AGGREGATE_CELLS \
+    --checkpoint_tag $CHECKPOINT_TAG

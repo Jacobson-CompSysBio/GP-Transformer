@@ -21,6 +21,27 @@ Each sample consists of:
 
 Data files are expected under `data/` following the `maize_data_*` directory structure with `X_train.csv`, `y_train.csv`, `X_test.csv`, `y_test.csv`.
 
+## PARaBra Python reproduction
+
+The Python path fits full-rank MegaSEM on the raw 2014-2023 competition data.
+It tests PARaBra and a fixed transformer ensemble on the 2024 observed values.
+
+The model uses all 2,425 markers. It uses marker mean imputation and the author `EigenGAU` kernel with `phi=1`.
+The model averages historical environment scores by the first two `Env` characters.
+The ensemble uses an equal mean of within-environment z-scores. It does not fit a weight on 2024.
+It uses the 9,486 rows common to the observed values and the frozen transformer predictions.
+The PARaBra submission still contains all 10,057 template rows.
+
+Submit the PARaBra fit and score the fixed ensemble:
+
+```bash
+sbatch parabra.slurm
+```
+
+The launcher reads the frozen transformer score file from job 4968492 by default.
+Set `TRANSFORMER_PREDICTIONS` to use a different score file.
+The launcher writes predictions, metrics, fit values, hashes, and the run manifest under `data/results/parabra/` in the main worktree.
+
 ## Architecture
 
 ### Model Variants
